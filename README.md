@@ -385,11 +385,11 @@ A **modular** Python FastAPI project with multiple blueprint files:
 - Uses `@` references between blueprints for dependencies
 
 ### 2. CLI Todo Application (`examples/cli-todo/`)
-A **modular** command-line app with no external dependencies:
+A **simple** command-line app with no external dependencies:
 - `main.md` - Entry point and command routing
-- `storage.todos.md` - JSON file persistence
-- `commands.*.md` - Individual command implementations
-- `utils.*.md` - Shared utilities for parsing and display
+- `app.md` - Todo storage and core operations
+- `commands.md` - All command implementations
+- `utils.md` - Parsing and display utilities
 - Works in Python, JavaScript, Go, Rust, C, and C++
 
 See the [examples directory](examples/) for the complete blueprints and [.github/workflows](.github/workflows) for automated generation workflows.

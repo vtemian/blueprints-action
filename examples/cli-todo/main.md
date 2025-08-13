@@ -1,22 +1,23 @@
 # main
 
-CLI Todo application with no external dependencies.
+CLI Todo application entry point.
 
-Dependencies: none (standard library only)
+Dependencies: @app, @commands, sys/process
 
 Requirements:
-- Command-line argument parsing without external libraries
-- Support commands: add, list, done, remove, update, search, stats, clear, help
-- Store todos in ~/.todos.json file
-- Handle all errors gracefully
-
-Entry point:
-- Parse command and arguments from sys.argv (Python) or process.argv (Node.js)
+- Parse command from arguments (sys.argv or process.argv)
 - Route to appropriate command handler
-- Display results or errors
-- Exit with appropriate code (0 for success, 1 for error)
+- Handle errors gracefully
+- Exit with appropriate code (0 success, 1 error)
 
 Command routing:
-- Use simple if/elif or switch statement
-- Show help if no command or invalid command
-- Pass remaining arguments to command handler
+- "add" → commands.add()
+- "list" → commands.list()
+- "done" → commands.done()
+- "remove" → commands.remove()
+- "help" or no args → commands.help()
+
+Error handling:
+- Invalid command: show help
+- Missing arguments: show command usage
+- File errors: display clear message
