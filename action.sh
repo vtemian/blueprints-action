@@ -154,7 +154,22 @@ main() {
         log "Generating full project from $SRC_DIR..."
         
         # Build command for project generation
-        CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_DIR\" --output-dir \"$OUTPUT_DIR\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
+        # Note: generate-project doesn't have --output-dir, it generates in current directory
+        # So we need to change to output dir and use absolute path for source
+        mkdir -p "$OUTPUT_DIR"
+        ORIGINAL_DIR=$(pwd)
+        cd "$OUTPUT_DIR"
+        
+        # Use absolute path for source directory
+        if [[ "$SRC_DIR" = /* ]]; then
+            # Already absolute
+            SRC_PATH="$SRC_DIR"
+        else
+            # Make it absolute
+            SRC_PATH="$ORIGINAL_DIR/$SRC_DIR"
+        fi
+        
+        CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
         
         # Add quality improvement options
         if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
@@ -180,10 +195,14 @@ main() {
             error "✗ Failed to generate project from: $SRC_DIR"
             
             if [ "$FAIL_ON_ERROR" == "true" ]; then
+                cd "$ORIGINAL_DIR"
                 error "Stopping due to generation failure (fail-on-error=true)"
                 exit 1
             fi
         fi
+        
+        # Return to original directory
+        cd "$ORIGINAL_DIR"
     fi
     
     # Summary
@@ -228,13 +247,25 @@ main() {
             log "Re-generating code in commit branch..."
             
             # Always regenerate the full project in commit branch
-            CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_DIR\" --output-dir \"$OUTPUT_DIR\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
+            mkdir -p "$OUTPUT_DIR"
+            REGEN_ORIGINAL_DIR=$(pwd)
+            cd "$OUTPUT_DIR"
+            
+            # Use absolute path for source directory
+            if [[ "$SRC_DIR" = /* ]]; then
+                SRC_PATH="$SRC_DIR"
+            else
+                SRC_PATH="$REGEN_ORIGINAL_DIR/$SRC_DIR"
+            fi
+            
+            CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
             if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
                 CMD="$CMD --quality-improvement --quality-iterations $QUALITY_ITERATIONS"
             else
                 CMD="$CMD --no-quality-improvement"
             fi
             eval "$CMD" >/dev/null 2>&1 || true
+            cd "$REGEN_ORIGINAL_DIR"
         fi
         
         # Add all generated files
