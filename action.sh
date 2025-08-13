@@ -117,7 +117,7 @@ main() {
             OUTPUT_PATH="$OUTPUT_DIR/${BASE_NAME}${EXT}"
             
             # Build command with optional parameters
-            CMD="uvx blueprints-md generate \"$file\" --output \"$OUTPUT_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --force --verbose"
+            CMD="uvx --from blueprints-md blueprints generate \"$file\" --output \"$OUTPUT_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --force --verbose"
             
             # Add quality improvement options
             if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
@@ -154,7 +154,7 @@ main() {
         log "Generating full project from $SRC_DIR..."
         
         # Build command for project generation
-        CMD="uvx blueprints-md generate-project \"$SRC_DIR\" --output-dir \"$OUTPUT_DIR\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
+        CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_DIR\" --output-dir \"$OUTPUT_DIR\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
         
         # Add quality improvement options
         if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
@@ -228,7 +228,7 @@ main() {
             log "Re-generating code in commit branch..."
             
             # Always regenerate the full project in commit branch
-            CMD="uvx blueprints-md generate-project \"$SRC_DIR\" --output-dir \"$OUTPUT_DIR\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
+            CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_DIR\" --output-dir \"$OUTPUT_DIR\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
             if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
                 CMD="$CMD --quality-improvement --quality-iterations $QUALITY_ITERATIONS"
             else
@@ -265,7 +265,7 @@ main() {
     # Set outputs
     echo "generated-files=$GENERATED_FILES" >> $GITHUB_OUTPUT
     
-    if [ $FAIL_COUNT -gt 0 ]; then
+    if [ "${FAIL_COUNT:-0}" -gt 0 ]; then
         echo "status=partial-success" >> $GITHUB_OUTPUT
         warning "Some files failed to generate: $FAILED_FILES"
     else
