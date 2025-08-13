@@ -377,12 +377,22 @@ The action automatically selects the appropriate generation strategy:
 This repository includes two complete example blueprints:
 
 ### 1. Task Management API (`examples/task-api/`)
-A **modular** Python FastAPI project with multiple blueprint files:
-- `models.task.md`, `models.category.md` - Data models with SQLAlchemy
-- `api.tasks.md`, `api.categories.md`, `api.stats.md` - REST endpoints
-- `services.validation.md`, `services.analytics.md` - Business logic
-- `main.md` - Application entry point
-- Uses `@` references between blueprints for dependencies
+A **modular** Python FastAPI project following the blueprints.md structure:
+```
+task-api/
+├── main.md           # Entry point
+├── app.md            # FastAPI app configuration
+├── api/
+│   ├── tasks.md      # Task endpoints
+│   └── users.md      # User authentication endpoints
+├── core/
+│   ├── database.md   # Database setup
+│   └── auth.md       # Authentication utilities
+└── models/
+    ├── task.md       # Task model
+    └── user.md       # User model
+```
+Uses `@` references between blueprints for clean dependencies
 
 ### 2. CLI Todo Application (`examples/cli-todo/`)
 A **simple** command-line app with no external dependencies:
