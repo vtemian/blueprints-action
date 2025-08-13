@@ -21,10 +21,14 @@ on:
 jobs:
   generate-task-api:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - name: Generate Task API
         uses: ./
@@ -33,27 +37,16 @@ jobs:
           src: 'examples/task-api'
           output-dir: './generated/task-api'
           language: ${{ github.event.inputs.language || 'python' }}
-          
-      - name: Upload generated code
-        uses: actions/upload-artifact@v4
-        if: success() || failure()
-        with:
-          name: task-api-${{ github.event.inputs.language || 'python' }}
-          path: |
-            ./generated/task-api
-            ./examples/task-api/**/*.py
-            ./examples/task-api/**/*.js
-            ./examples/task-api/**/*.ts
-            ./examples/task-api/**/*.go
-          if-no-files-found: warn
-          
-      - name: Display generated files
-        if: always()
+          auto-commit: true
+          commit-branch: 'generated-task-api-${{ github.event.inputs.language || 'python' }}'
+          base-branch: 'main'
+          commit-message: 'feat: generate Task API in ${{ github.event.inputs.language || 'python' }}'
+      
+      - name: Output branch info
         run: |
-          echo "Generated Task API files:"
-          echo "Checking output directory:"
-          if [ -d "./generated/task-api" ]; then
-            find ./generated/task-api -type f | head -20
-          fi
-          echo "Checking source directory for generated files:"
-          find ./examples/task-api -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" \) 2>/dev/null | head -20 || echo "No generated files found"
+          echo "Generated code has been committed to branch: generated-task-api-${{ github.event.inputs.language || 'python' }}"
+          echo "View the generated code at:"
+          echo "https://github.com/${{ github.repository }}/tree/generated-task-api-${{ github.event.inputs.language || 'python' }}"
+          echo ""
+          echo "To create a pull request, visit:"
+          echo "https://github.com/${{ github.repository }}/compare/main...generated-task-api-${{ github.event.inputs.language || 'python' }}"

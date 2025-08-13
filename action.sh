@@ -278,12 +278,23 @@ main() {
             else
                 CMD="$CMD --no-quality-improvement"
             fi
-            eval "$CMD" >/dev/null 2>&1 || true
+            log "Running: $CMD"
+            eval "$CMD" 2>&1 | tee /tmp/blueprint-regen.log || true
+            
+            # Check for errors in regeneration
+            if grep -q "error" /tmp/blueprint-regen.log; then
+                warning "Some errors occurred during regeneration, but continuing..."
+            fi
             cd "$REGEN_ORIGINAL_DIR"
         fi
         
         # Add all generated files
+        log "Adding generated files to git..."
         git add -A
+        
+        # Show what will be committed
+        log "Files to be committed:"
+        git status --short
         
         # Check if there are changes to commit
         if git diff --staged --quiet; then
