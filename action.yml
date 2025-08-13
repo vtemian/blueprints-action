@@ -10,10 +10,6 @@ inputs:
   api-key:
     description: 'Claude API key for code generation'
     required: true
-  mode:
-    description: 'Generation mode: "file" for individual files, "project" for full project structure'
-    required: false
-    default: 'project'
   src:
     description: 'Source directory containing blueprint markdown files'
     required: false
@@ -35,9 +31,9 @@ inputs:
     required: false
     default: '2'
   process-only-changed:
-    description: 'Only process changed files in PR/push'
+    description: 'Only process changed files in PR/push (uses file-by-file generation)'
     required: false
-    default: 'true'
+    default: 'false'
   auto-commit:
     description: 'Automatically commit generated code'
     required: false
@@ -84,7 +80,6 @@ runs:
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.api-key }}
-        MODE: ${{ inputs.mode }}
         SRC_DIR: ${{ inputs.src }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
         LANGUAGE: ${{ inputs.language }}

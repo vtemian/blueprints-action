@@ -5,8 +5,8 @@ A GitHub Action that automatically generates code from Blueprint markdown files 
 ## Features
 
 - 🚀 **Automatic Code Generation**: Generate production-ready code from markdown blueprints
-- 📦 **Project Generation**: Generate entire project structures with `generate-project` mode
-- 🔄 **Smart Change Detection**: Only process changed blueprint files in PRs and pushes
+- 📦 **Smart Mode Selection**: Automatically uses project generation or file-by-file based on context
+- 🔄 **Change Detection**: Process only changed files in PRs when `process-only-changed` is enabled
 - 🤖 **AI-Powered**: Uses Claude AI to understand requirements and generate code
 - 📁 **Flexible Output**: Configure where generated code is placed
 - 🔧 **Auto-Commit**: Optionally commit generated code automatically
@@ -78,13 +78,12 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `api-key` | Claude API key for code generation | ✅ | - |
-| `mode` | Generation mode: `project` for full project, `file` for individual files | ❌ | `project` |
 | `src` | Source directory containing blueprint markdown files | ❌ | `.` |
 | `output-dir` | Directory where generated code will be placed | ❌ | `./` |
 | `language` | Target programming language (python, javascript, typescript, etc.) | ❌ | `python` |
 | `quality-improvement` | Enable iterative quality improvement | ❌ | `true` |
 | `quality-iterations` | Maximum quality improvement iterations | ❌ | `2` |
-| `process-only-changed` | Only process changed files in PR/push (file mode only) | ❌ | `true` |
+| `process-only-changed` | Only process changed files in PR/push | ❌ | `false` |
 | `auto-commit` | Automatically commit generated code | ❌ | `false` |
 | `commit-branch` | Branch to commit generated code to (e.g., `generated`, `gh-pages`) | ❌ | - |
 | `base-branch` | Base branch for the commit branch (defaults to current) | ❌ | - |
@@ -150,9 +149,9 @@ jobs:
 
 ## Examples
 
-### Project Generation Mode (Default)
+### Full Project Generation (Default)
 
-Generate an entire project structure from all blueprints in a directory:
+Generate an entire project structure from all blueprints:
 
 ```yaml
 name: Generate Project
@@ -172,17 +171,17 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          mode: 'project'  # Generate entire project structure
           src: 'blueprints'
           output-dir: './generated'
+          # process-only-changed: false (default) - generates full project
 ```
 
-### File-by-File Mode
+### Process Only Changed Files in PRs
 
-Process blueprints individually (useful for incremental updates):
+Incrementally update only changed files (useful for PRs):
 
 ```yaml
-name: Generate Files
+name: Generate Changed Files
 
 on:
   pull_request:
@@ -195,12 +194,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Required for change detection
       
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          mode: 'file'  # Process files individually
           src: 'specs'
           output-dir: './src'
           process-only-changed: true  # Only process changed files
@@ -230,7 +228,6 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          mode: 'project'
           src: 'specs'
           output-dir: './src'
           auto-commit: true
@@ -335,25 +332,25 @@ jobs:
           src: ${{ github.event.inputs.src-directory }}
 ```
 
-## Generation Modes
+## How It Works
 
-### Project Mode (`mode: 'project'`)
-- **Default mode** - Generates a complete project structure
-- Processes all blueprint files together for consistency
-- Understands relationships between blueprints
-- Creates proper project organization with imports/dependencies
-- Best for: Initial project setup, complete regeneration
+The action automatically selects the appropriate generation strategy:
 
-### File Mode (`mode: 'file'`)
-- Processes each blueprint file independently
-- Supports change detection (`process-only-changed`)
-- Faster for incremental updates
-- Each file gets its own output based on language extension
-- Best for: Quick iterations, PR-based workflows, individual component updates
+### When `process-only-changed: false` (default)
+- Uses `generate-project` command to process all blueprints together
+- Generates a complete, coherent project structure
+- Understands relationships and dependencies between files
+- Best for: Initial setup, full regeneration, production builds
+
+### When `process-only-changed: true`
+- Only processes files changed in the current PR or commit
+- Uses individual `generate` commands for each changed file
+- Faster incremental updates
+- Best for: PR workflows, quick iterations, development
 
 ## Blueprint File Format
 
-Blueprint files are markdown files that describe what code should be generated. In file mode, the generated file will have the same base name as the blueprint with the appropriate language extension (e.g., `api.md` → `api.py` for Python, `api.ts` for TypeScript).
+Blueprint files are markdown files that describe what code should be generated. When processing individual files, the generated file will have the same base name as the blueprint with the appropriate language extension (e.g., `api.md` → `api.py` for Python, `api.ts` for TypeScript).
 
 Blueprints can include:
 
