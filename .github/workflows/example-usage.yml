@@ -1,0 +1,54 @@
+name: Generate Code from Blueprints
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'blueprints/**/*.md'
+  pull_request:
+    paths:
+      - 'blueprints/**/*.md'
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for getting proper diff
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate code from blueprints
+        uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          blueprint-files: 'blueprints/**/*.md'
+          output-dir: './src'
+          process-only-changed: true
+          auto-commit: true
+          commit-message: 'feat: auto-generate code from blueprints'
+          fail-on-error: false
+
+      - name: Create Pull Request
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'feat: auto-generate code from blueprints'
+          title: 'Auto-generated code from blueprints'
+          body: |
+            This PR contains auto-generated code from blueprint markdown files.
+            
+            **Generated files:**
+            ${{ steps.generate.outputs.generated-files }}
+            
+            Please review the generated code before merging.
+          branch: auto-generated-code
+          delete-branch: true

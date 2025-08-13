@@ -1,0 +1,37 @@
+name: Test Blueprints Action
+
+on:
+  push:
+    paths:
+      - 'blueprints/**/*.md'
+      - 'action.yml'
+      - 'action.sh'
+      - '.github/workflows/test.yml'
+  pull_request:
+    paths:
+      - 'blueprints/**/*.md'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper diff
+
+      - name: Generate code from blueprints
+        uses: ./
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          blueprint-files: 'blueprints/**/*.md'
+          output-dir: './generated'
+          process-only-changed: true
+          auto-commit: false
+          fail-on-error: true
+
+      - name: Check generated files
+        run: |
+          if [ -d "./generated" ]; then
+            echo "Generated files:"
+            find ./generated -type f -name "*.py" -o -name "*.js" -o -name "*.ts"
+          fi

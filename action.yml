@@ -1,0 +1,70 @@
+name: 'Blueprints MD Code Generator'
+description: 'Generate code from Blueprint markdown files using blueprints.md'
+author: 'blueprints-action'
+
+branding:
+  icon: 'code'
+  color: 'blue'
+
+inputs:
+  api-key:
+    description: 'Claude API key for code generation'
+    required: true
+  blueprint-files:
+    description: 'Pattern for blueprint files to process (e.g., "blueprints/**/*.md")'
+    required: false
+    default: 'blueprints/**/*.md'
+  output-dir:
+    description: 'Directory where generated code will be placed'
+    required: false
+    default: './'
+  process-only-changed:
+    description: 'Only process changed files in PR/push'
+    required: false
+    default: 'true'
+  auto-commit:
+    description: 'Automatically commit generated code'
+    required: false
+    default: 'false'
+  commit-message:
+    description: 'Commit message for generated code'
+    required: false
+    default: 'chore: generate code from blueprints'
+  fail-on-error:
+    description: 'Fail the action if code generation fails'
+    required: false
+    default: 'true'
+
+outputs:
+  generated-files:
+    description: 'List of generated files'
+    value: ${{ steps.generate.outputs.generated-files }}
+  status:
+    description: 'Generation status'
+    value: ${{ steps.generate.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python and uv
+      shell: bash
+      run: |
+        # Install uv if not already available
+        if ! command -v uv &> /dev/null; then
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        fi
+
+    - name: Generate code from blueprints
+      id: generate
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.api-key }}
+        BLUEPRINT_FILES: ${{ inputs.blueprint-files }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        PROCESS_ONLY_CHANGED: ${{ inputs.process-only-changed }}
+        AUTO_COMMIT: ${{ inputs.auto-commit }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+      run: |
+        ${{ github.action_path }}/action.sh
