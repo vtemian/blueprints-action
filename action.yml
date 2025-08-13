@@ -10,10 +10,10 @@ inputs:
   api-key:
     description: 'Claude API key for code generation'
     required: true
-  blueprint-files:
-    description: 'Pattern for blueprint files to process (e.g., "blueprints/**/*.md")'
+  src:
+    description: 'Source directory containing blueprint markdown files'
     required: false
-    default: 'blueprints/**/*.md'
+    default: '.'
   output-dir:
     description: 'Directory where generated code will be placed'
     required: false
@@ -72,7 +72,7 @@ runs:
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.api-key }}
-        BLUEPRINT_FILES: ${{ inputs.blueprint-files }}
+        SRC_DIR: ${{ inputs.src }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
         LANGUAGE: ${{ inputs.language }}
         QUALITY_IMPROVEMENT: ${{ inputs.quality-improvement }}

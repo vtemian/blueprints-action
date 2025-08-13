@@ -3,13 +3,13 @@ name: Test Blueprints Action
 on:
   push:
     paths:
-      - 'blueprints/**/*.md'
+      - 'examples/**/*.md'
       - 'action.yml'
       - 'action.sh'
       - '.github/workflows/test.yml'
   pull_request:
     paths:
-      - 'blueprints/**/*.md'
+      - 'examples/**/*.md'
 
 jobs:
   test:
@@ -23,7 +23,7 @@ jobs:
         uses: ./
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          blueprint-files: 'blueprints/**/*.md'
+          src: 'examples'
           output-dir: './generated'
           process-only-changed: true
           auto-commit: false

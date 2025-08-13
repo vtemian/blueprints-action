@@ -21,7 +21,7 @@ name: Generate Code
 on:
   push:
     paths:
-      - 'blueprints/**/*.md'
+      - '*.md'  # or your source directory
 
 jobs:
   generate:
@@ -32,6 +32,7 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: '.'  # Process .md files in root directory
 ```
 
 ### Advanced Configuration
@@ -43,10 +44,10 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'blueprints/**/*.md'
+      - 'specs/**/*.md'
   pull_request:
     paths:
-      - 'blueprints/**/*.md'
+      - 'specs/**/*.md'
 
 jobs:
   generate:
@@ -62,8 +63,9 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          blueprint-files: 'docs/blueprints/**/*.md'
+          src: 'specs'  # Look for .md files in specs directory
           output-dir: './src/generated'
+          language: 'typescript'
           process-only-changed: true
           auto-commit: true
           commit-message: 'chore: regenerate code from blueprints'
@@ -75,7 +77,7 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `api-key` | Claude API key for code generation | ✅ | - |
-| `blueprint-files` | Pattern for blueprint files to process | ❌ | `blueprints/**/*.md` |
+| `src` | Source directory containing blueprint markdown files | ❌ | `.` |
 | `output-dir` | Directory where generated code will be placed | ❌ | `./` |
 | `language` | Target programming language (python, javascript, typescript, etc.) | ❌ | `python` |
 | `quality-improvement` | Enable iterative quality improvement | ❌ | `true` |
@@ -102,17 +104,9 @@ Add your Anthropic API key to your repository secrets:
 2. Add a new secret named `ANTHROPIC_API_KEY`
 3. Paste your Claude API key
 
-### 2. Create Blueprint Directory
+### 2. Create Your First Blueprint
 
-Create a `blueprints/` directory in your repository:
-
-```bash
-mkdir blueprints
-```
-
-### 3. Write Your First Blueprint
-
-Create a blueprint file `blueprints/api.md`:
+Create a blueprint markdown file in your repository (e.g., `api.md`, `specs/user-service.md`, etc.):
 
 ```markdown
 # User API
@@ -127,7 +121,7 @@ Create a REST API for user management with the following endpoints:
 Use Express.js and include validation and error handling.
 ```
 
-### 4. Add Workflow
+### 3. Add Workflow
 
 Create `.github/workflows/blueprints.yml`:
 
@@ -137,7 +131,7 @@ name: Generate Code
 on:
   push:
     paths:
-      - 'blueprints/**/*.md'
+      - '**/*.md'
 
 jobs:
   generate:
@@ -147,6 +141,7 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: '.'  # or 'specs', 'blueprints', etc.
 ```
 
 ## Examples
@@ -167,7 +162,7 @@ jobs:
 on:
   pull_request:
     paths:
-      - 'blueprints/**/*.md'
+      - 'docs/**/*.md'
 
 jobs:
   generate:
@@ -180,6 +175,7 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'docs'
           process-only-changed: true
 ```
 
@@ -211,10 +207,10 @@ jobs:
 on:
   workflow_dispatch:
     inputs:
-      blueprint-pattern:
-        description: 'Blueprint file pattern'
+      src-directory:
+        description: 'Source directory for blueprints'
         required: false
-        default: 'blueprints/**/*.md'
+        default: '.'
 
 jobs:
   generate:
@@ -225,7 +221,7 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          blueprint-files: ${{ github.event.inputs.blueprint-pattern }}
+          src: ${{ github.event.inputs.src-directory }}
 ```
 
 ## Blueprint File Format
@@ -270,17 +266,28 @@ Example blueprint:
 
 ### Organizing Blueprints
 
+You can organize your blueprint files however makes sense for your project:
+
 ```
-blueprints/
-├── api/
-│   ├── users.md
-│   ├── products.md
-│   └── orders.md
-├── frontend/
-│   ├── components.md
-│   └── pages.md
-└── database/
-    └── schema.md
+# Option 1: Root directory
+api.md
+user-service.md
+database-schema.md
+
+# Option 2: Specs directory
+specs/
+├── api.md
+├── user-service.md
+└── database-schema.md
+
+# Option 3: By feature
+features/
+├── auth/
+│   └── authentication.md
+├── users/
+│   └── user-management.md
+└── products/
+    └── product-catalog.md
 ```
 
 ### Change Detection

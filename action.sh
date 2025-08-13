@@ -20,24 +20,24 @@ warning() {
     echo -e "${YELLOW}[Blueprints Action WARNING]${NC} $1"
 }
 
-# Function to get changed files
+# Function to get changed markdown files in src directory
 get_changed_files() {
-    local pattern="$1"
+    local src_dir="$1"
     
     if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
         # For PRs, get files changed between base and head
-        git diff --name-only --diff-filter=AMR "$GITHUB_BASE_REF...$GITHUB_HEAD_REF" | grep -E "$pattern" || true
+        git diff --name-only --diff-filter=AMR "$GITHUB_BASE_REF...$GITHUB_HEAD_REF" | grep "^${src_dir}/.*\.md$" || true
     elif [ "$GITHUB_EVENT_NAME" == "push" ]; then
         # For pushes, get files changed in the commit
         if [ -n "$GITHUB_BEFORE" ] && [ "$GITHUB_BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            git diff --name-only --diff-filter=AMR "$GITHUB_BEFORE..$GITHUB_SHA" | grep -E "$pattern" || true
+            git diff --name-only --diff-filter=AMR "$GITHUB_BEFORE..$GITHUB_SHA" | grep "^${src_dir}/.*\.md$" || true
         else
-            # First commit or force push - process all matching files
-            find . -type f -name "*.md" | grep -E "$pattern" || true
+            # First commit or force push - process all markdown files in src
+            find "$src_dir" -type f -name "*.md" 2>/dev/null || true
         fi
     else
-        # For other events, process all matching files
-        find . -type f -name "*.md" | grep -E "$pattern" || true
+        # For other events, process all markdown files in src
+        find "$src_dir" -type f -name "*.md" 2>/dev/null || true
     fi
 }
 
@@ -52,7 +52,7 @@ main() {
     fi
     
     # Set defaults
-    BLUEPRINT_FILES="${BLUEPRINT_FILES:-blueprints/**/*.md}"
+    SRC_DIR="${SRC_DIR:-.}"
     OUTPUT_DIR="${OUTPUT_DIR:-.}"
     LANGUAGE="${LANGUAGE:-python}"
     QUALITY_IMPROVEMENT="${QUALITY_IMPROVEMENT:-true}"
@@ -62,16 +62,16 @@ main() {
     COMMIT_MESSAGE="${COMMIT_MESSAGE:-chore: generate code from blueprints}"
     FAIL_ON_ERROR="${FAIL_ON_ERROR:-true}"
     
-    # Convert glob pattern to regex for grep
-    PATTERN=$(echo "$BLUEPRINT_FILES" | sed 's/\*\*/\.\*/g' | sed 's/\*/[^\/]*/g')
+    # Normalize source directory path (remove trailing slash)
+    SRC_DIR="${SRC_DIR%/}"
     
     # Get files to process
     if [ "$PROCESS_ONLY_CHANGED" == "true" ] && [ -n "$GITHUB_EVENT_NAME" ]; then
-        log "Processing only changed files..."
-        FILES=$(get_changed_files "$PATTERN")
+        log "Processing only changed files in $SRC_DIR..."
+        FILES=$(get_changed_files "$SRC_DIR")
     else
-        log "Processing all blueprint files..."
-        FILES=$(find . -type f -path "./$BLUEPRINT_FILES" 2>/dev/null || true)
+        log "Processing all markdown files in $SRC_DIR..."
+        FILES=$(find "$SRC_DIR" -type f -name "*.md" 2>/dev/null || true)
     fi
     
     if [ -z "$FILES" ]; then

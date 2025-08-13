@@ -4,10 +4,10 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'blueprints/**/*.md'
+      - '**/*.md'
   pull_request:
     paths:
-      - 'blueprints/**/*.md'
+      - '**/*.md'
   workflow_dispatch:
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
         uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          blueprint-files: 'blueprints/**/*.md'
+          src: '.'  # Process markdown files in root
           output-dir: './src'
           process-only-changed: true
           auto-commit: true
