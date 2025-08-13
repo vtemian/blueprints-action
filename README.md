@@ -377,36 +377,84 @@ The action automatically selects the appropriate generation strategy:
 This repository includes two complete example blueprints:
 
 ### 1. Task Management API (`examples/task-api/`)
-A RESTful API for task management with:
-- Full CRUD operations for tasks and categories
-- Priority levels and due dates
-- Statistics endpoints
-- Database integration
-- Input validation and error handling
+A **modular** Python FastAPI project with multiple blueprint files:
+- `models.task.md`, `models.category.md` - Data models with SQLAlchemy
+- `api.tasks.md`, `api.categories.md`, `api.stats.md` - REST endpoints
+- `services.validation.md`, `services.analytics.md` - Business logic
+- `main.md` - Application entry point
+- Uses `@` references between blueprints for dependencies
 
 ### 2. CLI Todo Application (`examples/cli-todo/`)
-A command-line todo app that works without external dependencies:
-- Add, list, update, and remove todos
-- Priority levels and tags
-- Search and filter capabilities
-- JSON file storage
+A **modular** command-line app with no external dependencies:
+- `main.md` - Entry point and command routing
+- `storage.todos.md` - JSON file persistence
+- `commands.*.md` - Individual command implementations
+- `utils.*.md` - Shared utilities for parsing and display
 - Works in Python, JavaScript, Go, Rust, C, and C++
 
 See the [examples directory](examples/) for the complete blueprints and [.github/workflows](.github/workflows) for automated generation workflows.
 
-## Blueprint File Format
+## Blueprint Specification
 
-Blueprint files are markdown files that describe what code should be generated. When processing individual files, the generated file will have the same base name as the blueprint with the appropriate language extension (e.g., `api.md` → `api.py` for Python, `api.ts` for TypeScript).
+Blueprints use a natural language format for describing code modules that LLMs can understand and implement.
 
-Blueprints can include:
+### Format
 
-- High-level requirements
-- API specifications
-- Database schemas
-- Business logic descriptions
-- UI component specifications
+```markdown
+# [module.name]
 
-Example blueprint:
+[Brief description of what this module does]
+
+Dependencies: [libraries, @blueprint/references]
+
+Requirements:
+- [requirement 1]
+- [requirement 2]
+
+[Additional sections as needed]
+```
+
+### Blueprint References
+
+Reference other blueprints using `@` prefix:
+- `@models.user` - Reference another blueprint in the same directory
+- `@services.validation` - Reference a service blueprint
+- `@../shared/utils` - Relative path reference
+
+### Example Blueprint
+
+```markdown
+# api.products
+
+Product management REST API endpoints.
+
+Dependencies: fastapi, @models.product, @services.validation
+
+Requirements:
+- GET /products with search and pagination
+- POST/PUT/DELETE for admin product management
+- Include product images and categories
+- Validate all inputs
+- Return proper HTTP status codes
+```
+
+### Multi-file Projects
+
+For complex projects, use multiple blueprint files with references:
+
+```
+project/
+├── models.user.md
+├── models.task.md
+├── api.tasks.md
+├── api.auth.md
+├── services.validation.md
+└── main.md
+```
+
+Each file can reference others using `@` notation, creating a modular, maintainable architecture.
+
+### Original Example
 
 ```markdown
 # Authentication Service
