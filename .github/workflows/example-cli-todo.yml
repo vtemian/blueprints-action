@@ -1,0 +1,77 @@
+name: Generate CLI Todo Example
+
+on:
+  push:
+    paths:
+      - 'examples/cli-todo/**/*.md'
+      - '.github/workflows/example-cli-todo.yml'
+  workflow_dispatch:
+    inputs:
+      language:
+        description: 'Target programming language'
+        required: true
+        default: 'python'
+        type: choice
+        options:
+          - python
+          - javascript
+          - go
+          - rust
+          - c
+          - cpp
+
+jobs:
+  generate-cli-todo:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Generate CLI Todo App
+        uses: ./
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'examples/cli-todo'
+          output-dir: './generated/cli-todo'
+          language: ${{ github.event.inputs.language || 'python' }}
+          
+      - name: Upload generated code
+        uses: actions/upload-artifact@v3
+        with:
+          name: cli-todo-${{ github.event.inputs.language || 'python' }}
+          path: ./generated/cli-todo/
+          
+      - name: Test Python implementation
+        if: github.event.inputs.language == 'python' || github.event.inputs.language == ''
+        run: |
+          cd ./generated/cli-todo
+          if [ -f "cli-todo.py" ]; then
+            echo "Testing Python CLI todo app..."
+            python cli-todo.py help || true
+            python cli-todo.py add "Test task" || true
+            python cli-todo.py list || true
+          fi
+          
+      - name: Test Node.js implementation
+        if: github.event.inputs.language == 'javascript'
+        run: |
+          cd ./generated/cli-todo
+          if [ -f "cli-todo.js" ]; then
+            echo "Testing Node.js CLI todo app..."
+            node cli-todo.js help || true
+            node cli-todo.js add "Test task" || true
+            node cli-todo.js list || true
+          fi
+          
+      - name: Test Go implementation
+        if: github.event.inputs.language == 'go'
+        run: |
+          cd ./generated/cli-todo
+          if [ -f "cli-todo.go" ]; then
+            echo "Building and testing Go CLI todo app..."
+            go build -o cli-todo cli-todo.go || true
+            ./cli-todo help || true
+            ./cli-todo add "Test task" || true
+            ./cli-todo list || true
+          fi

@@ -1,0 +1,46 @@
+name: Generate Task API Example
+
+on:
+  push:
+    paths:
+      - 'examples/task-api/**/*.md'
+      - '.github/workflows/example-task-api.yml'
+  workflow_dispatch:
+    inputs:
+      language:
+        description: 'Target programming language'
+        required: true
+        default: 'python'
+        type: choice
+        options:
+          - python
+          - javascript
+          - typescript
+          - go
+
+jobs:
+  generate-task-api:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Generate Task API
+        uses: ./
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'examples/task-api'
+          output-dir: './generated/task-api'
+          language: ${{ github.event.inputs.language || 'python' }}
+          
+      - name: Upload generated code
+        uses: actions/upload-artifact@v3
+        with:
+          name: task-api-${{ github.event.inputs.language || 'python' }}
+          path: ./generated/task-api/
+          
+      - name: Display generated files
+        run: |
+          echo "Generated Task API files:"
+          find ./generated/task-api -type f -name "*.*" | head -20

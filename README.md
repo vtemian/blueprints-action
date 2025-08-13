@@ -14,6 +14,30 @@ A GitHub Action that automatically generates code from Blueprint markdown files 
 
 ## Quick Start
 
+### Try the Examples
+
+Generate the example CLI todo app in Python:
+
+```yaml
+name: Generate CLI Todo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: vtemian/blueprints-action@v2
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'examples/cli-todo'
+          output-dir: './generated'
+          language: 'python'
+```
+
 ### Basic Usage
 
 ```yaml
@@ -30,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: vtemian/blueprints-action@v1
+      - uses: vtemian/blueprints-action@v2
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           src: '.'  # Process .md files in root directory
@@ -347,6 +371,28 @@ The action automatically selects the appropriate generation strategy:
 - Uses individual `generate` commands for each changed file
 - Faster incremental updates
 - Best for: PR workflows, quick iterations, development
+
+## Example Blueprints
+
+This repository includes two complete example blueprints:
+
+### 1. Task Management API (`examples/task-api/`)
+A RESTful API for task management with:
+- Full CRUD operations for tasks and categories
+- Priority levels and due dates
+- Statistics endpoints
+- Database integration
+- Input validation and error handling
+
+### 2. CLI Todo Application (`examples/cli-todo/`)
+A command-line todo app that works without external dependencies:
+- Add, list, update, and remove todos
+- Priority levels and tags
+- Search and filter capabilities
+- JSON file storage
+- Works in Python, JavaScript, Go, Rust, C, and C++
+
+See the [examples directory](examples/) for the complete blueprints and [.github/workflows](.github/workflows) for automated generation workflows.
 
 ## Blueprint File Format
 
