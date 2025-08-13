@@ -38,9 +38,18 @@ jobs:
           
       - name: Upload generated code
         uses: actions/upload-artifact@v4
+        if: success() || failure()
         with:
           name: cli-todo-${{ github.event.inputs.language || 'python' }}
-          path: ./generated/cli-todo/
+          path: |
+            ./generated/cli-todo
+            ./examples/cli-todo/**/*.py
+            ./examples/cli-todo/**/*.js
+            ./examples/cli-todo/**/*.ts
+            ./examples/cli-todo/**/*.go
+            ./examples/cli-todo/**/*.c
+            ./examples/cli-todo/**/*.cpp
+          if-no-files-found: warn
           
       - name: Test Python implementation
         if: github.event.inputs.language == 'python' || github.event.inputs.language == ''

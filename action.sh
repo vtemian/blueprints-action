@@ -117,7 +117,7 @@ main() {
             OUTPUT_PATH="$OUTPUT_DIR/${BASE_NAME}${EXT}"
             
             # Build command with optional parameters
-            CMD="uvx --from blueprints-md blueprints generate \"$file\" --output \"$OUTPUT_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --force --verbose"
+            CMD="uvx blueprints-md generate \"$file\" --output \"$OUTPUT_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --force --verbose"
             
             # Add quality improvement options
             if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
@@ -142,6 +142,13 @@ main() {
                 FAIL_COUNT=$((FAIL_COUNT + 1))
                 error "✗ Failed to generate code from: $file"
                 FAILED_FILES="$FAILED_FILES$file "
+                
+                # Check for specific error types
+                if grep -q "credit balance is too low" /tmp/blueprint-output.log; then
+                    error "API credit balance is too low. Please add credits to your Anthropic account."
+                elif grep -q "401" /tmp/blueprint-output.log; then
+                    error "API authentication failed. Please check your ANTHROPIC_API_KEY."
+                fi
                 
                 if [ "$FAIL_ON_ERROR" == "true" ]; then
                     error "Stopping due to generation failure (fail-on-error=true)"
@@ -169,7 +176,7 @@ main() {
             SRC_PATH="$ORIGINAL_DIR/$SRC_DIR"
         fi
         
-        CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
+        CMD="uvx blueprints-md generate-project \"$SRC_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
         
         # Add quality improvement options
         if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
@@ -193,6 +200,13 @@ main() {
         else
             FAIL_COUNT=1
             error "✗ Failed to generate project from: $SRC_DIR"
+            
+            # Check for specific error types
+            if grep -q "credit balance is too low" /tmp/blueprint-output.log; then
+                error "API credit balance is too low. Please add credits to your Anthropic account."
+            elif grep -q "401" /tmp/blueprint-output.log; then
+                error "API authentication failed. Please check your ANTHROPIC_API_KEY."
+            fi
             
             if [ "$FAIL_ON_ERROR" == "true" ]; then
                 cd "$ORIGINAL_DIR"
@@ -258,7 +272,7 @@ main() {
                 SRC_PATH="$REGEN_ORIGINAL_DIR/$SRC_DIR"
             fi
             
-            CMD="uvx --from blueprints-md blueprints generate-project \"$SRC_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
+            CMD="uvx blueprints-md generate-project \"$SRC_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
             if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
                 CMD="$CMD --quality-improvement --quality-iterations $QUALITY_ITERATIONS"
             else

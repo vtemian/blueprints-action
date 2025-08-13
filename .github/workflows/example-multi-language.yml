@@ -27,9 +27,15 @@ jobs:
           
       - name: Upload generated code
         uses: actions/upload-artifact@v4
+        if: success() || failure()
         with:
           name: ${{ matrix.example }}-${{ matrix.language }}
-          path: ./generated/${{ matrix.example }}-${{ matrix.language }}/
+          path: |
+            ./generated/${{ matrix.example }}-${{ matrix.language }}
+            ./examples/${{ matrix.example }}/**/*.py
+            ./examples/${{ matrix.example }}/**/*.js
+            ./examples/${{ matrix.example }}/**/*.go
+          if-no-files-found: warn
           
   create-showcase-pr:
     needs: generate-matrix
