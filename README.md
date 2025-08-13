@@ -5,6 +5,7 @@ A GitHub Action that automatically generates code from Blueprint markdown files 
 ## Features
 
 - 🚀 **Automatic Code Generation**: Generate production-ready code from markdown blueprints
+- 📦 **Project Generation**: Generate entire project structures with `generate-project` mode
 - 🔄 **Smart Change Detection**: Only process changed blueprint files in PRs and pushes
 - 🤖 **AI-Powered**: Uses Claude AI to understand requirements and generate code
 - 📁 **Flexible Output**: Configure where generated code is placed
@@ -77,12 +78,13 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `api-key` | Claude API key for code generation | ✅ | - |
+| `mode` | Generation mode: `project` for full project, `file` for individual files | ❌ | `project` |
 | `src` | Source directory containing blueprint markdown files | ❌ | `.` |
 | `output-dir` | Directory where generated code will be placed | ❌ | `./` |
 | `language` | Target programming language (python, javascript, typescript, etc.) | ❌ | `python` |
 | `quality-improvement` | Enable iterative quality improvement | ❌ | `true` |
 | `quality-iterations` | Maximum quality improvement iterations | ❌ | `2` |
-| `process-only-changed` | Only process changed files in PR/push | ❌ | `true` |
+| `process-only-changed` | Only process changed files in PR/push (file mode only) | ❌ | `true` |
 | `auto-commit` | Automatically commit generated code | ❌ | `false` |
 | `commit-branch` | Branch to commit generated code to (e.g., `generated`, `gh-pages`) | ❌ | - |
 | `base-branch` | Base branch for the commit branch (defaults to current) | ❌ | - |
@@ -148,6 +150,62 @@ jobs:
 
 ## Examples
 
+### Project Generation Mode (Default)
+
+Generate an entire project structure from all blueprints in a directory:
+
+```yaml
+name: Generate Project
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'blueprints/**/*.md'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mode: 'project'  # Generate entire project structure
+          src: 'blueprints'
+          output-dir: './generated'
+```
+
+### File-by-File Mode
+
+Process blueprints individually (useful for incremental updates):
+
+```yaml
+name: Generate Files
+
+on:
+  pull_request:
+    paths:
+      - 'specs/**/*.md'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mode: 'file'  # Process files individually
+          src: 'specs'
+          output-dir: './src'
+          process-only-changed: true  # Only process changed files
+```
+
 ### Generate to Separate Branch (Recommended)
 
 Keep your blueprints in `main` and generated code in a `generated` branch:
@@ -172,6 +230,7 @@ jobs:
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mode: 'project'
           src: 'specs'
           output-dir: './src'
           auto-commit: true
@@ -276,9 +335,25 @@ jobs:
           src: ${{ github.event.inputs.src-directory }}
 ```
 
+## Generation Modes
+
+### Project Mode (`mode: 'project'`)
+- **Default mode** - Generates a complete project structure
+- Processes all blueprint files together for consistency
+- Understands relationships between blueprints
+- Creates proper project organization with imports/dependencies
+- Best for: Initial project setup, complete regeneration
+
+### File Mode (`mode: 'file'`)
+- Processes each blueprint file independently
+- Supports change detection (`process-only-changed`)
+- Faster for incremental updates
+- Each file gets its own output based on language extension
+- Best for: Quick iterations, PR-based workflows, individual component updates
+
 ## Blueprint File Format
 
-Blueprint files are markdown files that describe what code should be generated. The generated file will have the same base name as the blueprint with the appropriate language extension (e.g., `api.md` → `api.py` for Python, `api.ts` for TypeScript).
+Blueprint files are markdown files that describe what code should be generated. In file mode, the generated file will have the same base name as the blueprint with the appropriate language extension (e.g., `api.md` → `api.py` for Python, `api.ts` for TypeScript).
 
 Blueprints can include:
 
