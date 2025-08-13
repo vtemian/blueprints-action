@@ -59,6 +59,8 @@ main() {
     QUALITY_ITERATIONS="${QUALITY_ITERATIONS:-2}"
     PROCESS_ONLY_CHANGED="${PROCESS_ONLY_CHANGED:-true}"
     AUTO_COMMIT="${AUTO_COMMIT:-false}"
+    COMMIT_BRANCH="${COMMIT_BRANCH:-}"
+    BASE_BRANCH="${BASE_BRANCH:-}"
     COMMIT_MESSAGE="${COMMIT_MESSAGE:-chore: generate code from blueprints}"
     FAIL_ON_ERROR="${FAIL_ON_ERROR:-true}"
     
@@ -164,6 +166,66 @@ main() {
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         
+        # Handle commit branch workflow
+        if [ -n "$COMMIT_BRANCH" ]; then
+            # Save current branch
+            CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            
+            # Determine base branch
+            if [ -z "$BASE_BRANCH" ]; then
+                BASE_BRANCH="$CURRENT_BRANCH"
+            fi
+            
+            log "Switching to commit branch: $COMMIT_BRANCH (base: $BASE_BRANCH)"
+            
+            # Check if commit branch exists remotely
+            if git ls-remote --exit-code --heads origin "$COMMIT_BRANCH" >/dev/null 2>&1; then
+                # Branch exists, fetch and checkout
+                git fetch origin "$COMMIT_BRANCH"
+                git checkout -B "$COMMIT_BRANCH" "origin/$COMMIT_BRANCH"
+                
+                # Merge changes from base branch to get latest blueprints
+                log "Merging latest changes from $BASE_BRANCH..."
+                git merge "$BASE_BRANCH" --no-edit || true
+            else
+                # Branch doesn't exist, create from base
+                log "Creating new branch $COMMIT_BRANCH from $BASE_BRANCH..."
+                git checkout -b "$COMMIT_BRANCH" "$BASE_BRANCH"
+            fi
+            
+            # Re-run generation in the commit branch context
+            log "Re-generating code in commit branch..."
+            for file in $FILES; do
+                if [ -z "$file" ]; then
+                    continue
+                fi
+                
+                # Determine output path
+                BASE_NAME=$(basename "$file" .md)
+                case "$LANGUAGE" in
+                    python) EXT=".py" ;;
+                    javascript) EXT=".js" ;;
+                    typescript) EXT=".ts" ;;
+                    java) EXT=".java" ;;
+                    go) EXT=".go" ;;
+                    rust) EXT=".rs" ;;
+                    cpp|c++) EXT=".cpp" ;;
+                    c) EXT=".c" ;;
+                    *) EXT="" ;;
+                esac
+                OUTPUT_PATH="$OUTPUT_DIR/${BASE_NAME}${EXT}"
+                
+                # Build and run command
+                CMD="uvx blueprints-md generate \"$file\" --output \"$OUTPUT_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --force --verbose"
+                if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
+                    CMD="$CMD --quality-improvement --quality-iterations $QUALITY_ITERATIONS"
+                else
+                    CMD="$CMD --no-quality-improvement"
+                fi
+                eval "$CMD" >/dev/null 2>&1 || true
+            done
+        fi
+        
         # Add all generated files
         git add -A
         
@@ -174,8 +236,15 @@ main() {
             git commit -m "$COMMIT_MESSAGE"
             log "Changes committed"
             
-            # Push if we're not in a PR
-            if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            # Push the branch
+            if [ -n "$COMMIT_BRANCH" ]; then
+                git push -u origin "$COMMIT_BRANCH"
+                log "Changes pushed to branch: $COMMIT_BRANCH"
+                
+                # Switch back to original branch
+                git checkout "$CURRENT_BRANCH"
+                log "Switched back to branch: $CURRENT_BRANCH"
+            elif [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
                 git push
                 log "Changes pushed"
             fi

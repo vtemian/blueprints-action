@@ -84,6 +84,8 @@ jobs:
 | `quality-iterations` | Maximum quality improvement iterations | ❌ | `2` |
 | `process-only-changed` | Only process changed files in PR/push | ❌ | `true` |
 | `auto-commit` | Automatically commit generated code | ❌ | `false` |
+| `commit-branch` | Branch to commit generated code to (e.g., `generated`, `gh-pages`) | ❌ | - |
+| `base-branch` | Base branch for the commit branch (defaults to current) | ❌ | - |
 | `commit-message` | Commit message for generated code | ❌ | `chore: generate code from blueprints` |
 | `fail-on-error` | Fail the action if code generation fails | ❌ | `true` |
 
@@ -146,6 +148,37 @@ jobs:
 
 ## Examples
 
+### Generate to Separate Branch (Recommended)
+
+Keep your blueprints in `main` and generated code in a `generated` branch:
+
+```yaml
+name: Generate Code
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.md'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'specs'
+          output-dir: './src'
+          auto-commit: true
+          commit-branch: 'generated'  # Commit to 'generated' branch
+          base-branch: 'main'         # Based on 'main' branch
+```
+
 ### Generate TypeScript Code
 
 ```yaml
@@ -179,26 +212,45 @@ jobs:
           process-only-changed: true
 ```
 
-### Generate and Create PR
+### Generate and Create PR from Branch
 
 ```yaml
+name: Generate and PR
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'specs/**/*.md'
+
 jobs:
   generate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - uses: vtemian/blueprints-action@v1
-        id: generate
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          auto-commit: false
+          src: 'specs'
+          auto-commit: true
+          commit-branch: 'generated-${{ github.run_number }}'
           
-      - uses: peter-evans/create-pull-request@v5
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
         with:
+          base: main
+          head: 'generated-${{ github.run_number }}'
           title: 'Generated code from blueprints'
-          body: 'Auto-generated code from blueprint files'
-          branch: generated-code
+          body: |
+            Auto-generated code from blueprint markdown files.
+            
+            This PR was automatically created from blueprint changes.
 ```
 
 ### Manual Trigger
@@ -263,6 +315,27 @@ Example blueprint:
 ```
 
 ## Tips
+
+### Commit Branch Strategy
+
+Using a separate branch for generated code keeps your main branch clean and focused on blueprints:
+
+```yaml
+auto-commit: true
+commit-branch: 'generated'  # Generated code goes here
+base-branch: 'main'         # Based on main branch
+```
+
+Benefits:
+- **Clean separation**: Blueprints in `main`, generated code in `generated`
+- **Easy review**: See all generated changes in one branch
+- **Rollback friendly**: Can reset the generated branch without affecting blueprints
+- **Similar to static sites**: Like GitHub Pages with source and gh-pages branches
+
+Common patterns:
+- `generated` - Single branch for all generated code
+- `generated-${{ github.run_number }}` - Unique branch per run for PRs
+- `deploy/production` - For production-ready generated code
 
 ### Organizing Blueprints
 

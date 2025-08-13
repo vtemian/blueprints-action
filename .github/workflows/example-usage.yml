@@ -33,22 +33,30 @@ jobs:
           output-dir: './src'
           process-only-changed: true
           auto-commit: true
+          commit-branch: 'generated'  # Commit to separate branch
+          base-branch: 'main'
           commit-message: 'feat: auto-generate code from blueprints'
           fail-on-error: false
 
       - name: Create Pull Request
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: peter-evans/create-pull-request@v5
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: 'feat: auto-generate code from blueprints'
-          title: 'Auto-generated code from blueprints'
-          body: |
-            This PR contains auto-generated code from blueprint markdown files.
-            
-            **Generated files:**
-            ${{ steps.generate.outputs.generated-files }}
-            
-            Please review the generated code before merging.
-          branch: auto-generated-code
-          delete-branch: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --base main --head generated --state open --json number --jq '.[0].number' || echo "")
+          
+          if [ -z "$EXISTING_PR" ]; then
+            # Create new PR
+            gh pr create \
+              --base main \
+              --head generated \
+              --title "Auto-generated code from blueprints" \
+              --body "This PR contains auto-generated code from blueprint markdown files.
+              
+              Generated from commit: ${{ github.sha }}
+              
+              Please review the generated code before merging."
+          else
+            echo "PR #$EXISTING_PR already exists for generated branch"
+          fi

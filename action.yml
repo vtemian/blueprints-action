@@ -38,6 +38,14 @@ inputs:
     description: 'Automatically commit generated code'
     required: false
     default: 'false'
+  commit-branch:
+    description: 'Branch to commit generated code to (e.g., "generated", "gh-pages")'
+    required: false
+    default: ''
+  base-branch:
+    description: 'Base branch for the commit branch (defaults to current branch)'
+    required: false
+    default: ''
   commit-message:
     description: 'Commit message for generated code'
     required: false
@@ -79,6 +87,8 @@ runs:
         QUALITY_ITERATIONS: ${{ inputs.quality-iterations }}
         PROCESS_ONLY_CHANGED: ${{ inputs.process-only-changed }}
         AUTO_COMMIT: ${{ inputs.auto-commit }}
+        COMMIT_BRANCH: ${{ inputs.commit-branch }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
         COMMIT_MESSAGE: ${{ inputs.commit-message }}
         FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
       run: |
