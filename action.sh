@@ -54,6 +54,9 @@ main() {
     # Set defaults
     BLUEPRINT_FILES="${BLUEPRINT_FILES:-blueprints/**/*.md}"
     OUTPUT_DIR="${OUTPUT_DIR:-.}"
+    LANGUAGE="${LANGUAGE:-python}"
+    QUALITY_IMPROVEMENT="${QUALITY_IMPROVEMENT:-true}"
+    QUALITY_ITERATIONS="${QUALITY_ITERATIONS:-2}"
     PROCESS_ONLY_CHANGED="${PROCESS_ONLY_CHANGED:-true}"
     AUTO_COMMIT="${AUTO_COMMIT:-false}"
     COMMIT_MESSAGE="${COMMIT_MESSAGE:-chore: generate code from blueprints}"
@@ -95,16 +98,48 @@ main() {
         
         log "Processing: $file"
         
-        # Run blueprints-md using uvx
-        if uvx blueprints-md generate "$file" --output-dir "$OUTPUT_DIR" 2>&1 | tee /tmp/blueprint-output.log; then
+        # Determine output path based on the blueprint file name
+        # Keep the base name but change extension based on language
+        BASE_NAME=$(basename "$file" .md)
+        
+        # Determine file extension based on language
+        case "$LANGUAGE" in
+            python) EXT=".py" ;;
+            javascript) EXT=".js" ;;
+            typescript) EXT=".ts" ;;
+            java) EXT=".java" ;;
+            go) EXT=".go" ;;
+            rust) EXT=".rs" ;;
+            cpp|c++) EXT=".cpp" ;;
+            c) EXT=".c" ;;
+            *) EXT="" ;;  # Let blueprints-md decide
+        esac
+        
+        OUTPUT_PATH="$OUTPUT_DIR/${BASE_NAME}${EXT}"
+        
+        # Build command with optional parameters
+        CMD="uvx blueprints-md generate \"$file\" --output \"$OUTPUT_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --force --verbose"
+        
+        # Add quality improvement options
+        if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
+            CMD="$CMD --quality-improvement --quality-iterations $QUALITY_ITERATIONS"
+        else
+            CMD="$CMD --no-quality-improvement"
+        fi
+        
+        # Run blueprints-md using uvx with correct command structure
+        if eval "$CMD" 2>&1 | tee /tmp/blueprint-output.log; then
             SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
             log "✓ Successfully generated code from: $file"
             
             # Extract generated files from output if possible
-            # This assumes blueprints-md outputs the generated file paths
-            GENERATED=$(grep -E "Generated:|Created:|Written:" /tmp/blueprint-output.log | sed 's/.*: //' || true)
+            # Look for output file paths in verbose output
+            GENERATED=$(grep -E "Generated:|Created:|Written:|Output:" /tmp/blueprint-output.log | sed 's/.*: //' || true)
             if [ -n "$GENERATED" ]; then
                 GENERATED_FILES="$GENERATED_FILES$GENERATED\n"
+            else
+                # If no specific output found in logs, add the expected output path
+                GENERATED_FILES="$GENERATED_FILES$OUTPUT_PATH\n"
             fi
         else
             FAIL_COUNT=$((FAIL_COUNT + 1))

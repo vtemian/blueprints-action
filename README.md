@@ -77,6 +77,9 @@ jobs:
 | `api-key` | Claude API key for code generation | ✅ | - |
 | `blueprint-files` | Pattern for blueprint files to process | ❌ | `blueprints/**/*.md` |
 | `output-dir` | Directory where generated code will be placed | ❌ | `./` |
+| `language` | Target programming language (python, javascript, typescript, etc.) | ❌ | `python` |
+| `quality-improvement` | Enable iterative quality improvement | ❌ | `true` |
+| `quality-iterations` | Maximum quality improvement iterations | ❌ | `2` |
 | `process-only-changed` | Only process changed files in PR/push | ❌ | `true` |
 | `auto-commit` | Automatically commit generated code | ❌ | `false` |
 | `commit-message` | Commit message for generated code | ❌ | `chore: generate code from blueprints` |
@@ -148,6 +151,16 @@ jobs:
 
 ## Examples
 
+### Generate TypeScript Code
+
+```yaml
+- uses: vtemian/blueprints-action@v1
+  with:
+    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    language: typescript
+    output-dir: './src'
+```
+
 ### Generate on Pull Request
 
 ```yaml
@@ -217,7 +230,9 @@ jobs:
 
 ## Blueprint File Format
 
-Blueprint files are markdown files that describe what code should be generated. They can include:
+Blueprint files are markdown files that describe what code should be generated. The generated file will have the same base name as the blueprint with the appropriate language extension (e.g., `api.md` → `api.py` for Python, `api.ts` for TypeScript).
+
+Blueprints can include:
 
 - High-level requirements
 - API specifications
