@@ -38,25 +38,23 @@ jobs:
           commit-message: 'feat: auto-generate code from blueprints'
           fail-on-error: false
 
-      - name: Create Pull Request
+      - name: Push to generated branch
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if PR already exists
-          EXISTING_PR=$(gh pr list --base main --head generated --state open --json number --jq '.[0].number' || echo "")
+          echo "Generated code has been pushed to the 'generated' branch"
+          echo "You can create a PR manually by visiting:"
+          echo "https://github.com/${{ github.repository }}/compare/main...generated"
           
-          if [ -z "$EXISTING_PR" ]; then
-            # Create new PR
-            gh pr create \
-              --base main \
-              --head generated \
-              --title "Auto-generated code from blueprints" \
-              --body "This PR contains auto-generated code from blueprint markdown files.
-              
-              Generated from commit: ${{ github.sha }}
-              
-              Please review the generated code before merging."
-          else
-            echo "PR #$EXISTING_PR already exists for generated branch"
-          fi
+      # Alternative: Use peter-evans/create-pull-request action which handles permissions better
+      # Uncomment below if you want automatic PR creation
+      # - name: Create Pull Request
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   uses: peter-evans/create-pull-request@v5
+      #   with:
+      #     token: ${{ secrets.GITHUB_TOKEN }}
+      #     base: main
+      #     branch: generated-pr-${{ github.run_number }}
+      #     title: 'Auto-generated code from blueprints'
+      #     body: |
+      #       This PR contains auto-generated code from blueprint markdown files.
+      #       Generated from commit: ${{ github.sha }}

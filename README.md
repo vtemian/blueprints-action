@@ -292,10 +292,10 @@ jobs:
           process-only-changed: true
 ```
 
-### Generate and Create PR from Branch
+### Generate to Branch (with Manual PR)
 
 ```yaml
-name: Generate and PR
+name: Generate to Branch
 
 on:
   push:
@@ -308,30 +308,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       
-      - uses: vtemian/blueprints-action@v1
+      - uses: vtemian/blueprints-action@v2
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           src: 'specs'
           auto-commit: true
-          commit-branch: 'generated-${{ github.run_number }}'
+          commit-branch: 'generated'
           
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v5
-        with:
-          base: main
-          head: 'generated-${{ github.run_number }}'
-          title: 'Generated code from blueprints'
-          body: |
-            Auto-generated code from blueprint markdown files.
-            
-            This PR was automatically created from blueprint changes.
+      - name: Output PR URL
+        run: |
+          echo "View changes and create PR at:"
+          echo "https://github.com/${{ github.repository }}/compare/main...generated"
 ```
+
+> **Note**: GitHub Actions has restrictions on creating PRs with GITHUB_TOKEN. The generated code is pushed to a branch, and you can manually create a PR or use a Personal Access Token for automation.
 
 ### Manual Trigger
 
