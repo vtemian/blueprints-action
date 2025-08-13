@@ -35,7 +35,7 @@ jobs:
           language: ${{ github.event.inputs.language || 'python' }}
           
       - name: Upload generated code
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: task-api-${{ github.event.inputs.language || 'python' }}
           path: ./generated/task-api/

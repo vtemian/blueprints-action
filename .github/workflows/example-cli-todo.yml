@@ -37,7 +37,7 @@ jobs:
           language: ${{ github.event.inputs.language || 'python' }}
           
       - name: Upload generated code
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: cli-todo-${{ github.event.inputs.language || 'python' }}
           path: ./generated/cli-todo/
