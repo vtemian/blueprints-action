@@ -232,6 +232,20 @@ main() {
         
         # Handle commit branch workflow
         if [ -n "$COMMIT_BRANCH" ]; then
+            # Save generated files to temporary location
+            TEMP_GEN_DIR=$(mktemp -d)
+            log "Saving generated files to temporary location: $TEMP_GEN_DIR"
+            
+            # Copy all generated files to temp location (excluding .git and source blueprints)
+            if [ "$SRC_DIR" = "." ]; then
+                # If source is root, only copy non-md files
+                find . -maxdepth 10 -type f ! -path "./.git/*" ! -name "*.md" -exec cp --parents {} "$TEMP_GEN_DIR/" \; 2>/dev/null || true
+            else
+                # Copy everything except .git and the source directory
+                rsync -av --exclude='.git' --exclude="$SRC_DIR" . "$TEMP_GEN_DIR/" 2>/dev/null || \
+                    (for item in $(ls -A | grep -v "^\.git$" | grep -v "^$SRC_DIR$"); do cp -r "$item" "$TEMP_GEN_DIR/" 2>/dev/null || true; done)
+            fi
+            
             # Save current branch
             CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
             
@@ -242,64 +256,37 @@ main() {
             
             log "Switching to commit branch: $COMMIT_BRANCH (base: $BASE_BRANCH)"
             
+            # Stash any uncommitted changes to avoid conflicts
+            git stash push -m "blueprints-action: saving work before branch switch" --include-untracked || true
+            
             # Check if commit branch exists remotely
             if git ls-remote --exit-code --heads origin "$COMMIT_BRANCH" >/dev/null 2>&1; then
                 # Branch exists, fetch and checkout
                 git fetch origin "$COMMIT_BRANCH"
                 git checkout -B "$COMMIT_BRANCH" "origin/$COMMIT_BRANCH"
                 
-                # Clean out all existing files except .git and blueprints
-                log "Cleaning existing generated code from $COMMIT_BRANCH branch..."
-                # Save blueprint files and .git directory
-                find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' ! -path "./$SRC_DIR" ! -path "./$SRC_DIR/*" -exec rm -rf {} + 2>/dev/null || true
+                # Clean out ALL existing files except .git
+                log "Cleaning ALL files from $COMMIT_BRANCH branch..."
+                find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} + 2>/dev/null || true
+            else
+                # Branch doesn't exist, create empty orphan branch
+                log "Creating new orphan branch $COMMIT_BRANCH for generated code only..."
+                git checkout --orphan "$COMMIT_BRANCH"
                 
-                # If output dir is not root, clean it specifically
-                if [ "$OUTPUT_DIR" != "." ] && [ -d "$OUTPUT_DIR" ]; then
-                    rm -rf "$OUTPUT_DIR"/*
-                fi
-            else
-                # Branch doesn't exist, create from base
-                log "Creating new branch $COMMIT_BRANCH from $BASE_BRANCH..."
-                git checkout -b "$COMMIT_BRANCH" "$BASE_BRANCH"
+                # Remove all files from index and working tree
+                git rm -rf . 2>/dev/null || true
                 
-                # Clean out everything except blueprints on new branch
-                log "Preparing clean branch for generated code..."
-                find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' ! -path "./$SRC_DIR" ! -path "./$SRC_DIR/*" -exec rm -rf {} + 2>/dev/null || true
+                # Clean any remaining untracked files
+                find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} + 2>/dev/null || true
             fi
             
-            # Copy blueprints from base branch (to ensure we have latest)
-            log "Getting latest blueprints from $BASE_BRANCH..."
-            git checkout "$BASE_BRANCH" -- "$SRC_DIR" 2>/dev/null || true
+            # Copy generated files from temp location
+            log "Copying generated files to commit branch..."
+            cp -r "$TEMP_GEN_DIR"/* . 2>/dev/null || true
+            cp -r "$TEMP_GEN_DIR"/.[^.]* . 2>/dev/null || true
             
-            # Generate code fresh in the clean branch
-            log "Generating code in clean commit branch..."
-            
-            # Always regenerate the full project in commit branch
-            mkdir -p "$OUTPUT_DIR"
-            REGEN_ORIGINAL_DIR=$(pwd)
-            cd "$OUTPUT_DIR"
-            
-            # Use absolute path for source directory
-            if [[ "$SRC_DIR" = /* ]]; then
-                SRC_PATH="$SRC_DIR"
-            else
-                SRC_PATH="$REGEN_ORIGINAL_DIR/$SRC_DIR"
-            fi
-            
-            CMD="uvx blueprints-md generate-project \"$SRC_PATH\" --language \"$LANGUAGE\" --api-key \"$ANTHROPIC_API_KEY\" --verbose"
-            if [ "$QUALITY_IMPROVEMENT" == "true" ]; then
-                CMD="$CMD --quality-improvement --quality-iterations $QUALITY_ITERATIONS"
-            else
-                CMD="$CMD --no-quality-improvement"
-            fi
-            log "Running: $CMD"
-            eval "$CMD" 2>&1 | tee /tmp/blueprint-regen.log || true
-            
-            # Check for errors in regeneration
-            if grep -q "error" /tmp/blueprint-regen.log; then
-                warning "Some errors occurred during regeneration, but continuing..."
-            fi
-            cd "$REGEN_ORIGINAL_DIR"
+            # Clean up temp directory
+            rm -rf "$TEMP_GEN_DIR"
         fi
         
         # Add all generated files
