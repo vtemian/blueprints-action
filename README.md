@@ -1,118 +1,280 @@
 # Blueprints Action
 
-A GitHub Action that automatically generates code from Blueprint markdown files using [blueprints.md](https://github.com/vtemian/blueprints.md). Works like a static site generator, but for code generation.
-
-## Features
-
-- 🚀 **Automatic Code Generation**: Generate production-ready code from markdown blueprints
-- 📦 **Smart Mode Selection**: Automatically uses project generation or file-by-file based on context
-- 🔄 **Change Detection**: Process only changed files in PRs when `process-only-changed` is enabled
-- 🤖 **AI-Powered**: Uses Claude AI to understand requirements and generate code
-- 📁 **Flexible Output**: Configure where generated code is placed
-- 🔧 **Auto-Commit**: Optionally commit generated code automatically
-- ⚡ **Fast**: Uses `uvx` for minimal overhead and quick execution
+A GitHub Action that generates code from markdown blueprints using [blueprints.md](https://github.com/vtemian/blueprints.md). Think of it as a static site generator, but for code.
 
 ## Quick Start
 
-### Try the Examples
-
-Generate the example CLI todo app in Python:
-
-```yaml
-name: Generate CLI Todo
-
-on:
-  workflow_dispatch:
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: vtemian/blueprints-action@v2
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: 'examples/cli-todo'
-          output-dir: './generated'
-          language: 'python'
-```
-
-### Basic Usage
-
 ```yaml
 name: Generate Code
-
 on:
   push:
-    paths:
-      - '*.md'  # or your source directory
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: vtemian/blueprints-action@v2
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: '.'  # Process .md files in root directory
-```
-
-### Advanced Configuration
-
-```yaml
-name: Generate and Commit Code
-
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'specs/**/*.md'
-  pull_request:
-    paths:
-      - 'specs/**/*.md'
+    paths: ['*.md']
 
 jobs:
   generate:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: '.'
+          auto-commit: true
+          commit-branch: 'generated'
+```
+
+## Features
+
+- 🚀 **Automatic Code Generation** - Transform markdown blueprints into production-ready code
+- 🌳 **Branch-based Workflow** - Generated code goes to separate branches (like `gh-pages`)
+- 🔄 **Smart Processing** - Full project generation or incremental file updates
+- 🤖 **AI-Powered** - Uses Claude API for intelligent code generation
+- ⚡ **Fast Execution** - Minimal overhead with `uvx`
+
+## Setup
+
+### 1. Add Your API Key
+
+1. Go to **Settings** → **Secrets and variables** → **Actions**
+2. Add a new secret: `ANTHROPIC_API_KEY`
+3. Paste your Claude API key
+
+### 2. Create Your Workflow
+
+Create `.github/workflows/blueprints.yml`:
+
+```yaml
+name: Generate Code
+on:
+  push:
+    branches: [main]
+    paths: ['blueprints/**/*.md']
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Required for change detection
+          fetch-depth: 0
           
       - uses: vtemian/blueprints-action@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: 'specs'  # Look for .md files in specs directory
-          output-dir: './src/generated'
-          language: 'typescript'
-          process-only-changed: true
+          src: 'blueprints'
+          output-dir: './src'
           auto-commit: true
-          commit-message: 'chore: regenerate code from blueprints'
-          fail-on-error: false
+          commit-branch: 'generated'
+          commit-message: 'chore: generate code from blueprints'
 ```
 
-## Inputs
+## Configuration
 
-| Input | Description | Required | Default |
-|-------|-------------|----------|---------|
-| `api-key` | Claude API key for code generation | ✅ | - |
-| `src` | Source directory containing blueprint markdown files | ❌ | `.` |
-| `output-dir` | Directory where generated code will be placed | ❌ | `./` |
-| `language` | Target programming language (python, javascript, typescript, etc.) | ❌ | `python` |
-| `quality-improvement` | Enable iterative quality improvement | ❌ | `true` |
-| `quality-iterations` | Maximum quality improvement iterations | ❌ | `2` |
-| `process-only-changed` | Only process changed files in PR/push | ❌ | `false` |
-| `auto-commit` | Automatically commit generated code | ❌ | `false` |
-| `commit-branch` | Branch to commit generated code to (e.g., `generated`, `gh-pages`) | ❌ | - |
-| `base-branch` | Base branch for the commit branch (defaults to current) | ❌ | - |
-| `commit-message` | Commit message for generated code | ❌ | `chore: generate code from blueprints` |
-| `fail-on-error` | Fail the action if code generation fails | ❌ | `true` |
+| Input | Description | Default |
+|-------|-------------|---------|
+| `api-key` | **Required** - Claude API key | - |
+| `src` | Directory containing blueprint markdown files | `.` |
+| `output-dir` | Where to place generated code | `./` |
+| `language` | Target language (python, javascript, typescript, go, rust, etc.) | `python` |
+| `process-only-changed` | Process only changed files in PRs/pushes | `false` |
+| `auto-commit` | Automatically commit generated code | `false` |
+| `commit-branch` | Branch for generated code (e.g., `generated`) | - |
+| `base-branch` | Base branch for commit branch | current branch |
+| `commit-message` | Commit message | `chore: generate code from blueprints` |
+| `quality-improvement` | Enable iterative quality improvement | `true` |
+| `quality-iterations` | Number of improvement iterations | `2` |
+| `fail-on-error` | Fail action if generation fails | `true` |
+
+## Examples
+
+### Separate Branch Strategy (Recommended)
+
+Keep blueprints in `main`, generated code in `generated`:
+
+```yaml
+name: Generate to Branch
+on:
+  push:
+    branches: [main]
+    paths: ['specs/**/*.md']
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'specs'
+          output-dir: './src'
+          auto-commit: true
+          commit-branch: 'generated'
+          base-branch: 'main'
+          
+      - name: Output PR URL
+        run: |
+          echo "Create PR: https://github.com/${{ github.repository }}/compare/main...generated"
+```
+
+### Process Only Changed Files
+
+For faster PR workflows:
+
+```yaml
+name: Generate Changed Files
+on:
+  pull_request:
+    paths: ['blueprints/**/*.md']
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'blueprints'
+          process-only-changed: true
+```
+
+### Multi-Language Generation
+
+Generate the same blueprint in multiple languages:
+
+```yaml
+name: Multi-Language
+on: workflow_dispatch
+
+jobs:
+  generate:
+    strategy:
+      matrix:
+        language: [python, javascript, go]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'blueprint'
+          language: ${{ matrix.language }}
+          auto-commit: true
+          commit-branch: 'generated-${{ matrix.language }}'
+```
+
+## Writing Blueprints
+
+### Simple Blueprint
+
+Create a markdown file (e.g., `api.md`):
+
+```markdown
+# User API
+
+Create a REST API for user management with:
+- GET /users - List all users with pagination
+- GET /users/:id - Get user by ID
+- POST /users - Create new user
+- PUT /users/:id - Update user
+- DELETE /users/:id - Delete user
+
+Include validation, error handling, and tests.
+```
+
+### Modular Blueprints
+
+Use the Blueprint Specification format with `@` references:
+
+```markdown
+# api.users
+
+User management API endpoints.
+
+Dependencies: express, @models.user, @services.auth
+
+Requirements:
+- CRUD operations for users
+- Authentication required for all endpoints
+- Input validation with Joi
+- Proper error responses
+```
+
+Reference other blueprints:
+- `@models.user` - Reference in same directory
+- `@../shared/utils` - Relative path reference
+- `@services.auth` - Service reference
+
+### Project Structure Example
+
+```
+blueprints/
+├── main.md           # Entry point
+├── api/
+│   ├── users.md     # User endpoints
+│   └── tasks.md     # Task endpoints
+├── models/
+│   ├── user.md      # User model
+│   └── task.md      # Task model
+└── services/
+    └── auth.md      # Auth service
+```
+
+## How It Works
+
+The action automatically selects the appropriate generation mode:
+
+### Full Project Mode (Default)
+- When `process-only-changed: false`
+- Processes all blueprints together
+- Understands relationships between files
+- Best for: Initial setup, production builds
+
+### Incremental Mode
+- When `process-only-changed: true`
+- Only processes changed files
+- Faster for iterative development
+- Best for: PRs, quick updates
+
+## Included Examples
+
+### Task Management API (`examples/task-api/`)
+A modular Python FastAPI project:
+- Authentication with JWT
+- Database models
+- RESTful endpoints
+- Follows blueprints.md structure
+
+### CLI Todo App (`examples/cli-todo/`)
+A simple command-line application:
+- No external dependencies
+- Works in multiple languages
+- Complete CRUD operations
+- File-based storage
+
+Try them:
+```yaml
+- uses: vtemian/blueprints-action@v1
+  with:
+    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    src: 'examples/cli-todo'
+    language: 'python'
+```
 
 ## Outputs
 
@@ -121,453 +283,37 @@ jobs:
 | `generated-files` | List of generated files |
 | `status` | Generation status (`success`, `partial-success`, `no-files`) |
 
-## Setup
-
-### 1. Add API Key
-
-Add your Anthropic API key to your repository secrets:
-
-1. Go to your repository Settings → Secrets and variables → Actions
-2. Add a new secret named `ANTHROPIC_API_KEY`
-3. Paste your Claude API key
-
-### 2. Create Your First Blueprint
-
-Create a blueprint markdown file in your repository (e.g., `api.md`, `specs/user-service.md`, etc.):
-
-```markdown
-# User API
-
-Create a REST API for user management with the following endpoints:
-- GET /users - List all users
-- GET /users/:id - Get user by ID
-- POST /users - Create new user
-- PUT /users/:id - Update user
-- DELETE /users/:id - Delete user
-
-Use Express.js and include validation and error handling.
-```
-
-### 3. Add Workflow
-
-Create `.github/workflows/blueprints.yml`:
-
-```yaml
-name: Generate Code
-
-on:
-  push:
-    paths:
-      - '**/*.md'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: vtemian/blueprints-action@v1
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: '.'  # or 'specs', 'blueprints', etc.
-```
-
-## Examples
-
-### Full Project Generation (Default)
-
-Generate an entire project structure from all blueprints:
-
-```yaml
-name: Generate Project
-
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'blueprints/**/*.md'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: vtemian/blueprints-action@v1
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: 'blueprints'
-          output-dir: './generated'
-          # process-only-changed: false (default) - generates full project
-```
-
-### Process Only Changed Files in PRs
-
-Incrementally update only changed files (useful for PRs):
-
-```yaml
-name: Generate Changed Files
-
-on:
-  pull_request:
-    paths:
-      - 'specs/**/*.md'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Required for change detection
-      
-      - uses: vtemian/blueprints-action@v1
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: 'specs'
-          output-dir: './src'
-          process-only-changed: true  # Only process changed files
-```
-
-### Generate to Separate Branch (Recommended)
-
-Keep your blueprints in `main` and generated code in a `generated` branch:
-
-```yaml
-name: Generate Code
-
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - '**/*.md'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: vtemian/blueprints-action@v1
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: 'specs'
-          output-dir: './src'
-          auto-commit: true
-          commit-branch: 'generated'  # Commit to 'generated' branch
-          base-branch: 'main'         # Based on 'main' branch
-```
-
-### Generate TypeScript Code
-
-```yaml
-- uses: vtemian/blueprints-action@v1
-  with:
-    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-    language: typescript
-    output-dir: './src'
-```
-
-### Generate on Pull Request
-
-```yaml
-on:
-  pull_request:
-    paths:
-      - 'docs/**/*.md'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          
-      - uses: vtemian/blueprints-action@v1
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: 'docs'
-          process-only-changed: true
-```
-
-### Generate to Branch (with Manual PR)
-
-```yaml
-name: Generate to Branch
-
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'specs/**/*.md'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - uses: vtemian/blueprints-action@v2
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: 'specs'
-          auto-commit: true
-          commit-branch: 'generated'
-          
-      - name: Output PR URL
-        run: |
-          echo "View changes and create PR at:"
-          echo "https://github.com/${{ github.repository }}/compare/main...generated"
-```
-
-> **Note**: GitHub Actions has restrictions on creating PRs with GITHUB_TOKEN. The generated code is pushed to a branch, and you can manually create a PR or use a Personal Access Token for automation.
-
-### Manual Trigger
-
-```yaml
-on:
-  workflow_dispatch:
-    inputs:
-      src-directory:
-        description: 'Source directory for blueprints'
-        required: false
-        default: '.'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: vtemian/blueprints-action@v1
-        with:
-          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          src: ${{ github.event.inputs.src-directory }}
-```
-
-## How It Works
-
-The action automatically selects the appropriate generation strategy:
-
-### When `process-only-changed: false` (default)
-- Uses `generate-project` command to process all blueprints together
-- Generates a complete, coherent project structure
-- Understands relationships and dependencies between files
-- Best for: Initial setup, full regeneration, production builds
-
-### When `process-only-changed: true`
-- Only processes files changed in the current PR or commit
-- Uses individual `generate` commands for each changed file
-- Faster incremental updates
-- Best for: PR workflows, quick iterations, development
-
-## Example Blueprints
-
-This repository includes two complete example blueprints:
-
-### 1. Task Management API (`examples/task-api/`)
-A **modular** Python FastAPI project following the blueprints.md structure:
-```
-task-api/
-├── main.md           # Entry point
-├── app.md            # FastAPI app configuration
-├── api/
-│   ├── tasks.md      # Task endpoints
-│   └── users.md      # User authentication endpoints
-├── core/
-│   ├── database.md   # Database setup
-│   └── auth.md       # Authentication utilities
-└── models/
-    ├── task.md       # Task model
-    └── user.md       # User model
-```
-Uses `@` references between blueprints for clean dependencies
-
-### 2. CLI Todo Application (`examples/cli-todo/`)
-A **simple** command-line app with no external dependencies:
-- `main.md` - Entry point and command routing
-- `app.md` - Todo storage and core operations
-- `commands.md` - All command implementations
-- `utils.md` - Parsing and display utilities
-- Works in Python, JavaScript, Go, Rust, C, and C++
-
-See the [examples directory](examples/) for the complete blueprints and [.github/workflows](.github/workflows) for automated generation workflows.
-
-## Blueprint Specification
-
-Blueprints use a natural language format for describing code modules that LLMs can understand and implement.
-
-### Format
-
-```markdown
-# [module.name]
-
-[Brief description of what this module does]
-
-Dependencies: [libraries, @blueprint/references]
-
-Requirements:
-- [requirement 1]
-- [requirement 2]
-
-[Additional sections as needed]
-```
-
-### Blueprint References
-
-Reference other blueprints using `@` prefix:
-- `@models.user` - Reference another blueprint in the same directory
-- `@services.validation` - Reference a service blueprint
-- `@../shared/utils` - Relative path reference
-
-### Example Blueprint
-
-```markdown
-# api.products
-
-Product management REST API endpoints.
-
-Dependencies: fastapi, @models.product, @services.validation
-
-Requirements:
-- GET /products with search and pagination
-- POST/PUT/DELETE for admin product management
-- Include product images and categories
-- Validate all inputs
-- Return proper HTTP status codes
-```
-
-### Multi-file Projects
-
-For complex projects, use multiple blueprint files with references:
-
-```
-project/
-├── models.user.md
-├── models.task.md
-├── api.tasks.md
-├── api.auth.md
-├── services.validation.md
-└── main.md
-```
-
-Each file can reference others using `@` notation, creating a modular, maintainable architecture.
-
-### Original Example
-
-```markdown
-# Authentication Service
-
-## Requirements
-- JWT-based authentication
-- User registration with email verification
-- Password reset functionality
-- Role-based access control
-
-## Tech Stack
-- Node.js with TypeScript
-- Express.js
-- PostgreSQL
-- Redis for sessions
-
-## API Endpoints
-- POST /auth/register
-- POST /auth/login
-- POST /auth/logout
-- POST /auth/refresh
-- POST /auth/forgot-password
-- POST /auth/reset-password
-```
-
 ## Tips
 
-### Commit Branch Strategy
-
-Using a separate branch for generated code keeps your main branch clean and focused on blueprints:
-
-```yaml
-auto-commit: true
-commit-branch: 'generated'  # Generated code goes here
-base-branch: 'main'         # Based on main branch
-```
-
-Benefits:
-- **Clean separation**: Blueprints in `main`, generated code in `generated`
-- **Easy review**: See all generated changes in one branch
-- **Rollback friendly**: Can reset the generated branch without affecting blueprints
-- **Similar to static sites**: Like GitHub Pages with source and gh-pages branches
-
-Common patterns:
-- `generated` - Single branch for all generated code
-- `generated-${{ github.run_number }}` - Unique branch per run for PRs
-- `deploy/production` - For production-ready generated code
-
-### Organizing Blueprints
-
-You can organize your blueprint files however makes sense for your project:
-
-```
-# Option 1: Root directory
-api.md
-user-service.md
-database-schema.md
-
-# Option 2: Specs directory
-specs/
-├── api.md
-├── user-service.md
-└── database-schema.md
-
-# Option 3: By feature
-features/
-├── auth/
-│   └── authentication.md
-├── users/
-│   └── user-management.md
-└── products/
-    └── product-catalog.md
-```
-
-### Change Detection
-
-The action automatically detects changed files in:
-- Pull requests: Files changed between base and head branches
-- Pushes: Files changed in the commit
-- Manual triggers: All matching files
+### Branch Management
+- Use descriptive branch names: `generated`, `generated-dev`, `generated-v1`
+- Similar to GitHub Pages with `gh-pages` branch
+- Easy to review, rollback, or reset
 
 ### Performance
+- Use `process-only-changed: true` for faster PR builds
+- Set `quality-iterations: 1` for draft code
+- Blueprints process sequentially to avoid rate limits
 
-- Use `process-only-changed: true` to only regenerate changed blueprints
-- The action uses `uvx` for fast Python package execution
-- Blueprints are processed sequentially to avoid API rate limits
+### Debugging
+- Check action logs for generation details
+- Set `fail-on-error: false` to continue on errors
+- Review the generated branch for output
 
 ## Troubleshooting
 
-### No files generated
+**No files generated?**
+- Check your API key is set correctly
+- Ensure blueprint files are valid markdown
+- Review action logs for errors
 
-Check that:
-- Your blueprint files match the pattern
-- The API key is correctly set
-- Blueprint files contain valid markdown
+**API errors?**
+- "Credit balance too low" - Add credits to your Anthropic account
+- "401 Unauthorized" - Check your `ANTHROPIC_API_KEY`
 
-### Generation fails
-
-- Check the action logs for specific error messages
-- Ensure your blueprints are clear and well-structured
-- Set `fail-on-error: false` to continue on errors
-
-### Changes not committed
-
-Ensure:
-- `auto-commit: true` is set
-- The workflow has `contents: write` permission
-- There are actual changes to commit
+**Branch not created?**
+- Ensure workflow has `contents: write` permission
+- Check if branch already exists with old content
 
 ## License
 
@@ -575,8 +321,8 @@ MIT
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions welcome! Please submit a Pull Request.
 
 ## Support
 
-For issues and questions, please [open an issue](https://github.com/vtemian/blueprints-action/issues).
+For issues: [Open an issue](https://github.com/vtemian/blueprints-action/issues)
