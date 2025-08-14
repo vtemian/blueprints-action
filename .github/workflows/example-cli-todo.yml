@@ -42,7 +42,7 @@ jobs:
           auto-commit: true
           commit-branch: 'generated-cli-todo-${{ github.event.inputs.language || 'python' }}'
           base-branch: 'main'
-          commit-message: 'feat: generate CLI todo app in ${{ github.event.inputs.language || 'python' }}'
+          commit-message: "feat: generate CLI todo app in ${{ github.event.inputs.language || 'python' }}"
       
       - name: Output branch info
         run: |

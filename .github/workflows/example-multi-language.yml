@@ -31,7 +31,7 @@ jobs:
           auto-commit: true
           commit-branch: 'generated-${{ matrix.example }}-${{ matrix.language }}'
           base-branch: 'main'
-          commit-message: 'feat: generate ${{ matrix.example }} in ${{ matrix.language }}'
+          commit-message: "feat: generate ${{ matrix.example }} in ${{ matrix.language }}"
           
   summary:
     needs: generate-matrix
