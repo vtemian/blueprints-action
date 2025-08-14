@@ -248,17 +248,31 @@ main() {
                 git fetch origin "$COMMIT_BRANCH"
                 git checkout -B "$COMMIT_BRANCH" "origin/$COMMIT_BRANCH"
                 
-                # Merge changes from base branch to get latest blueprints
-                log "Merging latest changes from $BASE_BRANCH..."
-                git merge "$BASE_BRANCH" --no-edit || true
+                # Clean out all existing files except .git and blueprints
+                log "Cleaning existing generated code from $COMMIT_BRANCH branch..."
+                # Save blueprint files and .git directory
+                find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' ! -path "./$SRC_DIR" ! -path "./$SRC_DIR/*" -exec rm -rf {} + 2>/dev/null || true
+                
+                # If output dir is not root, clean it specifically
+                if [ "$OUTPUT_DIR" != "." ] && [ -d "$OUTPUT_DIR" ]; then
+                    rm -rf "$OUTPUT_DIR"/*
+                fi
             else
                 # Branch doesn't exist, create from base
                 log "Creating new branch $COMMIT_BRANCH from $BASE_BRANCH..."
                 git checkout -b "$COMMIT_BRANCH" "$BASE_BRANCH"
+                
+                # Clean out everything except blueprints on new branch
+                log "Preparing clean branch for generated code..."
+                find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' ! -path "./$SRC_DIR" ! -path "./$SRC_DIR/*" -exec rm -rf {} + 2>/dev/null || true
             fi
             
-            # Re-run generation in the commit branch context
-            log "Re-generating code in commit branch..."
+            # Copy blueprints from base branch (to ensure we have latest)
+            log "Getting latest blueprints from $BASE_BRANCH..."
+            git checkout "$BASE_BRANCH" -- "$SRC_DIR" 2>/dev/null || true
+            
+            # Generate code fresh in the clean branch
+            log "Generating code in clean commit branch..."
             
             # Always regenerate the full project in commit branch
             mkdir -p "$OUTPUT_DIR"
