@@ -232,6 +232,12 @@ main() {
         
         # Handle commit branch workflow
         if [ -n "$COMMIT_BRANCH" ]; then
+            # Debug: Show current state
+            log "DEBUG: Current working directory contents:"
+            ls -la
+            log "DEBUG: Git status before branch operations:"
+            git status --short
+            
             # Save generated files to temporary location
             TEMP_GEN_DIR=$(mktemp -d)
             log "Saving generated files to temporary location: $TEMP_GEN_DIR"
@@ -245,6 +251,9 @@ main() {
                 rsync -av --exclude='.git' --exclude="$SRC_DIR" . "$TEMP_GEN_DIR/" 2>/dev/null || \
                     (for item in $(ls -A | grep -v "^\.git$" | grep -v "^$SRC_DIR$"); do cp -r "$item" "$TEMP_GEN_DIR/" 2>/dev/null || true; done)
             fi
+            
+            log "DEBUG: Contents saved to temp dir:"
+            ls -la "$TEMP_GEN_DIR"
             
             # Save current branch
             CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
