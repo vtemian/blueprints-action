@@ -249,9 +249,10 @@ main() {
                 find . -maxdepth 10 -type f ! -path "./.git/*" ! -name "*.md" -exec cp --parents {} "$TEMP_GEN_DIR/" \; 2>/dev/null || true
             else
                 # Copy everything including generated code in src, but exclude .md blueprint files
-                # First copy everything except .git
-                rsync -av --exclude='.git' . "$TEMP_GEN_DIR/" 2>/dev/null || \
-                    cp -r $(ls -A | grep -v "^\.git$") "$TEMP_GEN_DIR/" 2>/dev/null || true
+                # Copy all directories and files except .git
+                for item in $(ls -A | grep -v "^\.git$"); do 
+                    cp -r "$item" "$TEMP_GEN_DIR/" 2>/dev/null || true
+                done
                 
                 # Then remove blueprint .md files from the copy
                 find "$TEMP_GEN_DIR/$SRC_DIR" -name "*.md" -type f -delete 2>/dev/null || true
