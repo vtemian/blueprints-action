@@ -242,18 +242,27 @@ main() {
             TEMP_GEN_DIR=$(mktemp -d)
             log "Saving generated files to temporary location: $TEMP_GEN_DIR"
             
-            # Copy all generated files to temp location (excluding .git and source blueprints)
+            # Copy all generated files to temp location
+            # We need to copy generated code but exclude blueprint .md files
             if [ "$SRC_DIR" = "." ]; then
                 # If source is root, only copy non-md files
                 find . -maxdepth 10 -type f ! -path "./.git/*" ! -name "*.md" -exec cp --parents {} "$TEMP_GEN_DIR/" \; 2>/dev/null || true
             else
-                # Copy everything except .git and the source directory
-                rsync -av --exclude='.git' --exclude="$SRC_DIR" . "$TEMP_GEN_DIR/" 2>/dev/null || \
-                    (for item in $(ls -A | grep -v "^\.git$" | grep -v "^$SRC_DIR$"); do cp -r "$item" "$TEMP_GEN_DIR/" 2>/dev/null || true; done)
+                # Copy everything including generated code in src, but exclude .md blueprint files
+                # First copy everything except .git
+                rsync -av --exclude='.git' . "$TEMP_GEN_DIR/" 2>/dev/null || \
+                    cp -r $(ls -A | grep -v "^\.git$") "$TEMP_GEN_DIR/" 2>/dev/null || true
+                
+                # Then remove blueprint .md files from the copy
+                find "$TEMP_GEN_DIR/$SRC_DIR" -name "*.md" -type f -delete 2>/dev/null || true
             fi
             
             log "DEBUG: Contents saved to temp dir:"
             ls -la "$TEMP_GEN_DIR"
+            if [ -d "$TEMP_GEN_DIR/$SRC_DIR" ]; then
+                log "DEBUG: Contents of $TEMP_GEN_DIR/$SRC_DIR:"
+                ls -la "$TEMP_GEN_DIR/$SRC_DIR"
+            fi
             
             # Save current branch
             CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
