@@ -256,8 +256,10 @@ main() {
             
             log "Switching to commit branch: $COMMIT_BRANCH (base: $BASE_BRANCH)"
             
-            # Stash any uncommitted changes to avoid conflicts
-            git stash push -m "blueprints-action: saving work before branch switch" --include-untracked || true
+            # Clean way to handle untracked files: add them temporarily then stash
+            log "Preparing workspace for branch switch..."
+            git add -A 2>/dev/null || true
+            git stash push -m "blueprints-action: temporary stash for branch switch" || true
             
             # Check if commit branch exists remotely
             if git ls-remote --exit-code --heads origin "$COMMIT_BRANCH" >/dev/null 2>&1; then
@@ -312,6 +314,9 @@ main() {
                 # Switch back to original branch
                 git checkout "$CURRENT_BRANCH"
                 log "Switched back to branch: $CURRENT_BRANCH"
+                
+                # Restore the stashed changes if any
+                git stash pop 2>/dev/null || true
             elif [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
                 git push
                 log "Changes pushed"
