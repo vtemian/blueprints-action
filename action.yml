@@ -1,0 +1,95 @@
+name: 'Blueprints MD Code Generator'
+description: 'Generate code from Blueprint markdown files using blueprints.md'
+author: 'blueprints-action'
+
+branding:
+  icon: 'code'
+  color: 'blue'
+
+inputs:
+  api-key:
+    description: 'Claude API key for code generation'
+    required: true
+  src:
+    description: 'Source directory containing blueprint markdown files'
+    required: false
+    default: '.'
+  output-dir:
+    description: 'Directory where generated code will be placed'
+    required: false
+    default: './'
+  language:
+    description: 'Target programming language (e.g., python, javascript, typescript)'
+    required: false
+    default: 'python'
+  quality-improvement:
+    description: 'Enable iterative quality improvement'
+    required: false
+    default: 'true'
+  quality-iterations:
+    description: 'Maximum quality improvement iterations'
+    required: false
+    default: '2'
+  process-only-changed:
+    description: 'Only process changed files in PR/push (uses file-by-file generation)'
+    required: false
+    default: 'false'
+  auto-commit:
+    description: 'Automatically commit generated code'
+    required: false
+    default: 'false'
+  commit-branch:
+    description: 'Branch to commit generated code to (e.g., "generated", "gh-pages")'
+    required: false
+    default: ''
+  base-branch:
+    description: 'Base branch for the commit branch (defaults to current branch)'
+    required: false
+    default: ''
+  commit-message:
+    description: 'Commit message for generated code'
+    required: false
+    default: 'chore: generate code from blueprints'
+  fail-on-error:
+    description: 'Fail the action if code generation fails'
+    required: false
+    default: 'true'
+
+outputs:
+  generated-files:
+    description: 'List of generated files'
+    value: ${{ steps.generate.outputs.generated-files }}
+  status:
+    description: 'Generation status'
+    value: ${{ steps.generate.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python and uv
+      shell: bash
+      run: |
+        # Install uv if not already available
+        if ! command -v uv &> /dev/null; then
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        fi
+
+    - name: Generate code from blueprints
+      id: generate
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.api-key }}
+        SRC_DIR: ${{ inputs.src }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        LANGUAGE: ${{ inputs.language }}
+        QUALITY_IMPROVEMENT: ${{ inputs.quality-improvement }}
+        QUALITY_ITERATIONS: ${{ inputs.quality-iterations }}
+        PROCESS_ONLY_CHANGED: ${{ inputs.process-only-changed }}
+        AUTO_COMMIT: ${{ inputs.auto-commit }}
+        COMMIT_BRANCH: ${{ inputs.commit-branch }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+      run: |
+        ${{ github.action_path }}/action.sh
