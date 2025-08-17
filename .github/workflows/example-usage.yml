@@ -1,0 +1,60 @@
+name: Generate Code from Blueprints
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.md'
+  pull_request:
+    paths:
+      - '**/*.md'
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for getting proper diff
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate code from blueprints
+        uses: vtemian/blueprints-action@v1
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: '.'  # Process markdown files in root
+          output-dir: './src'
+          process-only-changed: true
+          auto-commit: true
+          commit-branch: 'generated'  # Commit to separate branch
+          base-branch: 'main'
+          commit-message: 'feat: auto-generate code from blueprints'
+          fail-on-error: false
+
+      - name: Push to generated branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "Generated code has been pushed to the 'generated' branch"
+          echo "You can create a PR manually by visiting:"
+          echo "https://github.com/${{ github.repository }}/compare/main...generated"
+          
+      # Alternative: Use peter-evans/create-pull-request action which handles permissions better
+      # Uncomment below if you want automatic PR creation
+      # - name: Create Pull Request
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   uses: peter-evans/create-pull-request@v5
+      #   with:
+      #     token: ${{ secrets.GITHUB_TOKEN }}
+      #     base: main
+      #     branch: generated-pr-${{ github.run_number }}
+      #     title: 'Auto-generated code from blueprints'
+      #     body: |
+      #       This PR contains auto-generated code from blueprint markdown files.
+      #       Generated from commit: ${{ github.sha }}
