@@ -1,0 +1,52 @@
+name: Generate Task API Example
+
+on:
+  push:
+    paths:
+      - 'examples/task-api/**/*.md'
+      - '.github/workflows/example-task-api.yml'
+  workflow_dispatch:
+    inputs:
+      language:
+        description: 'Target programming language'
+        required: true
+        default: 'python'
+        type: choice
+        options:
+          - python
+          - javascript
+          - typescript
+          - go
+
+jobs:
+  generate-task-api:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Generate Task API
+        uses: ./
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'examples/task-api'
+          output-dir: './generated/task-api'
+          language: ${{ github.event.inputs.language || 'python' }}
+          auto-commit: true
+          commit-branch: 'generated-task-api-${{ github.event.inputs.language || 'python' }}'
+          base-branch: 'main'
+          commit-message: "feat: generate Task API in ${{ github.event.inputs.language || 'python' }}"
+      
+      - name: Output branch info
+        run: |
+          echo "Generated code has been committed to branch: generated-task-api-${{ github.event.inputs.language || 'python' }}"
+          echo "View the generated code at:"
+          echo "https://github.com/${{ github.repository }}/tree/generated-task-api-${{ github.event.inputs.language || 'python' }}"
+          echo ""
+          echo "To create a pull request, visit:"
+          echo "https://github.com/${{ github.repository }}/compare/main...generated-task-api-${{ github.event.inputs.language || 'python' }}"
