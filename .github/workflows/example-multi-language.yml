@@ -1,0 +1,55 @@
+name: Generate Examples in Multiple Languages
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday
+
+jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        language: [python, javascript, go]
+        example: [cli-todo, task-api]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Generate ${{ matrix.example }} in ${{ matrix.language }}
+        uses: ./
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          src: 'examples/${{ matrix.example }}'
+          output-dir: './generated/${{ matrix.example }}-${{ matrix.language }}'
+          language: ${{ matrix.language }}
+          auto-commit: true
+          commit-branch: 'generated-${{ matrix.example }}-${{ matrix.language }}'
+          base-branch: 'main'
+          commit-message: "feat: generate ${{ matrix.example }} in ${{ matrix.language }}"
+          
+  summary:
+    needs: generate-matrix
+    runs-on: ubuntu-latest
+      
+    steps:
+      - name: Output summary
+        run: |
+          echo "## Generated Branches Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following branches were created with generated code:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### CLI Todo App" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐍 Python: [generated-cli-todo-python](https://github.com/${{ github.repository }}/tree/generated-cli-todo-python)" >> $GITHUB_STEP_SUMMARY
+          echo "- 📜 JavaScript: [generated-cli-todo-javascript](https://github.com/${{ github.repository }}/tree/generated-cli-todo-javascript)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐹 Go: [generated-cli-todo-go](https://github.com/${{ github.repository }}/tree/generated-cli-todo-go)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Task API" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐍 Python: [generated-task-api-python](https://github.com/${{ github.repository }}/tree/generated-task-api-python)" >> $GITHUB_STEP_SUMMARY
+          echo "- 📜 JavaScript: [generated-task-api-javascript](https://github.com/${{ github.repository }}/tree/generated-task-api-javascript)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐹 Go: [generated-task-api-go](https://github.com/${{ github.repository }}/tree/generated-task-api-go)" >> $GITHUB_STEP_SUMMARY
