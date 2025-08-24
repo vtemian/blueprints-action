@@ -1,213 +1,102 @@
-I'll create a comprehensive authentication and authorization module for Go. Here's the complete implementation:
-
-## File Structure
-```
-core/auth/
-├── types.go
-├── config.go
-├── jwt.go
-├── password.go
-├── middleware.go
-└── auth_test.go
-```
-
-## types.go
-```go
+// Package auth provides authentication and authorization utilities
+// including JWT token management, password hashing, and HTTP middleware.
 package auth
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
-	"time"
-
-	"github.com/golang-jwt/jwt/v5"
-)
-
-// User represents the user model for authentication
-type User struct {
-	ID             int    `json:"id"`
-	Email          string `json:"email"`
-	HashedPassword string `json:"-"` // Never serialize password
-	IsActive       bool   `json:"is_active"`
-}
-
-// Claims represents JWT claims structure
-type Claims struct {
-	UserID   int    `json:"user_id"`
-	Email    string `json:"email"`
-	IsActive bool   `json:"is_active"`
-	jwt.RegisteredClaims
-}
-
-// AuthError represents authentication-related errors
-type AuthError struct {
-	Code    string
-	Message string
-	Err     error
-}
-
-func (e *AuthError) Error() string {
-	if e.Err != nil {
-		return e.Message + ": " + e.Err.Error()
-	}
-	return e.Message
-}
-
-func (e *AuthError) Unwrap() error {
-	return e.Err
-}
-
-// Predefined authentication errors
-var (
-	ErrInvalidToken     = &AuthError{Code: "INVALID_TOKEN", Message: "invalid or malformed token"}
-	ErrExpiredToken     = &AuthError{Code: "EXPIRED_TOKEN", Message: "token has expired"}
-	ErrInvalidPassword  = &AuthError{Code: "INVALID_PASSWORD", Message: "invalid password"}
-	ErrUserNotFound     = &AuthError{Code: "USER_NOT_FOUND", Message: "user not found"}
-	ErrUserInactive     = &AuthError{Code: "USER_INACTIVE", Message: "user account is inactive"}
-	ErrMissingToken     = &AuthError{Code: "MISSING_TOKEN", Message: "authorization token required"}
-	ErrInvalidSecretKey = &AuthError{Code: "INVALID_SECRET_KEY", Message: "JWT secret key not configured"}
-)
-
-// UserRepository defines the interface for user data access
-type UserRepository interface {
-	GetUserByID(id int) (*User, error)
-	GetUserByEmail(email string) (*User, error)
-}
-```
-
-## config.go
-```go
-package auth
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"os"
-	"sync"
-	"time"
-)
-
-// Config holds authentication configuration
-type Config struct {
-	JWTSecretKey       []byte
-	AccessTokenExpiry  time.Duration
-	BCryptCost         int
-	UserRepository     UserRepository
-	DebugMode          bool
-}
-
-var (
-	defaultConfig *Config
-	configOnce    sync.Once
-	configMutex   sync.RWMutex
-)
-
-// DefaultConfig returns the default configuration instance
-func DefaultConfig() *Config {
-	configOnce.Do(func() {
-		defaultConfig = &Config{
-			JWTSecretKey:      getJWTSecretKey(),
-			AccessTokenExpiry: 24 * time.Hour,
-			BCryptCost:        12,
-			DebugMode:         os.Getenv("DEBUG") == "true",
-		}
-	})
-	return defaultConfig
-}
-
-// SetConfig sets a custom configuration
-func SetConfig(config *Config) {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-	defaultConfig = config
-}
-
-// GetConfig returns the current configuration
-func GetConfig() *Config {
-	configMutex.RLock()
-	defer configMutex.RUnlock()
-	if defaultConfig == nil {
-		return DefaultConfig()
-	}
-	return defaultConfig
-}
-
-// getJWTSecretKey retrieves JWT secret key from environment or generates one
-func getJWTSecretKey() []byte {
-	secretKey := os.Getenv("JWT_SECRET_KEY")
-	if secretKey == "" {
-		// Generate a random secret key for development (not recommended for production)
-		if os.Getenv("GO_ENV") == "production" {
-			panic("JWT_SECRET_KEY environment variable is required in production")
-		}
-		
-		// Generate 32 random bytes for development
-		randomBytes := make([]byte, 32)
-		if _, err := rand.Read(randomBytes); err != nil {
-			panic("failed to generate random JWT secret key: " + err.Error())
-		}
-		secretKey = hex.EncodeToString(randomBytes)
-	}
-	
-	if len(secretKey) < 32 {
-		panic("JWT_SECRET_KEY must be at least 32 characters long")
-	}
-	
-	return []byte(secretKey)
-}
-
-// SetUserRepository sets the user repository for the default config
-func SetUserRepository(repo UserRepository) {
-	config := GetConfig()
-	configMutex.Lock()
-	config.UserRepository = repo
-	configMutex.Unlock()
-}
-```
-
-## jwt.go
-```go
-package auth
-
-import (
 	"fmt"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
-// CreateAccessToken generates a new JWT access token with the provided data
+// Constants for authentication configuration
+const (
+	TokenExpirationHours = 24
+	BcryptCost          = 12
+	MinSecretKeyLength  = 32
+	BearerPrefix        = "Bearer "
+)
+
+// Package-level error variables
+var (
+	ErrInvalidToken      = errors.New("invalid token")
+	ErrExpiredToken      = errors.New("token has expired")
+	ErrMissingToken      = errors.New("missing authorization token")
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrUserNotActive     = errors.New("user account is not active")
+	ErrInvalidSecretKey  = errors.New("invalid JWT secret key")
+	ErrPasswordHashFailed = errors.New("failed to hash password")
+	ErrInvalidUserData   = errors.New("invalid user data in token")
+)
+
+// User represents a user in the system
+type User struct {
+	ID       int    `json:"id"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	IsActive bool   `json:"is_active"`
+	Role     string `json:"role,omitempty"`
+}
+
+// Claims represents JWT claims structure
+type Claims struct {
+	UserID   int    `json:"user_id"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	IsActive bool   `json:"is_active"`
+	Role     string `json:"role,omitempty"`
+	jwt.RegisteredClaims
+}
+
+// ErrorResponse represents a standardized error response
+type ErrorResponse struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+}
+
+// contextKey is used for context values to avoid collisions
+type contextKey string
+
+const (
+	UserContextKey  contextKey = "user"
+	TokenContextKey contextKey = "token"
+)
+
+// getJWTSecret retrieves and validates the JWT secret from environment
+func getJWTSecret() ([]byte, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return nil, fmt.Errorf("%w: JWT_SECRET environment variable not set", ErrInvalidSecretKey)
+	}
+	if len(secret) < MinSecretKeyLength {
+		return nil, fmt.Errorf("%w: secret key must be at least %d characters", ErrInvalidSecretKey, MinSecretKeyLength)
+	}
+	return []byte(secret), nil
+}
+
+// CreateAccessToken generates a JWT token with the provided user data
 func CreateAccessToken(data map[string]interface{}) (string, error) {
-	config := GetConfig()
-	
-	if len(config.JWTSecretKey) == 0 {
-		return "", ErrInvalidSecretKey
+	secret, err := getJWTSecret()
+	if err != nil {
+		return "", fmt.Errorf("failed to get JWT secret: %w", err)
 	}
 
 	now := time.Now()
-	expirationTime := now.Add(config.AccessTokenExpiry)
+	expirationTime := now.Add(TokenExpirationHours * time.Hour)
 
-	// Extract user information from data
+	// Extract user data from the map
 	userID, ok := data["user_id"]
 	if !ok {
-		return "", &AuthError{
-			Code:    "MISSING_USER_ID",
-			Message: "user_id is required in token data",
-		}
-	}
-
-	email, ok := data["email"]
-	if !ok {
-		return "", &AuthError{
-			Code:    "MISSING_EMAIL",
-			Message: "email is required in token data",
-		}
-	}
-
-	isActive, ok := data["is_active"]
-	if !ok {
-		isActive = true // Default to active if not specified
+		return "", fmt.Errorf("%w: missing user_id", ErrInvalidUserData)
 	}
 
 	// Convert userID to int if it's not already
@@ -218,290 +107,251 @@ func CreateAccessToken(data map[string]interface{}) (string, error) {
 	case float64:
 		userIDInt = int(v)
 	case string:
-		var err error
 		userIDInt, err = strconv.Atoi(v)
 		if err != nil {
-			return "", &AuthError{
-				Code:    "INVALID_USER_ID",
-				Message: "user_id must be a valid integer",
-				Err:     err,
-			}
+			return "", fmt.Errorf("%w: invalid user_id format", ErrInvalidUserData)
 		}
 	default:
-		return "", &AuthError{
-			Code:    "INVALID_USER_ID",
-			Message: "user_id must be an integer",
-		}
+		return "", fmt.Errorf("%w: user_id must be a number", ErrInvalidUserData)
 	}
+
+	username, _ := data["username"].(string)
+	email, _ := data["email"].(string)
+	isActive, _ := data["is_active"].(bool)
+	role, _ := data["role"].(string)
 
 	claims := &Claims{
 		UserID:   userIDInt,
-		Email:    fmt.Sprintf("%v", email),
-		IsActive: fmt.Sprintf("%v", isActive) == "true",
+		Username: username,
+		Email:    email,
+		IsActive: isActive,
+		Role:     role,
 		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   strconv.Itoa(userIDInt),
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
-			Subject:   fmt.Sprintf("%d", userIDInt),
 		},
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(config.JWTSecretKey)
+	tokenString, err := token.SignedString(secret)
 	if err != nil {
-		return "", &AuthError{
-			Code:    "TOKEN_GENERATION_FAILED",
-			Message: "failed to generate access token",
-			Err:     err,
-		}
+		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	return tokenString, nil
 }
 
-// VerifyToken validates a JWT token and returns its claims
-func VerifyToken(tokenString string) (*jwt.MapClaims, error) {
-	config := GetConfig()
-	
-	if len(config.JWTSecretKey) == 0 {
-		return nil, ErrInvalidSecretKey
+// VerifyToken decodes and validates a JWT token
+func VerifyToken(tokenString string) (*jwt.Token, error) {
+	secret, err := getJWTSecret()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get JWT secret: %w", err)
 	}
 
-	if strings.TrimSpace(tokenString) == "" {
-		return nil, ErrMissingToken
-	}
-
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Validate the signing method
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		// Verify the signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, &AuthError{
-				Code:    "INVALID_SIGNING_METHOD",
-				Message: fmt.Sprintf("unexpected signing method: %v", token.Header["alg"]),
-			}
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return config.JWTSecretKey, nil
+		return secret, nil
 	})
 
 	if err != nil {
-		// Check for specific JWT errors
-		if errors, ok := err.(*jwt.ValidationError); ok {
-			if errors.Errors&jwt.ValidationErrorExpired != 0 {
-				return nil, ErrExpiredToken
-			}
-			if errors.Errors&(jwt.ValidationErrorMalformed|jwt.ValidationErrorSignatureInvalid) != 0 {
-				return nil, ErrInvalidToken
-			}
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return nil, fmt.Errorf("%w: %v", ErrExpiredToken, err)
 		}
-		return nil, &AuthError{
-			Code:    "TOKEN_VALIDATION_FAILED",
-			Message: "token validation failed",
-			Err:     err,
-		}
+		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 
 	if !token.Valid {
 		return nil, ErrInvalidToken
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, &AuthError{
-			Code:    "INVALID_CLAIMS",
-			Message: "invalid token claims format",
-		}
-	}
-
-	// Validate required claims
-	if exp, ok := claims["exp"]; ok {
-		if expTime, ok := exp.(float64); ok {
-			if time.Now().Unix() > int64(expTime) {
-				return nil, ErrExpiredToken
-			}
-		}
-	}
-
-	return &claims, nil
-}
-
-// ExtractBearerToken extracts the token from Authorization header
-func ExtractBearerToken(authHeader string) (string, error) {
-	if authHeader == "" {
-		return "", ErrMissingToken
-	}
-
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-		return "", &AuthError{
-			Code:    "INVALID_AUTH_HEADER",
-			Message: "authorization header must be in format 'Bearer <token>'",
-		}
-	}
-
-	token := strings.TrimSpace(parts[1])
-	if token == "" {
-		return "", ErrMissingToken
-	}
-
 	return token, nil
 }
 
-// GetCurrentUser retrieves user information from a JWT token
-func GetCurrentUser(tokenString string) (*User, error) {
-	config := GetConfig()
-	
-	if config.UserRepository == nil {
-		return nil, &AuthError{
-			Code:    "NO_USER_REPOSITORY",
-			Message: "user repository not configured",
-		}
-	}
-
-	claims, err := VerifyToken(tokenString)
-	if err != nil {
-		return nil, err
-	}
-
-	// Extract user ID from claims
-	userIDFloat, ok := (*claims)["user_id"].(float64)
-	if !ok {
-		return nil, &AuthError{
-			Code:    "INVALID_USER_ID_CLAIM",
-			Message: "invalid user_id in token claims",
-		}
-	}
-
-	userID := int(userIDFloat)
-	user, err := config.UserRepository.GetUserByID(userID)
-	if err != nil {
-		return nil, &AuthError{
-			Code:    "USER_LOOKUP_FAILED",
-			Message: "failed to retrieve user information",
-			Err:     err,
-		}
-	}
-
-	if user == nil {
-		return nil, ErrUserNotFound
-	}
-
-	if !user.IsActive {
-		return nil, ErrUserInactive
-	}
-
-	return user, nil
-}
-```
-
-## password.go
-```go
-package auth
-
-import (
-	"crypto/subtle"
-	"time"
-
-	"golang.org/x/crypto/bcrypt"
-)
-
 // GetPasswordHash generates a bcrypt hash for the given password
 func GetPasswordHash(password string) (string, error) {
-	config := GetConfig()
-	
-	if len(password) == 0 {
-		return "", &AuthError{
-			Code:    "EMPTY_PASSWORD",
-			Message: "password cannot be empty",
-		}
+	if password == "" {
+		return "", fmt.Errorf("%w: password cannot be empty", ErrInvalidCredentials)
 	}
 
-	if len(password) < 8 {
-		return "", &AuthError{
-			Code:    "PASSWORD_TOO_SHORT",
-			Message: "password must be at least 8 characters long",
-		}
-	}
-
-	if len(password) > 72 {
-		return "", &AuthError{
-			Code:    "PASSWORD_TOO_LONG",
-			Message: "password must be no more than 72 characters long",
-		}
-	}
-
-	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(password), config.BCryptCost)
+	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
 	if err != nil {
-		return "", &AuthError{
-			Code:    "HASH_GENERATION_FAILED",
-			Message: "failed to generate password hash",
-			Err:     err,
-		}
+		return "", fmt.Errorf("%w: %v", ErrPasswordHashFailed, err)
 	}
 
 	return string(hashedBytes), nil
 }
 
-// VerifyPassword verifies a plain password against its bcrypt hash
-// Uses constant-time comparison to prevent timing attacks
+// VerifyPassword compares a plain password with its bcrypt hash
 func VerifyPassword(plainPassword, hashedPassword string) bool {
-	// Perform the bcrypt comparison
+	if plainPassword == "" || hashedPassword == "" {
+		return false
+	}
+
 	err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(plainPassword))
-	
-	// Add a small constant delay to help prevent timing attacks
-	// This ensures that both successful and failed attempts take similar time
-	time.Sleep(time.Millisecond * 1)
-	
 	return err == nil
 }
 
-// VerifyPasswordSecure provides additional security measures for password verification
-func VerifyPasswordSecure(plainPassword, hashedPassword string) error {
-	if len(plainPassword) == 0 {
-		return &AuthError{
-			Code:    "EMPTY_PASSWORD",
-			Message: "password cannot be empty",
-		}
-	}
-
-	if len(hashedPassword) == 0 {
-		return &AuthError{
-			Code:    "EMPTY_HASH",
-			Message: "password hash cannot be empty",
-		}
-	}
-
-	// Perform bcrypt comparison
-	err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(plainPassword))
+// GetCurrentUser extracts user information from a valid JWT token
+func GetCurrentUser(tokenString string) (*User, error) {
+	token, err := VerifyToken(tokenString)
 	if err != nil {
-		// Add constant time delay regardless of error type
-		time.Sleep(time.Millisecond * 1)
-		
-		if err == bcrypt.ErrMismatchedHashAndPassword {
-			return ErrInvalidPassword
-		}
-		
-		return &AuthError{
-			Code:    "PASSWORD_VERIFICATION_FAILED",
-			Message: "password verification failed",
-			Err:     err,
-		}
+		return nil, fmt.Errorf("token verification failed: %w", err)
 	}
 
-	return nil
-}
-
-// ComparePasswords performs constant-time comparison of two password strings
-// Useful for comparing tokens or other sensitive strings
-func ComparePasswords(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
-
-// ValidatePasswordStrength validates password strength requirements
-func ValidatePasswordStrength(password string) error {
-	if len(password) < 8 {
-		return &AuthError{
-			Code:    "PASSWORD_TOO_SHORT",
-			Message: "password must be at least 8 characters long",
-		}
+	claims, ok := token.Claims.(*Claims)
+	if !ok {
+		return nil, fmt.Errorf("%w: failed to parse token claims", ErrInvalidToken)
 	}
 
-	if len(password) > 128
+	user := &User{
+		ID:       claims.UserID,
+		Username: claims.Username,
+		Email:    claims.Email,
+		IsActive: claims.IsActive,
+		Role:     claims.Role,
+	}
+
+	return user, nil
+}
+
+// extractTokenFromHeader extracts the Bearer token from the Authorization header
+func extractTokenFromHeader(authHeader string) (string, error) {
+	if authHeader == "" {
+		return "", ErrMissingToken
+	}
+
+	if !strings.HasPrefix(authHeader, BearerPrefix) {
+		return "", fmt.Errorf("%w: authorization header must start with 'Bearer '", ErrInvalidToken)
+	}
+
+	token := strings.TrimPrefix(authHeader, BearerPrefix)
+	if token == "" {
+		return "", fmt.Errorf("%w: token is empty", ErrInvalidToken)
+	}
+
+	return token, nil
+}
+
+// writeErrorResponse writes a standardized JSON error response
+func writeErrorResponse(w http.ResponseWriter, err error, statusCode int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	response := ErrorResponse{
+		Error:   http.StatusText(statusCode),
+		Message: err.Error(),
+		Code:    statusCode,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// AuthMiddleware is HTTP middleware for JWT token validation
+func AuthMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			
+			tokenString, err := extractTokenFromHeader(authHeader)
+			if err != nil {
+				writeErrorResponse(w, err, http.StatusUnauthorized)
+				return
+			}
+
+			token, err := VerifyToken(tokenString)
+			if err != nil {
+				statusCode := http.StatusUnauthorized
+				if errors.Is(err, ErrExpiredToken) {
+					statusCode = http.StatusUnauthorized
+				}
+				writeErrorResponse(w, err, statusCode)
+				return
+			}
+
+			claims, ok := token.Claims.(*Claims)
+			if !ok {
+				writeErrorResponse(w, ErrInvalidToken, http.StatusUnauthorized)
+				return
+			}
+
+			user := &User{
+				ID:       claims.UserID,
+				Username: claims.Username,
+				Email:    claims.Email,
+				IsActive: claims.IsActive,
+				Role:     claims.Role,
+			}
+
+			// Add user and token to request context
+			ctx := context.WithValue(r.Context(), UserContextKey, user)
+			ctx = context.WithValue(ctx, TokenContextKey, tokenString)
+			
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// RequireActiveUser is middleware to ensure the user account is active
+func RequireActiveUser() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, ok := r.Context().Value(UserContextKey).(*User)
+			if !ok {
+				writeErrorResponse(w, ErrInvalidToken, http.StatusUnauthorized)
+				return
+			}
+
+			if !user.IsActive {
+				writeErrorResponse(w, ErrUserNotActive, http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// GetUserFromContext retrieves the user from the request context
+func GetUserFromContext(ctx context.Context) (*User, bool) {
+	user, ok := ctx.Value(UserContextKey).(*User)
+	return user, ok
+}
+
+// GetTokenFromContext retrieves the token string from the request context
+func GetTokenFromContext(ctx context.Context) (string, bool) {
+	token, ok := ctx.Value(TokenContextKey).(string)
+	return token, ok
+}
+
+// RequireRole returns middleware that checks if the user has the required role
+func RequireRole(requiredRole string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, ok := r.Context().Value(UserContextKey).(*User)
+			if !ok {
+				writeErrorResponse(w, ErrInvalidToken, http.StatusUnauthorized)
+				return
+			}
+
+			if user.Role != requiredRole {
+				writeErrorResponse(w, 
+					fmt.Errorf("insufficient permissions: required role '%s'", requiredRole), 
+					http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// ValidateJWTSecret validates that the JWT secret is properly configured
+func ValidateJWTSecret() error {
+	_, err := getJWTSecret()
+	return err
+}

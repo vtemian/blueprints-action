@@ -1,493 +1,523 @@
-I'll create a production-ready Go REST API module for user management and authentication. Here's the complete implementation:
+I'll generate a complete, production-ready Go user management and authentication API module. Here's the structured implementation:
 
 ## Project Structure
 ```
 api/
-├── users/
-│   ├── handlers.go
-│   ├── middleware.go
-│   ├── models.go
-│   ├── service.go
-│   └── types.go
-├── database/
-│   └── connection.go
-├── config/
-│   └── config.go
-├── utils/
-│   └── response.go
 ├── main.go
-└── go.mod
+├── models/
+│   └── user.go
+├── handlers/
+│   └── user_handlers.go
+├── middleware/
+│   └── auth.go
+├── utils/
+│   ├── jwt.go
+│   ├── password.go
+│   └── validation.go
+├── dto/
+│   └── user_dto.go
+└── config/
+    └── database.go
 ```
 
-## go.mod
+## 1. Main Application (`main.go`)
+
 ```go
-module user-api
+package main
 
-go 1.21
+import (
+	"log"
+	"net/http"
+	"os"
 
-require (
-    github.com/gin-gonic/gin v1.9.1
-    github.com/golang-jwt/jwt/v5 v5.0.0
-    github.com/go-playground/validator/v10 v10.15.5
-    golang.org/x/crypto v0.14.0
-    gorm.io/gorm v1.25.5
-    gorm.io/driver/postgres v1.5.4
-    github.com/joho/godotenv v1.4.0
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+	"your-project/config"
+	"your-project/handlers"
+	"your-project/middleware"
 )
+
+func main() {
+	// Load environment variables
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found")
+	}
+
+	// Initialize database
+	db, err := config.InitDB()
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
+	}
+
+	// Initialize Gin router
+	r := gin.Default()
+
+	// Initialize handlers
+	userHandler := handlers.NewUserHandler(db)
+
+	// Public routes
+	api := r.Group("/api")
+	{
+		users := api.Group("/users")
+		{
+			users.POST("/register", userHandler.Register)
+			users.POST("/login", userHandler.Login)
+			
+			// Protected routes
+			protected := users.Group("/")
+			protected.Use(middleware.AuthMiddleware())
+			{
+				protected.GET("/me", userHandler.GetProfile)
+				protected.PUT("/me", userHandler.UpdateProfile)
+				protected.POST("/change-password", userHandler.ChangePassword)
+			}
+		}
+	}
+
+	// Health check endpoint
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Server starting on port %s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatal("Failed to start server:", err)
+	}
+}
 ```
 
-## config/config.go
+## 2. User Model (`models/user.go`)
+
+```go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// User represents the user model in the database
+type User struct {
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	Name      string         `json:"name" gorm:"not null;size:100"`
+	Email     string         `json:"email" gorm:"uniqueIndex;not null;size:255"`
+	Password  string         `json:"-" gorm:"not null;size:255"` // "-" excludes from JSON
+	LastLogin *time.Time     `json:"last_login"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// TableName specifies the table name for GORM
+func (User) TableName() string {
+	return "users"
+}
+
+// BeforeCreate is a GORM hook that runs before creating a user
+func (u *User) BeforeCreate(tx *gorm.DB) error {
+	// Additional validation or processing can be added here
+	return nil
+}
+```
+
+## 3. DTOs (`dto/user_dto.go`)
+
+```go
+package dto
+
+import "time"
+
+// RegisterRequest represents the request payload for user registration
+type RegisterRequest struct {
+	Name            string `json:"name" binding:"required,min=2,max=100"`
+	Email           string `json:"email" binding:"required,email"`
+	Password        string `json:"password" binding:"required,min=8"`
+	ConfirmPassword string `json:"confirm_password" binding:"required"`
+}
+
+// LoginRequest represents the request payload for user login
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required"`
+}
+
+// UpdateProfileRequest represents the request payload for updating user profile
+type UpdateProfileRequest struct {
+	Name            string `json:"name" binding:"omitempty,min=2,max=100"`
+	Email           string `json:"email" binding:"omitempty,email"`
+	ConfirmPassword string `json:"confirm_password" binding:"omitempty"`
+}
+
+// ChangePasswordRequest represents the request payload for changing password
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required,min=8"`
+	ConfirmPassword string `json:"confirm_password" binding:"required"`
+}
+
+// UserResponse represents the user data returned in responses
+type UserResponse struct {
+	ID        uint       `json:"id"`
+	Name      string     `json:"name"`
+	Email     string     `json:"email"`
+	LastLogin *time.Time `json:"last_login"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// AuthResponse represents the response after successful authentication
+type AuthResponse struct {
+	User  UserResponse `json:"user"`
+	Token string       `json:"token"`
+}
+
+// ErrorResponse represents error response structure
+type ErrorResponse struct {
+	Error   string      `json:"error"`
+	Message string      `json:"message"`
+	Details interface{} `json:"details,omitempty"`
+}
+
+// SuccessResponse represents success response structure
+type SuccessResponse struct {
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+```
+
+## 4. Database Configuration (`config/database.go`)
+
 ```go
 package config
 
 import (
-    "os"
-    "strconv"
-    "time"
+	"fmt"
+	"os"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+	"your-project/models"
 )
 
-type Config struct {
-    DatabaseURL    string
-    JWTSecret      string
-    JWTExpiration  time.Duration
-    ServerPort     string
-    BCryptCost     int
+// InitDB initializes the database connection and runs migrations
+func InitDB() (*gorm.DB, error) {
+	// Database configuration from environment variables
+	host := getEnv("DB_HOST", "localhost")
+	port := getEnv("DB_PORT", "5432")
+	user := getEnv("DB_USER", "postgres")
+	password := getEnv("DB_PASSWORD", "")
+	dbname := getEnv("DB_NAME", "userapi")
+	sslmode := getEnv("DB_SSLMODE", "disable")
+
+	// Construct DSN
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		host, port, user, password, dbname, sslmode)
+
+	// Open database connection
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	// Run auto migration
+	if err := db.AutoMigrate(&models.User{}); err != nil {
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	return db, nil
 }
 
-func Load() *Config {
-    jwtExpHours, _ := strconv.Atoi(getEnv("JWT_EXPIRATION_HOURS", "24"))
-    bcryptCost, _ := strconv.Atoi(getEnv("BCRYPT_COST", "12"))
-
-    return &Config{
-        DatabaseURL:   getEnv("DATABASE_URL", "postgres://user:password@localhost/userdb?sslmode=disable"),
-        JWTSecret:     getEnv("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
-        JWTExpiration: time.Duration(jwtExpHours) * time.Hour,
-        ServerPort:    getEnv("SERVER_PORT", "8080"),
-        BCryptCost:    bcryptCost,
-    }
-}
-
-func getEnv(key, defaultValue string) string {
-    if value := os.Getenv(key); value != "" {
-        return value
-    }
-    return defaultValue
+// getEnv gets environment variable with fallback
+func getEnv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }
 ```
 
-## database/connection.go
-```go
-package database
+## 5. JWT Utilities (`utils/jwt.go`)
 
-import (
-    "fmt"
-    "log"
-    "time"
-
-    "gorm.io/driver/postgres"
-    "gorm.io/gorm"
-    "gorm.io/gorm/logger"
-)
-
-type DB struct {
-    *gorm.DB
-}
-
-func NewConnection(databaseURL string) (*DB, error) {
-    db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{
-        Logger: logger.Default.LogMode(logger.Info),
-    })
-    if err != nil {
-        return nil, fmt.Errorf("failed to connect to database: %w", err)
-    }
-
-    sqlDB, err := db.DB()
-    if err != nil {
-        return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
-    }
-
-    // Connection pool settings
-    sqlDB.SetMaxIdleConns(10)
-    sqlDB.SetMaxOpenConns(100)
-    sqlDB.SetConnMaxLifetime(time.Hour)
-
-    return &DB{db}, nil
-}
-
-func (db *DB) AutoMigrate(models ...interface{}) error {
-    return db.DB.AutoMigrate(models...)
-}
-```
-
-## utils/response.go
 ```go
 package utils
 
 import (
-    "net/http"
+	"errors"
+	"os"
+	"time"
 
-    "github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-type ErrorResponse struct {
-    Error   string            `json:"error"`
-    Message string            `json:"message"`
-    Details map[string]string `json:"details,omitempty"`
-}
-
-type SuccessResponse struct {
-    Message string      `json:"message"`
-    Data    interface{} `json:"data,omitempty"`
-}
-
-func RespondWithError(c *gin.Context, statusCode int, err string, message string, details map[string]string) {
-    c.JSON(statusCode, ErrorResponse{
-        Error:   err,
-        Message: message,
-        Details: details,
-    })
-}
-
-func RespondWithSuccess(c *gin.Context, statusCode int, message string, data interface{}) {
-    c.JSON(statusCode, SuccessResponse{
-        Message: message,
-        Data:    data,
-    })
-}
-
-func RespondWithData(c *gin.Context, statusCode int, data interface{}) {
-    c.JSON(statusCode, data)
-}
-```
-
-## users/models.go
-```go
-package users
-
-import (
-    "errors"
-    "regexp"
-    "time"
-
-    "golang.org/x/crypto/bcrypt"
-    "gorm.io/gorm"
-)
-
-var (
-    ErrUserNotFound     = errors.New("user not found")
-    ErrEmailExists      = errors.New("email already exists")
-    ErrInvalidPassword  = errors.New("invalid password")
-    ErrInvalidEmail     = errors.New("invalid email format")
-    ErrWeakPassword     = errors.New("password must be at least 8 characters long")
-)
-
-type User struct {
-    ID        uint      `json:"id" gorm:"primaryKey"`
-    Email     string    `json:"email" gorm:"uniqueIndex;not null"`
-    Name      string    `json:"name" gorm:"not null"`
-    Password  string    `json:"-" gorm:"not null"` // Never include in JSON responses
-    CreatedAt time.Time `json:"created_at"`
-    UpdatedAt time.Time `json:"updated_at"`
-}
-
-func (u *User) BeforeCreate(tx *gorm.DB) error {
-    return u.validate()
-}
-
-func (u *User) BeforeUpdate(tx *gorm.DB) error {
-    return u.validate()
-}
-
-func (u *User) validate() error {
-    if !isValidEmail(u.Email) {
-        return ErrInvalidEmail
-    }
-    
-    if len(u.Name) == 0 {
-        return errors.New("name is required")
-    }
-    
-    return nil
-}
-
-func (u *User) HashPassword(cost int) error {
-    if len(u.Password) < 8 {
-        return ErrWeakPassword
-    }
-    
-    hashedPassword, err := bcrypt.GenerateFromPassword([]byte(u.Password), cost)
-    if err != nil {
-        return err
-    }
-    
-    u.Password = string(hashedPassword)
-    return nil
-}
-
-func (u *User) CheckPassword(password string) error {
-    return bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password))
-}
-
-func isValidEmail(email string) bool {
-    emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-    return emailRegex.MatchString(email)
-}
-```
-
-## users/types.go
-```go
-package users
-
-type RegisterRequest struct {
-    Email           string `json:"email" binding:"required,email"`
-    Password        string `json:"password" binding:"required,min=8"`
-    PasswordConfirm string `json:"password_confirm" binding:"required"`
-    Name            string `json:"name" binding:"required,min=1"`
-}
-
-type LoginRequest struct {
-    Email    string `json:"email" binding:"required,email"`
-    Password string `json:"password" binding:"required"`
-}
-
-type UpdateProfileRequest struct {
-    Name  string `json:"name" binding:"required,min=1"`
-    Email string `json:"email" binding:"required,email"`
-}
-
-type ChangePasswordRequest struct {
-    CurrentPassword string `json:"current_password" binding:"required"`
-    NewPassword     string `json:"new_password" binding:"required,min=8"`
-    ConfirmPassword string `json:"confirm_password" binding:"required"`
-}
-
-type LoginResponse struct {
-    Token string    `json:"token"`
-    User  *UserInfo `json:"user"`
-}
-
-type UserInfo struct {
-    ID        uint   `json:"id"`
-    Email     string `json:"email"`
-    Name      string `json:"name"`
-    CreatedAt string `json:"created_at"`
-}
-
-func (u *User) ToUserInfo() *UserInfo {
-    return &UserInfo{
-        ID:        u.ID,
-        Email:     u.Email,
-        Name:      u.Name,
-        CreatedAt: u.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-    }
-}
-```
-
-## users/service.go
-```go
-package users
-
-import (
-    "errors"
-    "fmt"
-    "time"
-
-    "user-api/config"
-    "user-api/database"
-
-    "github.com/golang-jwt/jwt/v5"
-    "gorm.io/gorm"
-)
-
-type Service struct {
-    db     *database.DB
-    config *config.Config
-}
-
+// Claims represents JWT claims
 type Claims struct {
-    UserID uint   `json:"user_id"`
-    Email  string `json:"email"`
-    jwt.RegisteredClaims
+	UserID uint   `json:"user_id"`
+	Email  string `json:"email"`
+	jwt.RegisteredClaims
 }
 
-func NewService(db *database.DB, cfg *config.Config) *Service {
-    return &Service{
-        db:     db,
-        config: cfg,
-    }
+var jwtSecret = []byte(getJWTSecret())
+
+// GenerateToken generates a JWT token for the user
+func GenerateToken(userID uint, email string) (string, error) {
+	expirationTime := time.Now().Add(24 * time.Hour) // Token expires in 24 hours
+
+	claims := &Claims{
+		UserID: userID,
+		Email:  email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "user-api",
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtSecret)
+	if err != nil {
+		return "", err
+	}
+
+	return tokenString, nil
 }
 
-func (s *Service) Register(req *RegisterRequest) (*User, error) {
-    if req.Password != req.PasswordConfirm {
-        return nil, errors.New("passwords do not match")
-    }
+// ValidateToken validates and parses a JWT token
+func ValidateToken(tokenString string) (*Claims, error) {
+	claims := &Claims{}
 
-    // Check if user already exists
-    var existingUser User
-    if err := s.db.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
-        return nil, ErrEmailExists
-    } else if !errors.Is(err, gorm.ErrRecordNotFound) {
-        return nil, fmt.Errorf("database error: %w", err)
-    }
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("invalid signing method")
+		}
+		return jwtSecret, nil
+	})
 
-    user := &User{
-        Email:    req.Email,
-        Name:     req.Name,
-        Password: req.Password,
-    }
+	if err != nil {
+		return nil, err
+	}
 
-    if err := user.HashPassword(s.config.BCryptCost); err != nil {
-        return nil, fmt.Errorf("failed to hash password: %w", err)
-    }
+	if !token.Valid {
+		return nil, errors.New("invalid token")
+	}
 
-    if err := s.db.Create(user).Error; err != nil {
-        return nil, fmt.Errorf("failed to create user: %w", err)
-    }
-
-    return user, nil
+	return claims, nil
 }
 
-func (s *Service) Login(req *LoginRequest) (*LoginResponse, error) {
-    var user User
-    if err := s.db.Where("email = ?", req.Email).First(&user).Error; err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return nil, ErrUserNotFound
-        }
-        return nil, fmt.Errorf("database error: %w", err)
-    }
-
-    if err := user.CheckPassword(req.Password); err != nil {
-        return nil, ErrInvalidPassword
-    }
-
-    token, err := s.generateJWT(&user)
-    if err != nil {
-        return nil, fmt.Errorf("failed to generate token: %w", err)
-    }
-
-    return &LoginResponse{
-        Token: token,
-        User:  user.ToUserInfo(),
-    }, nil
-}
-
-func (s *Service) GetUserByID(userID uint) (*User, error) {
-    var user User
-    if err := s.db.First(&user, userID).Error; err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return nil, ErrUserNotFound
-        }
-        return nil, fmt.Errorf("database error: %w", err)
-    }
-    return &user, nil
-}
-
-func (s *Service) UpdateProfile(userID uint, req *UpdateProfileRequest) (*User, error) {
-    user, err := s.GetUserByID(userID)
-    if err != nil {
-        return nil, err
-    }
-
-    // Check if email is being changed and if new email already exists
-    if user.Email != req.Email {
-        var existingUser User
-        if err := s.db.Where("email = ? AND id != ?", req.Email, userID).First(&existingUser).Error; err == nil {
-            return nil, ErrEmailExists
-        } else if !errors.Is(err, gorm.ErrRecordNotFound) {
-            return nil, fmt.Errorf("database error: %w", err)
-        }
-    }
-
-    user.Name = req.Name
-    user.Email = req.Email
-
-    if err := s.db.Save(user).Error; err != nil {
-        return nil, fmt.Errorf("failed to update user: %w", err)
-    }
-
-    return user, nil
-}
-
-func (s *Service) ChangePassword(userID uint, req *ChangePasswordRequest) error {
-    if req.NewPassword != req.ConfirmPassword {
-        return errors.New("new passwords do not match")
-    }
-
-    user, err := s.GetUserByID(userID)
-    if err != nil {
-        return err
-    }
-
-    if err := user.CheckPassword(req.CurrentPassword); err != nil {
-        return ErrInvalidPassword
-    }
-
-    user.Password = req.NewPassword
-    if err := user.HashPassword(s.config.BCryptCost); err != nil {
-        return fmt.Errorf("failed to hash password: %w", err)
-    }
-
-    if err := s.db.Save(user).Error; err != nil {
-        return fmt.Errorf("failed to update password: %w", err)
-    }
-
-    return nil
-}
-
-func (s *Service) generateJWT(user *User) (string, error) {
-    claims := &Claims{
-        UserID: user.ID,
-        Email:  user.Email,
-        RegisteredClaims: jwt.RegisteredClaims{
-            ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.config.JWTExpiration)),
-            IssuedAt:  jwt.NewNumericDate(time.Now()),
-            NotBefore: jwt.NewNumericDate(time.Now()),
-            Issuer:    "user-api",
-            Subject:   fmt.Sprintf("%d", user.ID),
-        },
-    }
-
-    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-    return token.SignedString([]byte(s.config.JWTSecret))
-}
-
-func (s *Service) ValidateJWT(tokenString string) (*Claims, error) {
-    token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-        if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-            return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-        }
-        return []byte(s.config.JWTSecret), nil
-    })
-
-    if err != nil {
-        return nil, err
-    }
-
-    if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-        return claims, nil
-    }
-
-    return nil, errors.New("invalid token")
+// getJWTSecret gets JWT secret from environment or uses default
+func getJWTSecret() string {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		// In production, this should always be set via environment variable
+		return "your-super-secret-jwt-key-change-this-in-production"
+	}
+	return secret
 }
 ```
 
-## users/middleware.go
+## 6. Password Utilities (`utils/password.go`)
+
 ```go
-package users
+package utils
 
 import (
-    "net/http"
-    "strings"
-
-    "user-api/utils"
-
-    "github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
 
-const (
-    AuthorizationHeader = "Authorization"
-    BearerPrefix        = "Bearer "
-    UserContextKey      = "user"
+// HashPassword hashes a password using bcrypt
+func HashPassword(password string) (string, error) {
+	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hashedBytes), nil
+}
+
+// CheckPassword compares a password with its hash
+func CheckPassword(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+```
+
+## 7. Validation Utilities (`utils/validation.go`)
+
+```go
+package utils
+
+import (
+	"regexp"
 )
 
-func (s *Service) AuthMiddleware
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+
+// IsValidEmail validates email format using regex
+func IsValidEmail(email string) bool {
+	return emailRegex.MatchString(email)
+}
+
+// IsValidPassword validates password requirements
+func IsValidPassword(password string) bool {
+	return len(password) >= 8
+}
+```
+
+## 8. Authentication Middleware (`middleware/auth.go`)
+
+```go
+package middleware
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"your-project/dto"
+	"your-project/utils"
+)
+
+// AuthMiddleware validates JWT tokens for protected routes
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+				Error:   "unauthorized",
+				Message: "Authorization header is required",
+			})
+			c.Abort()
+			return
+		}
+
+		// Check if the header starts with "Bearer "
+		tokenParts := strings.Split(authHeader, " ")
+		if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+			c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+				Error:   "unauthorized",
+				Message: "Invalid authorization header format",
+			})
+			c.Abort()
+			return
+		}
+
+		tokenString := tokenParts[1]
+		claims, err := utils.ValidateToken(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+				Error:   "unauthorized",
+				Message: "Invalid or expired token",
+			})
+			c.Abort()
+			return
+		}
+
+		// Store user information in context
+		c.Set("user_id", claims.UserID)
+		c.Set("user_email", claims.Email)
+		c.Next()
+	}
+}
+```
+
+## 9. User Handlers (`handlers/user_handlers.go`)
+
+```go
+package handlers
+
+import (
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"your-project/dto"
+	"your-project/models"
+	"your-project/utils"
+)
+
+// UserHandler handles user-related HTTP requests
+type UserHandler struct {
+	db *gorm.DB
+}
+
+// NewUserHandler creates a new user handler
+func NewUserHandler(db *gorm.DB) *UserHandler {
+	return &UserHandler{db: db}
+}
+
+// Register handles user registration
+func (h *UserHandler) Register(c *gin.Context) {
+	var req dto.RegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{
+			Error:   "validation_error",
+			Message: "Invalid request data",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	// Validate password confirmation
+	if req.Password != req.ConfirmPassword {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{
+			Error:   "validation_error",
+			Message: "Passwords do not match",
+		})
+		return
+	}
+
+	// Additional email validation
+	if !utils.IsValidEmail(req.Email) {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{
+			Error:   "validation_error",
+			Message: "Invalid email format",
+		})
+		return
+	}
+
+	// Check if user already exists
+	var existingUser models.User
+	if err := h.db.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
+		c.JSON(http.StatusConflict, dto.ErrorResponse{
+			Error:   "duplicate_email",
+			Message: "User with this email already exists",
+		})
+		return
+	}
+
+	// Hash password
+	hashedPassword, err := utils.HashPassword(req.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "internal_error",
+			Message: "Failed to process password",
+		})
+		return
+	}
+
+	// Create user
+	user := models.User{
+		Name:     req.Name,
+		Email:    req.Email,
+		Password: hashedPassword,
+	}
+
+	if err := h.db.Create(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "database_error",
+			Message: "Failed to create user",
+		})
+		return
+	}
+
+	// Generate JWT token
+	token, err := utils.GenerateToken(

@@ -4,374 +4,389 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
+	"your-project/core/auth"
+	"your-project/core/database"
+	"your-project/models/task"
 )
 
-// Task represents a task in the system
-type Task struct {
-	ID          int64      `json:"id" db:"id"`
-	UserID      int64      `json:"user_id" db:"user_id"`
-	Title       string     `json:"title" db:"title"`
-	Description string     `json:"description" db:"description"`
-	Priority    string     `json:"priority" db:"priority"`
-	Status      string     `json:"status" db:"status"`
-	DueDate     *time.Time `json:"due_date,omitempty" db:"due_date"`
-	CompletedAt *time.Time `json:"completed_at,omitempty" db:"completed_at"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
-	DeletedAt   *time.Time `json:"-" db:"deleted_at"`
+// Handler contains dependencies for task API handlers
+type Handler struct {
+	db database.DB
 }
 
-// CreateTaskRequest represents the request payload for creating a task
+// NewHandler creates a new task handler instance
+func NewHandler(db database.DB) *Handler {
+	return &Handler{db: db}
+}
+
+// Request/Response structs with JSON tags
+
+// CreateTaskRequest represents the request body for creating a task
 type CreateTaskRequest struct {
-	Title       string `json:"title" validate:"required,min=1,max=200"`
-	Description string `json:"description" validate:"required,min=1,max=1000"`
-	Priority    string `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	DueDate     string `json:"due_date,omitempty" validate:"omitempty,datetime=2006-01-02T15:04:05Z07:00"`
+	Title       string     `json:"title" validate:"required,min=1,max=200"`
+	Description string     `json:"description" validate:"required,min=1,max=1000"`
+	Priority    string     `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
 }
 
-// UpdateTaskRequest represents the request payload for updating a task
+// UpdateTaskRequest represents the request body for updating a task
 type UpdateTaskRequest struct {
-	Title       *string `json:"title,omitempty" validate:"omitempty,min=1,max=200"`
-	Description *string `json:"description,omitempty" validate:"omitempty,min=1,max=1000"`
-	Priority    *string `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	DueDate     *string `json:"due_date,omitempty" validate:"omitempty,datetime=2006-01-02T15:04:05Z07:00"`
+	Title       *string    `json:"title,omitempty" validate:"omitempty,min=1,max=200"`
+	Description *string    `json:"description,omitempty" validate:"omitempty,min=1,max=1000"`
+	Priority    *string    `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+	Status      *string    `json:"status,omitempty" validate:"omitempty,oneof=pending in_progress completed"`
 }
 
-// TaskListResponse represents the response for listing tasks
+// TaskResponse represents a task in API responses
+type TaskResponse struct {
+	ID          int        `json:"id"`
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Priority    string     `json:"priority"`
+	Status      string     `json:"status"`
+	DueDate     *time.Time `json:"due_date"`
+	CompletedAt *time.Time `json:"completed_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	UserID      int        `json:"user_id"`
+}
+
+// TaskListResponse represents paginated task list response
 type TaskListResponse struct {
-	Tasks      []Task     `json:"tasks"`
-	Pagination Pagination `json:"pagination"`
+	Tasks      []TaskResponse `json:"tasks"`
+	Page       int            `json:"page"`
+	Limit      int            `json:"limit"`
+	Total      int            `json:"total"`
+	TotalPages int            `json:"total_pages"`
 }
 
-// Pagination represents pagination metadata
-type Pagination struct {
-	Page       int   `json:"page"`
-	Limit      int   `json:"limit"`
-	Total      int64 `json:"total"`
-	TotalPages int   `json:"total_pages"`
-}
-
-// ErrorResponse represents an error response
+// ErrorResponse represents API error response format
 type ErrorResponse struct {
 	Error   string            `json:"error"`
+	Code    string            `json:"code"`
 	Message string            `json:"message"`
 	Details map[string]string `json:"details,omitempty"`
 }
 
-// User represents a user in the system
-type User struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
-}
-
-// TaskFilter represents filtering options for tasks
-type TaskFilter struct {
-	Status    string
-	Priority  string
-	DueBefore *time.Time
-	DueAfter  *time.Time
-	Page      int
-	Limit     int
-}
-
 // Custom error types
-type AppError struct {
-	Code    int
+type TaskError struct {
+	Code    string
 	Message string
 	Details map[string]string
 }
 
-func (e *AppError) Error() string {
+func (e TaskError) Error() string {
 	return e.Message
 }
 
-// Database interface for testability
-type TaskRepository interface {
-	GetTasks(ctx context.Context, userID int64, filter TaskFilter) ([]Task, int64, error)
-	GetTaskByID(ctx context.Context, taskID, userID int64) (*Task, error)
-	CreateTask(ctx context.Context, task *Task) error
-	UpdateTask(ctx context.Context, task *Task) error
-	DeleteTask(ctx context.Context, taskID, userID int64) error
-	CompleteTask(ctx context.Context, taskID, userID int64) error
-}
-
-// AuthService interface for authentication
-type AuthService interface {
-	ValidateToken(token string) (*User, error)
-	GetUserFromContext(ctx context.Context) (*User, error)
-}
-
-// Handler contains the dependencies for task handlers
-type Handler struct {
-	repo        TaskRepository
-	authService AuthService
-	logger      *log.Logger
-}
-
-// NewHandler creates a new task handler
-func NewHandler(repo TaskRepository, authService AuthService, logger *log.Logger) *Handler {
-	return &Handler{
-		repo:        repo,
-		authService: authService,
-		logger:      logger,
+var (
+	ErrTaskNotFound = TaskError{
+		Code:    "TASK_NOT_FOUND",
+		Message: "Task not found or you don't have permission to access it",
 	}
-}
+	ErrUnauthorized = TaskError{
+		Code:    "UNAUTHORIZED",
+		Message: "Authentication required",
+	}
+	ErrForbidden = TaskError{
+		Code:    "FORBIDDEN",
+		Message: "You don't have permission to perform this action",
+	}
+)
 
-// AuthMiddleware validates JWT tokens and sets user context
+// Context keys for request-scoped values
+type contextKey string
+
+const (
+	userContextKey contextKey = "user"
+)
+
+// AuthMiddleware extracts and validates user authentication
 func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Extract token from Authorization header
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			h.writeErrorResponse(w, &AppError{
-				Code:    http.StatusUnauthorized,
-				Message: "Authorization header required",
-			})
+			h.writeErrorResponse(w, http.StatusUnauthorized, ErrUnauthorized)
 			return
 		}
 
-		tokenParts := strings.Split(authHeader, " ")
-		if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-			h.writeErrorResponse(w, &AppError{
-				Code:    http.StatusUnauthorized,
-				Message: "Invalid authorization header format",
-			})
+		// Parse Bearer token
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			h.writeErrorResponse(w, http.StatusUnauthorized, ErrUnauthorized)
 			return
 		}
 
-		user, err := h.authService.ValidateToken(tokenParts[1])
+		// Validate token and get user
+		user, err := auth.ValidateToken(parts[1])
 		if err != nil {
-			h.writeErrorResponse(w, &AppError{
-				Code:    http.StatusUnauthorized,
-				Message: "Invalid or expired token",
-			})
+			h.writeErrorResponse(w, http.StatusUnauthorized, ErrUnauthorized)
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), "user", user)
+		// Add user to request context
+		ctx := context.WithValue(r.Context(), userContextKey, user)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// ListTasks handles GET /api/tasks
+// getUserFromContext extracts user from request context
+func getUserFromContext(ctx context.Context) (*auth.User, error) {
+	user, ok := ctx.Value(userContextKey).(*auth.User)
+	if !ok {
+		return nil, ErrUnauthorized
+	}
+	return user, nil
+}
+
+// ListTasks handles GET /api/tasks - List user's tasks with filters and pagination
 func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
-	user, err := h.authService.GetUserFromContext(r.Context())
+	user, err := getUserFromContext(r.Context())
 	if err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusUnauthorized,
-			Message: "User not found in context",
+		h.writeErrorResponse(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	// Parse and validate query parameters
+	filters, pagination, err := h.parseListTasksParams(r)
+	if err != nil {
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Get tasks from database
+	tasks, total, err := h.db.GetTasksWithFilters(user.ID, filters, pagination)
+	if err != nil {
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
+			Message: "Failed to retrieve tasks",
 		})
 		return
 	}
 
-	filter, err := h.parseTaskFilter(r)
-	if err != nil {
-		h.writeErrorResponse(w, err)
-		return
+	// Convert to response format
+	taskResponses := make([]TaskResponse, len(tasks))
+	for i, t := range tasks {
+		taskResponses[i] = h.taskToResponse(t)
 	}
 
-	tasks, total, err := h.repo.GetTasks(r.Context(), user.ID, filter)
-	if err != nil {
-		h.logger.Printf("Error fetching tasks: %v", err)
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to fetch tasks",
-		})
-		return
-	}
+	// Calculate total pages
+	totalPages := (total + pagination.Limit - 1) / pagination.Limit
 
-	totalPages := int((total + int64(filter.Limit) - 1) / int64(filter.Limit))
-	
 	response := TaskListResponse{
-		Tasks: tasks,
-		Pagination: Pagination{
-			Page:       filter.Page,
-			Limit:      filter.Limit,
-			Total:      total,
-			TotalPages: totalPages,
-		},
+		Tasks:      taskResponses,
+		Page:       pagination.Page,
+		Limit:      pagination.Limit,
+		Total:      total,
+		TotalPages: totalPages,
 	}
 
 	h.writeJSONResponse(w, http.StatusOK, response)
 }
 
-// GetTask handles GET /api/tasks/{task_id}
+// GetTask handles GET /api/tasks/{task_id} - Get single task with ownership verification
 func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
-	user, err := h.authService.GetUserFromContext(r.Context())
+	user, err := getUserFromContext(r.Context())
 	if err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusUnauthorized,
-			Message: "User not found in context",
-		})
+		h.writeErrorResponse(w, http.StatusUnauthorized, err)
 		return
 	}
 
+	// Parse task ID from URL
 	taskID, err := h.parseTaskID(r)
 	if err != nil {
-		h.writeErrorResponse(w, err)
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
 		return
 	}
 
-	task, err := h.repo.GetTaskByID(r.Context(), taskID, user.ID)
+	// Get task from database
+	task, err := h.db.GetTask(taskID)
 	if err != nil {
-		h.logger.Printf("Error fetching task %d: %v", taskID, err)
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusNotFound,
-			Message: "Task not found",
+		if database.IsNotFoundError(err) {
+			h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
+			return
+		}
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
+			Message: "Failed to retrieve task",
 		})
 		return
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, task)
+	// Verify ownership
+	if task.UserID != user.ID {
+		h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
+		return
+	}
+
+	response := h.taskToResponse(task)
+	h.writeJSONResponse(w, http.StatusOK, response)
 }
 
-// CreateTask handles POST /api/tasks
+// CreateTask handles POST /api/tasks - Create new task
 func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
-	user, err := h.authService.GetUserFromContext(r.Context())
+	user, err := getUserFromContext(r.Context())
 	if err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusUnauthorized,
-			Message: "User not found in context",
-		})
+		h.writeErrorResponse(w, http.StatusUnauthorized, err)
 		return
 	}
 
+	// Parse and validate request body
 	var req CreateTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusBadRequest,
-			Message: "Invalid JSON payload",
-		})
+	if err := h.parseJSONBody(r, &req); err != nil {
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
 		return
 	}
 
-	if err := h.validateCreateTaskRequest(&req); err != nil {
-		h.writeErrorResponse(w, err)
+	if err := h.validateCreateTaskRequest(req); err != nil {
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
 		return
 	}
 
-	task := &Task{
-		UserID:      user.ID,
+	// Set default priority if not provided
+	priority := req.Priority
+	if priority == "" {
+		priority = "medium"
+	}
+
+	// Create task model
+	newTask := task.Task{
 		Title:       req.Title,
 		Description: req.Description,
-		Priority:    req.Priority,
+		Priority:    priority,
 		Status:      "pending",
+		DueDate:     req.DueDate,
+		UserID:      user.ID,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
 
-	if req.Priority == "" {
-		task.Priority = "medium"
-	}
-
-	if req.DueDate != "" {
-		dueDate, err := time.Parse(time.RFC3339, req.DueDate)
-		if err != nil {
-			h.writeErrorResponse(w, &AppError{
-				Code:    http.StatusBadRequest,
-				Message: "Invalid due date format",
-			})
-			return
-		}
-		task.DueDate = &dueDate
-	}
-
-	if err := h.repo.CreateTask(r.Context(), task); err != nil {
-		h.logger.Printf("Error creating task: %v", err)
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusInternalServerError,
+	// Save to database
+	createdTask, err := h.db.CreateTask(newTask)
+	if err != nil {
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
 			Message: "Failed to create task",
 		})
 		return
 	}
 
-	h.writeJSONResponse(w, http.StatusCreated, task)
+	response := h.taskToResponse(createdTask)
+	h.writeJSONResponse(w, http.StatusCreated, response)
 }
 
-// UpdateTask handles PUT /api/tasks/{task_id}
+// UpdateTask handles PUT /api/tasks/{task_id} - Update existing task with ownership verification
 func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
-	user, err := h.authService.GetUserFromContext(r.Context())
+	user, err := getUserFromContext(r.Context())
 	if err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusUnauthorized,
-			Message: "User not found in context",
-		})
+		h.writeErrorResponse(w, http.StatusUnauthorized, err)
 		return
 	}
 
+	// Parse task ID from URL
 	taskID, err := h.parseTaskID(r)
 	if err != nil {
-		h.writeErrorResponse(w, err)
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
 		return
 	}
 
-	task, err := h.repo.GetTaskByID(r.Context(), taskID, user.ID)
-	if err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusNotFound,
-			Message: "Task not found",
-		})
-		return
-	}
-
+	// Parse and validate request body
 	var req UpdateTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusBadRequest,
-			Message: "Invalid JSON payload",
+	if err := h.parseJSONBody(r, &req); err != nil {
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if err := h.validateUpdateTaskRequest(req); err != nil {
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Get existing task and verify ownership
+	existingTask, err := h.db.GetTask(taskID)
+	if err != nil {
+		if database.IsNotFoundError(err) {
+			h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
+			return
+		}
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
+			Message: "Failed to retrieve task",
 		})
 		return
 	}
 
-	if err := h.validateUpdateTaskRequest(&req); err != nil {
-		h.writeErrorResponse(w, err)
+	if existingTask.UserID != user.ID {
+		h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
 		return
 	}
 
-	h.applyTaskUpdates(task, &req)
-	task.UpdatedAt = time.Now()
+	// Apply updates
+	updatedTask := h.applyTaskUpdates(existingTask, req)
+	updatedTask.UpdatedAt = time.Now()
 
-	if err := h.repo.UpdateTask(r.Context(), task); err != nil {
-		h.logger.Printf("Error updating task %d: %v", taskID, err)
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusInternalServerError,
+	// Save to database
+	savedTask, err := h.db.UpdateTask(updatedTask)
+	if err != nil {
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
 			Message: "Failed to update task",
 		})
 		return
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, task)
+	response := h.taskToResponse(savedTask)
+	h.writeJSONResponse(w, http.StatusOK, response)
 }
 
-// DeleteTask handles DELETE /api/tasks/{task_id}
+// DeleteTask handles DELETE /api/tasks/{task_id} - Soft delete with ownership verification
 func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
-	user, err := h.authService.GetUserFromContext(r.Context())
+	user, err := getUserFromContext(r.Context())
 	if err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusUnauthorized,
-			Message: "User not found in context",
+		h.writeErrorResponse(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	// Parse task ID from URL
+	taskID, err := h.parseTaskID(r)
+	if err != nil {
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Get task and verify ownership
+	existingTask, err := h.db.GetTask(taskID)
+	if err != nil {
+		if database.IsNotFoundError(err) {
+			h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
+			return
+		}
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
+			Message: "Failed to retrieve task",
 		})
 		return
 	}
 
-	taskID, err := h.parseTaskID(r)
-	if err != nil {
-		h.writeErrorResponse(w, err)
+	if existingTask.UserID != user.ID {
+		h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
 		return
 	}
 
-	if err := h.repo.DeleteTask(r.Context(), taskID, user.ID); err != nil {
-		h.logger.Printf("Error deleting task %d: %v", taskID, err)
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusNotFound,
-			Message: "Task not found",
+	// Soft delete task
+	err = h.db.SoftDeleteTask(taskID)
+	if err != nil {
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
+			Message: "Failed to delete task",
 		})
 		return
 	}
@@ -379,69 +394,64 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// CompleteTask handles POST /api/tasks/{task_id}/complete
+// CompleteTask handles POST /api/tasks/{task_id}/complete - Mark task completed with timestamp
 func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
-	user, err := h.authService.GetUserFromContext(r.Context())
+	user, err := getUserFromContext(r.Context())
 	if err != nil {
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusUnauthorized,
-			Message: "User not found in context",
-		})
+		h.writeErrorResponse(w, http.StatusUnauthorized, err)
 		return
 	}
 
+	// Parse task ID from URL
 	taskID, err := h.parseTaskID(r)
 	if err != nil {
-		h.writeErrorResponse(w, err)
+		h.writeErrorResponse(w, http.StatusBadRequest, err)
 		return
 	}
 
-	if err := h.repo.CompleteTask(r.Context(), taskID, user.ID); err != nil {
-		h.logger.Printf("Error completing task %d: %v", taskID, err)
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusNotFound,
-			Message: "Task not found",
+	// Get task and verify ownership
+	existingTask, err := h.db.GetTask(taskID)
+	if err != nil {
+		if database.IsNotFoundError(err) {
+			h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
+			return
+		}
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
+			Message: "Failed to retrieve task",
 		})
 		return
 	}
 
-	// Fetch updated task to return
-	task, err := h.repo.GetTaskByID(r.Context(), taskID, user.ID)
-	if err != nil {
-		h.logger.Printf("Error fetching completed task %d: %v", taskID, err)
-		h.writeErrorResponse(w, &AppError{
-			Code:    http.StatusInternalServerError,
-			Message: "Task completed but failed to fetch updated task",
+	if existingTask.UserID != user.ID {
+		h.writeErrorResponse(w, http.StatusNotFound, ErrTaskNotFound)
+		return
+	}
+
+	// Check if already completed
+	if existingTask.Status == "completed" {
+		h.writeErrorResponse(w, http.StatusBadRequest, TaskError{
+			Code:    "TASK_ALREADY_COMPLETED",
+			Message: "Task is already completed",
 		})
 		return
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, task)
-}
+	// Mark as completed
+	now := time.Now()
+	existingTask.Status = "completed"
+	existingTask.CompletedAt = &now
+	existingTask.UpdatedAt = now
 
-// Helper functions
-
-func (h *Handler) parseTaskID(r *http.Request) (int64, *AppError) {
-	vars := mux.Vars(r)
-	taskIDStr, exists := vars["task_id"]
-	if !exists {
-		return 0, &AppError{
-			Code:    http.StatusBadRequest,
-			Message: "Task ID is required",
-		}
-	}
-
-	taskID, err := strconv.ParseInt(taskIDStr, 10, 64)
+	// Save to database
+	savedTask, err := h.db.UpdateTask(existingTask)
 	if err != nil {
-		return 0, &AppError{
-			Code:    http.StatusBadRequest,
-			Message: "Invalid task ID format",
-		}
+		h.writeErrorResponse(w, http.StatusInternalServerError, TaskError{
+			Code:    "DATABASE_ERROR",
+			Message: "Failed to complete task",
+		})
+		return
 	}
 
-	return taskID, nil
-}
-
-func (h *Handler) parseTaskFilter(r *http.Request) (TaskFilter, *AppError) {
-	filter := TaskFilter{
-		Page:  1
+	response := h.taskToResponse(savedTask)
+	h.writeJ
