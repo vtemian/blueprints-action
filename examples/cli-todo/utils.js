@@ -1,166 +1,135 @@
 /**
- * Utility functions for parsing and display
+ * Utility functions for parsing command-line arguments and formatting display output
  * @module utils
  */
 
-const os = require('os');
-const tty = require('tty');
+// ANSI color codes with graceful fallback
+const colors = {
+  reset: '\x1b[0m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m',
+  white: '\x1b[37m'
+};
 
-// ANSI Color Constants
-const COLORS = {
-  RESET: '\x1b[0m',
-  GREEN: '\x1b[32m',
-  RED: '\x1b[31m',
-  BOLD: '\x1b[1m'
+// Detect if terminal supports colors
+const supportsColor = process.stdout.isTTY && process.env.TERM !== 'dumb';
+
+/**
+ * Apply color to text if terminal supports it
+ * @param {string} text - Text to colorize
+ * @param {string} color - Color name
+ * @returns {string} Colorized text or plain text
+ */
+const colorize = (text, color) => {
+  if (!supportsColor || !colors[color]) return text;
+  return `${colors[color]}${text}${colors.reset}`;
 };
 
 /**
- * Detect if terminal supports color output
- * @returns {boolean} True if colors are supported
- */
-function supportsColor() {
-  if (process.env.NO_COLOR || process.env.NODE_DISABLE_COLORS) {
-    return false;
-  }
-  
-  if (process.env.FORCE_COLOR) {
-    return true;
-  }
-  
-  return tty.isatty(process.stdout.fd) && process.env.TERM !== 'dumb';
-}
-
-/**
- * Apply color to text if colors are supported
- * @param {string} text - Text to colorize
- * @param {string} color - ANSI color code
- * @returns {string} Colored or plain text
- */
-function colorize(text, color) {
-  if (typeof text !== 'string') {
-    text = String(text);
-  }
-  
-  return supportsColor() ? `${color}${text}${COLORS.RESET}` : text;
-}
-
-/**
- * Apply green color to text
- * @param {string} text - Text to colorize
- * @returns {string} Green colored text or plain text
- */
-function green(text) {
-  return colorize(text, COLORS.GREEN);
-}
-
-/**
- * Apply red color to text
- * @param {string} text - Text to colorize
- * @returns {string} Red colored text or plain text
- */
-function red(text) {
-  return colorize(text, COLORS.RED);
-}
-
-/**
- * Apply bold formatting to text
- * @param {string} text - Text to make bold
- * @returns {string} Bold text or plain text
- */
-function bold(text) {
-  return colorize(text, COLORS.BOLD);
-}
-
-// Argument Parsing Functions
-
-/**
- * Extract command, text, and flags from array of strings
- * @param {string[]} args - Array of command line arguments
- * @returns {Object} Parsed arguments object with command, text, and flags
+ * Parse array of command-line arguments into structured object
+ * @param {string[]} args - Array of command-line arguments
+ * @returns {Object} Parsed arguments with command, text, and flags
  * @example
- * parseArgs(['add', 'Buy milk', '--priority', 'high', '-d'])
- * // Returns: { command: 'add', text: 'Buy milk', flags: ['--priority', 'high', '-d'] }
+ * parseArgs(['add', 'Buy milk', '--priority', 'high'])
+ * // Returns: { command: 'add', text: 'Buy milk', flags: { priority: 'high' } }
  */
-function parseArgs(args) {
+export const parseArgs = (args) => {
   if (!Array.isArray(args)) {
-    return { command: null, text: '', flags: [] };
+    throw new TypeError('Arguments must be an array');
   }
 
-  if (args.length === 0) {
-    return { command: null, text: '', flags: [] };
-  }
-
-  const command = args[0] || null;
-  const flags = [];
-  const textParts = [];
-  let i = 1;
-
-  while (i < args.length) {
-    const arg = args[i];
-    
-    if (typeof arg !== 'string') {
-      i++;
-      continue;
-    }
-
-    // Check if it's a flag
-    if (arg.startsWith('-')) {
-      flags.push(arg);
-      
-      // Check if next argument is a flag value (doesn't start with -)
-      if (i + 1 < args.length && 
-          typeof args[i + 1] === 'string' && 
-          !args[i + 1].startsWith('-')) {
-        flags.push(args[i + 1]);
-        i += 2;
-      } else {
-        i++;
-      }
-    } else {
-      textParts.push(arg);
-      i++;
-    }
-  }
-
-  return {
-    command,
-    text: textParts.join(' '),
-    flags
+  const result = {
+    command: null,
+    text: '',
+    flags: {}
   };
-}
+
+  if (args.length === 0) return result;
+
+  let i = 0;
+  
+  // First non-flag argument is the command
+  while (i < args.length && args[i].startsWith('-')) {
+    i++;
+    if (i < args.length && !args[i].startsWith('-')) i++; // Skip flag value
+  }
+  
+  if (i < args.length) {
+    result.command = args[i];
+    i++;
+  }
+
+  // Collect text arguments (non-flags after command)
+  const textParts = [];
+  const flagArgs = [];
+
+  for (let j = 0; j < args.length; j++) {
+    if (args[j].startsWith('-')) {
+      flagArgs.push(args[j]);
+      if (j + 1 < args.length && !args[j + 1].startsWith('-')) {
+        flagArgs.push(args[j + 1]);
+        j++; // Skip the flag value
+      }
+    } else if (args[j] !== result.command) {
+      textParts.push(args[j]);
+    }
+  }
+
+  result.text = textParts.join(' ');
+
+  // Parse flags
+  for (let j = 0; j < flagArgs.length; j++) {
+    if (flagArgs[j].startsWith('--')) {
+      const flagName = flagArgs[j].slice(2);
+      if (j + 1 < flagArgs.length && !flagArgs[j + 1].startsWith('-')) {
+        result.flags[flagName] = flagArgs[j + 1];
+        j++;
+      } else {
+        result.flags[flagName] = true;
+      }
+    } else if (flagArgs[j].startsWith('-')) {
+      const flagName = flagArgs[j].slice(1);
+      if (j + 1 < flagArgs.length && !flagArgs[j + 1].startsWith('-')) {
+        result.flags[flagName] = flagArgs[j + 1];
+        j++;
+      } else {
+        result.flags[flagName] = true;
+      }
+    }
+  }
+
+  return result;
+};
 
 /**
  * Check if a flag exists in arguments array
  * @param {string[]} args - Array of arguments
- * @param {string} flag - Flag to search for (without dashes)
+ * @param {string} flag - Flag to check for (without dashes)
  * @returns {boolean} True if flag exists
  * @example
- * getFlag(['--verbose', '-d', '--priority', 'high'], 'verbose') // true
- * getFlag(['--verbose', '-d'], 'd') // true
+ * getFlag(['--verbose', 'command'], 'verbose') // Returns: true
  */
-function getFlag(args, flag) {
+export const getFlag = (args, flag) => {
   if (!Array.isArray(args) || typeof flag !== 'string') {
     return false;
   }
 
-  const longFlag = `--${flag}`;
-  const shortFlag = `-${flag}`;
-
-  return args.some(arg => 
-    typeof arg === 'string' && (arg === longFlag || arg === shortFlag)
-  );
-}
+  return args.includes(`--${flag}`) || args.includes(`-${flag}`);
+};
 
 /**
- * Get the value associated with a flag
+ * Get value following a flag in arguments array
  * @param {string[]} args - Array of arguments
- * @param {string} flag - Flag to search for (without dashes)
+ * @param {string} flag - Flag to get value for (without dashes)
  * @returns {string|null} Flag value or null if not found
  * @example
- * getFlagValue(['--priority', 'high', '-t', 'work'], 'priority') // 'high'
- * getFlagValue(['--priority', 'high', '-t', 'work'], 't') // 'work'
+ * getFlagValue(['--priority', 'high'], 'priority') // Returns: 'high'
  */
-function getFlagValue(args, flag) {
+export const getFlagValue = (args, flag) => {
   if (!Array.isArray(args) || typeof flag !== 'string') {
     return null;
   }
@@ -169,153 +138,127 @@ function getFlagValue(args, flag) {
   const shortFlag = `-${flag}`;
 
   for (let i = 0; i < args.length - 1; i++) {
-    if (typeof args[i] === 'string' && 
-        (args[i] === longFlag || args[i] === shortFlag)) {
+    if (args[i] === longFlag || args[i] === shortFlag) {
       const nextArg = args[i + 1];
-      if (typeof nextArg === 'string' && !nextArg.startsWith('-')) {
-        return nextArg;
-      }
+      return nextArg && !nextArg.startsWith('-') ? nextArg : null;
     }
   }
 
   return null;
-}
+};
 
 /**
- * Extract and validate numeric IDs from arguments
+ * Extract numeric IDs from arguments
  * @param {string[]} args - Array of arguments
- * @returns {number[]} Array of valid numeric IDs
+ * @returns {number[]} Array of numeric IDs
  * @example
- * parseIds(['1', '2', 'invalid', '3.5', '4']) // [1, 2, 4]
+ * parseIds(['1', '2', 'not-a-number', '3']) // Returns: [1, 2, 3]
  */
-function parseIds(args) {
+export const parseIds = (args) => {
   if (!Array.isArray(args)) {
     return [];
   }
 
   return args
     .map(arg => {
-      if (typeof arg === 'number') {
-        return Number.isInteger(arg) && arg > 0 ? arg : null;
-      }
-      
-      if (typeof arg === 'string') {
-        const num = parseInt(arg, 10);
-        return !isNaN(num) && num > 0 && num.toString() === arg ? num : null;
-      }
-      
-      return null;
+      const num = parseInt(arg, 10);
+      return isNaN(num) ? null : num;
     })
-    .filter(id => id !== null);
-}
-
-// Display Formatting Functions
+    .filter(id => id !== null && id > 0);
+};
 
 /**
- * Create an aligned ASCII table with headers and rows
- * @param {string[]} headers - Array of column headers
- * @param {string[][]} rows - Array of row arrays
- * @returns {string} Formatted table string
+ * Create ASCII table with proper alignment and borders
+ * @param {string[]} headers - Table headers
+ * @param {string[][]} rows - Table rows
+ * @returns {string} Formatted ASCII table
  * @example
- * formatTable(['ID', 'Name'], [['1', 'John'], ['2', 'Jane']])
+ * formatTable(['ID', 'Task'], [['1', 'Buy milk'], ['2', 'Walk dog']])
  */
-function formatTable(headers, rows) {
+export const formatTable = (headers, rows) => {
   if (!Array.isArray(headers) || !Array.isArray(rows)) {
-    return '';
+    throw new TypeError('Headers and rows must be arrays');
   }
 
-  if (headers.length === 0) {
-    return '';
-  }
+  if (headers.length === 0) return '';
 
-  // Convert all values to strings and handle null/undefined
-  const stringHeaders = headers.map(h => h == null ? '' : String(h));
-  const stringRows = rows.map(row => {
-    if (!Array.isArray(row)) {
-      return new Array(headers.length).fill('');
-    }
-    return row.map(cell => cell == null ? '' : String(cell));
-  });
-
-  // Calculate column widths (considering ANSI color codes)
-  const getDisplayWidth = (str) => {
-    return str.replace(/\x1b\[[0-9;]*m/g, '').length;
-  };
-
-  const columnWidths = stringHeaders.map((header, colIndex) => {
-    const headerWidth = getDisplayWidth(header);
-    const maxRowWidth = stringRows.reduce((max, row) => {
-      const cellWidth = row[colIndex] ? getDisplayWidth(row[colIndex]) : 0;
-      return Math.max(max, cellWidth);
+  // Calculate column widths
+  const colWidths = headers.map((header, i) => {
+    const headerWidth = header.length;
+    const maxRowWidth = rows.reduce((max, row) => {
+      const cellContent = row[i] || '';
+      // Remove ANSI codes for width calculation
+      const cleanContent = cellContent.replace(/\x1b\[[0-9;]*m/g, '');
+      return Math.max(max, cleanContent.length);
     }, 0);
     return Math.max(headerWidth, maxRowWidth);
   });
 
-  // Pad text considering ANSI codes
-  const padText = (text, width) => {
-    const displayWidth = getDisplayWidth(text);
-    const padding = Math.max(0, width - displayWidth);
-    return text + ' '.repeat(padding);
-  };
+  // Create separator line
+  const separator = '|' + colWidths.map(width => '-'.repeat(width + 2)).join('|') + '|';
 
-  // Build table
-  let result = '';
+  // Format header
+  const headerRow = '|' + headers.map((header, i) => 
+    ` ${header.padEnd(colWidths[i])} `
+  ).join('|') + '|';
 
-  // Header row
-  const headerRow = stringHeaders
-    .map((header, i) => padText(header, columnWidths[i]))
-    .join(' | ');
-  result += headerRow + '\n';
+  // Format rows
+  const formattedRows = rows.map(row => 
+    '|' + headers.map((_, i) => {
+      const cellContent = row[i] || '';
+      // Calculate padding considering ANSI codes
+      const cleanContent = cellContent.replace(/\x1b\[[0-9;]*m/g, '');
+      const padding = colWidths[i] - cleanContent.length;
+      return ` ${cellContent}${' '.repeat(Math.max(0, padding))} `;
+    }).join('|') + '|'
+  );
 
-  // Separator row
-  const separator = columnWidths
-    .map(width => '-'.repeat(width))
-    .join('-+-');
-  result += separator + '\n';
-
-  // Data rows
-  stringRows.forEach(row => {
-    const formattedRow = stringHeaders
-      .map((_, i) => {
-        const cell = row[i] || '';
-        return padText(cell, columnWidths[i]);
-      })
-      .join(' | ');
-    result += formattedRow + '\n';
-  });
-
-  return result.trim();
-}
+  return [separator, headerRow, separator, ...formattedRows, separator].join('\n');
+};
 
 /**
- * Format a single todo object for display
- * @param {Object} todo - Todo object with id, status, priority, text properties
+ * Format todo object for display
+ * @param {Object} todo - Todo object with id, status, priority, text, createdAt fields
  * @returns {string[]} Array of formatted strings for table row
  * @example
- * formatTodo({ id: 1, status: 'pending', priority: 'high', text: 'Buy milk' })
- * // Returns: ['1', '[ ]', 'high', 'Buy milk']
+ * formatTodo({ id: 1, status: 'completed', priority: 'high', text: 'Buy milk', createdAt: new Date() })
  */
-function formatTodo(todo) {
+export const formatTodo = (todo) => {
   if (!todo || typeof todo !== 'object') {
-    return ['', '', '', ''];
+    throw new TypeError('Todo must be an object');
   }
 
-  const id = todo.id != null ? String(todo.id) : '';
-  
-  let status = '[ ]';
-  if (todo.status === 'completed' || todo.status === 'done') {
-    status = green('[✓]');
+  const { id = '', status = '', priority = '', text = '', createdAt } = todo;
+
+  // Format status with color
+  let formattedStatus = status;
+  if (status === 'completed') {
+    formattedStatus = colorize('✓ completed', 'green');
+  } else if (status === 'pending') {
+    formattedStatus = '○ pending';
   }
 
-  let priority = todo.priority != null ? String(todo.priority) : '';
+  // Format priority with color
+  let formattedPriority = priority;
   if (priority === 'high') {
-    priority = red(priority);
+    formattedPriority = colorize('HIGH', 'red');
+  } else if (priority === 'medium') {
+    formattedPriority = colorize('MED', 'yellow');
+  } else if (priority === 'low') {
+    formattedPriority = 'LOW';
   }
 
-  const text = todo.text != null ? String(todo.text) : '';
+  // Format date
+  const formattedDate = createdAt ? formatDate(createdAt) : '';
 
-  return [id, status, priority, text];
-}
+  return [
+    String(id),
+    formattedStatus,
+    formattedPriority,
+    truncate(String(text), 50),
+    formattedDate
+  ];
+};
 
 /**
  * Truncate text with ellipsis if longer than maxLen
@@ -323,33 +266,34 @@ function formatTodo(todo) {
  * @param {number} maxLen - Maximum length
  * @returns {string} Truncated text
  * @example
- * truncate('This is a long text', 10) // 'This is...'
+ * truncate('This is a long text', 10) // Returns: 'This is...'
  */
-function truncate(text, maxLen) {
+export const truncate = (text, maxLen) => {
   if (typeof text !== 'string') {
-    text = String(text || '');
+    text = String(text);
   }
-
+  
   if (typeof maxLen !== 'number' || maxLen < 0) {
     return text;
   }
 
-  if (maxLen <= 3) {
-    return text.slice(0, maxLen);
+  if (text.length <= maxLen) {
+    return text;
   }
 
-  return text.length > maxLen ? text.slice(0, maxLen - 3) + '...' : text;
-}
+  // Ensure we have room for ellipsis
+  const truncateAt = Math.max(0, maxLen - 3);
+  return text.slice(0, truncateAt) + '...';
+};
 
 /**
  * Convert Date object to relative time string
- * @param {Date} date - Date object to format
- * @returns {string} Formatted date string
+ * @param {Date} date - Date to format
+ * @returns {string} Formatted relative time or absolute date
  * @example
- * formatDate(new Date(Date.now() - 30 * 60 * 1000)) // '30 minutes ago'
- * formatDate(new Date(Date.now() - 2 * 60 * 60 * 1000)) // '2 hours ago'
+ * formatDate(new Date(Date.now() - 30 * 60 * 1000)) // Returns: '30 minutes ago'
  */
-function formatDate(date) {
+export const formatDate = (date) => {
   if (!(date instanceof Date) || isNaN(date.getTime())) {
     return 'Invalid date';
   }
@@ -359,10 +303,7 @@ function formatDate(date) {
   
   // Handle future dates
   if (diffMs < 0) {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+    return date.toISOString().split('T')[0]; // YYYY-MM-DD format
   }
 
   const diffMinutes = Math.floor(diffMs / (1000 * 60));
@@ -370,39 +311,38 @@ function formatDate(date) {
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
   if (diffMinutes < 60) {
-    return `${diffMinutes} minute${diffMinutes !== 1 ? 's' : ''} ago`;
+    return diffMinutes === 1 ? '1 minute ago' : `${diffMinutes} minutes ago`;
   } else if (diffHours < 24) {
-    return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
+    return diffHours === 1 ? '1 hour ago' : `${diffHours} hours ago`;
   } else if (diffDays < 7) {
-    return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
+    return diffDays === 1 ? '1 day ago' : `${diffDays} days ago`;
   } else {
+    // Format as YYYY-MM-DD
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   }
-}
-
-module.exports = {
-  // Color functions
-  supportsColor,
-  colorize,
-  green,
-  red,
-  bold,
-  
-  // Argument parsing
-  parseArgs,
-  getFlag,
-  getFlagValue,
-  parseIds,
-  
-  // Display formatting
-  formatTable,
-  formatTodo,
-  truncate,
-  formatDate,
-  
-  // Constants
-  COLORS
 };
+
+// Export colorize function for external use
+export { colorize };
+
+/* Example Usage:
+
+// Parse command line arguments
+const args = parseArgs(['add', 'Buy groceries', '--priority', 'high', '--due', 'tomorrow']);
+console.log(args);
+// Output: { command: 'add', text: 'Buy groceries', flags: { priority: 'high', due: 'tomorrow' } }
+
+// Create a formatted table
+const headers = ['ID', 'Status', 'Priority', 'Task', 'Created'];
+const todos = [
+  { id: 1, status: 'completed', priority: 'high', text: 'Buy milk', createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+  { id: 2, status: 'pending', priority: 'low', text: 'Walk the dog', createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) }
+];
+
+const rows = todos.map(formatTodo);
+console.log(formatTable(headers, rows));
+
+*/

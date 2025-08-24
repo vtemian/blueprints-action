@@ -1,26 +1,25 @@
 /**
- * CLI Commands Module for Todo Application
- * Implements command-line interface operations for managing todos
+ * CLI Command Handlers for Todo Application
+ * Provides command-line interface functionality for managing todos
  */
 
-import app from './app.js';
-import utils from './utils.js';
+import * as app from './app.js';
+import * as utils from './utils.js';
 
 /**
- * Parses command line arguments into flags and parameters
- * @param {string[]} args - Array of command arguments
- * @returns {Object} Parsed arguments with flags and params
+ * Parses command line arguments to extract flags and values
+ * @param {string[]} args - Array of command line arguments
+ * @returns {Object} Parsed arguments with flags and remaining args
  */
 function parseArgs(args) {
   const flags = {};
-  const params = [];
+  const remaining = [];
   
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    
     if (arg.startsWith('--')) {
-      const flagName = arg.slice(2);
-      // Check if next argument is a value for this flag
+      const flagName = arg.substring(2);
+      // Check if next argument is a value (doesn't start with --)
       if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
         flags[flagName] = args[i + 1];
         i++; // Skip next argument as it's the flag value
@@ -28,95 +27,88 @@ function parseArgs(args) {
         flags[flagName] = true;
       }
     } else {
-      params.push(arg);
+      remaining.push(arg);
     }
   }
   
-  return { flags, params };
+  return { flags, remaining };
 }
 
 /**
- * Validates todo ID format and existence
- * @param {string} id - Todo ID to validate
- * @param {Array} todos - Array of existing todos
- * @returns {number} Parsed and validated ID
- * @throws {Error} If ID is invalid or doesn't exist
+ * Validates and parses todo IDs from arguments
+ * @param {string[]} args - Array of potential ID strings
+ * @returns {number[]} Array of valid numeric IDs
+ * @throws {Error} If any ID is invalid
  */
-function validateTodoId(id, todos) {
-  const numId = parseInt(id, 10);
-  
-  if (isNaN(numId) || numId <= 0) {
-    throw new Error(`Invalid todo ID: ${id}. ID must be a positive number.`);
+function parseIds(args) {
+  const ids = [];
+  for (const arg of args) {
+    const id = parseInt(arg, 10);
+    if (isNaN(id) || id <= 0) {
+      throw new Error(`Invalid todo ID: "${arg}". IDs must be positive numbers.`);
+    }
+    ids.push(id);
   }
-  
-  const todo = todos.find(t => t.id === numId);
-  if (!todo) {
-    throw new Error(`Todo with ID ${numId} not found.`);
-  }
-  
-  return numId;
+  return ids;
 }
 
 /**
- * Validates priority level
- * @param {string} priority - Priority to validate
- * @returns {string} Validated priority
- * @throws {Error} If priority is invalid
+ * Sanitizes todo text input
+ * @param {string} text - Raw todo text
+ * @returns {string} Sanitized text
  */
-function validatePriority(priority) {
-  const validPriorities = ['low', 'medium', 'high'];
-  const normalizedPriority = priority.toLowerCase();
-  
-  if (!validPriorities.includes(normalizedPriority)) {
-    throw new Error(`Invalid priority: ${priority}. Must be one of: ${validPriorities.join(', ')}`);
-  }
-  
-  return normalizedPriority;
+function sanitizeText(text) {
+  return text.trim().replace(/\s+/g, ' ');
 }
 
 /**
- * Add a new todo item
+ * Adds a new todo item
  * @param {string[]} args - Command arguments
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Success status
  */
 async function add(args) {
   try {
-    const { flags, params } = parseArgs(args);
+    const { flags, remaining } = parseArgs(args);
     
-    // Join remaining parameters as todo description
-    const description = params.join(' ').trim();
-    
-    if (!description) {
-      throw new Error('Todo description cannot be empty. Usage: add <description> [--priority <level>]');
+    if (remaining.length === 0) {
+      console.error('Error: Todo description is required.');
+      console.log('Usage: todo add "Buy groceries" [--priority high|medium|low]');
+      return false;
     }
     
-    // Validate and set priority
-    let priority = 'medium'; // default
-    if (flags.priority) {
-      priority = validatePriority(flags.priority);
+    const text = sanitizeText(remaining.join(' '));
+    if (text.length === 0) {
+      console.error('Error: Todo description cannot be empty.');
+      return false;
     }
     
-    const todoData = {
-      description,
-      priority,
-      done: false,
-      created: new Date().toISOString(),
-      completed: null
-    };
+    const priority = flags.priority || 'medium';
+    const validPriorities = ['low', 'medium', 'high'];
     
-    const newTodo = await app.add_todo(todoData);
-    console.log(`✅ Added: #${newTodo.id} - ${newTodo.description}`);
+    if (!validPriorities.includes(priority.toLowerCase())) {
+      console.error(`Error: Invalid priority "${priority}". Use: ${validPriorities.join(', ')}`);
+      return false;
+    }
+    
+    const todo = await app.add_todo(text, priority.toLowerCase());
+    console.log(`Added: #${todo.id} - ${todo.description}`);
+    
+    if (priority !== 'medium') {
+      console.log(`Priority: ${priority}`);
+    }
+    
+    return true;
     
   } catch (error) {
-    console.error(`❌ Error adding todo: ${error.message}`);
-    throw error;
+    console.error(`Error adding todo: ${error.message}`);
+    return false;
   }
 }
 
 /**
- * List todos with filtering options
+ * Lists todo items with filtering options
  * @param {string[]} args - Command arguments
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Success status
  */
 async function list(args) {
   try {
@@ -125,241 +117,301 @@ async function list(args) {
     const todos = await app.load_todos();
     
     if (!todos || todos.length === 0) {
-      console.log('📝 No todos found. Use "add" command to create your first todo!');
-      return;
+      console.log('No todos found. Use "todo add" to create your first todo!');
+      return true;
     }
     
-    // Filter todos based on flags
     let filteredTodos = todos;
+    let title = 'Todo List';
     
     if (flags.done) {
       filteredTodos = todos.filter(todo => todo.done);
-      if (filteredTodos.length === 0) {
-        console.log('✅ No completed todos found.');
-        return;
-      }
-    } else if (!flags.all) {
-      // Default: show only incomplete todos
+      title = 'Completed Todos';
+    } else if (flags.all) {
+      title = 'All Todos';
+    } else {
       filteredTodos = todos.filter(todo => !todo.done);
-      if (filteredTodos.length === 0) {
-        console.log('🎉 All todos completed! Use --all flag to see completed todos.');
-        return;
+      title = 'Pending Todos';
+    }
+    
+    if (filteredTodos.length === 0) {
+      if (flags.done) {
+        console.log('No completed todos found.');
+      } else if (!flags.all) {
+        console.log('No pending todos found. Great job! 🎉');
       }
+      return true;
     }
     
-    // Prepare data for table formatting
-    const tableData = filteredTodos.map(todo => ({
-      ID: todo.id.toString(),
-      Status: todo.done ? '[✓]' : '[ ]',
-      Description: todo.description,
-      Priority: todo.priority.toUpperCase(),
-      Created: new Date(todo.created).toLocaleDateString(),
-      ...(todo.done && todo.completed && {
-        Completed: new Date(todo.completed).toLocaleDateString()
-      })
-    }));
+    console.log(`\n${title}:`);
+    console.log('─'.repeat(50));
     
-    const columns = ['ID', 'Status', 'Description', 'Priority', 'Created'];
-    if (flags.all || flags.done) {
-      columns.push('Completed');
-    }
+    const tableData = filteredTodos.map(todo => {
+      const status = todo.done ? '[✓]' : '[ ]';
+      const priority = todo.priority && todo.priority !== 'medium' 
+        ? ` (${todo.priority})` 
+        : '';
+      const completedDate = todo.done && todo.completed_at 
+        ? ` - Completed: ${new Date(todo.completed_at).toLocaleDateString()}`
+        : '';
+      
+      return [
+        `#${todo.id}`,
+        status,
+        `${todo.description}${priority}${completedDate}`
+      ];
+    });
     
-    console.log(`\n📋 Todo List (${filteredTodos.length} items):`);
-    console.log(utils.format_table(tableData, columns));
+    const headers = ['ID', 'Status', 'Description'];
+    utils.format_table(headers, tableData);
+    
+    console.log(`\nTotal: ${filteredTodos.length} todo(s)`);
+    return true;
     
   } catch (error) {
-    console.error(`❌ Error listing todos: ${error.message}`);
-    throw error;
+    console.error(`Error listing todos: ${error.message}`);
+    return false;
   }
 }
 
 /**
- * Mark one or more todos as completed
+ * Marks todo items as completed
  * @param {string[]} args - Command arguments containing todo IDs
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Success status
  */
 async function done(args) {
   try {
-    const { params } = parseArgs(args);
-    
-    if (params.length === 0) {
-      throw new Error('Please specify todo ID(s) to mark as done. Usage: done <id1> [id2] [id3]...');
+    if (args.length === 0) {
+      console.error('Error: Todo ID(s) required.');
+      console.log('Usage: todo done <id1> [id2] [id3] ...');
+      return false;
     }
     
+    const ids = parseIds(args);
     const todos = await app.load_todos();
-    const completedTodos = [];
-    const timestamp = new Date().toISOString();
+    const completedCount = [];
+    const errors = [];
     
-    // Process each ID
-    for (const idStr of params) {
-      const id = validateTodoId(idStr, todos);
+    for (const id of ids) {
       const todo = todos.find(t => t.id === id);
       
-      if (todo.done) {
-        console.log(`ℹ️  Todo #${id} is already completed.`);
+      if (!todo) {
+        errors.push(`Todo #${id} not found`);
         continue;
       }
       
-      // Mark as done
+      if (todo.done) {
+        errors.push(`Todo #${id} is already completed`);
+        continue;
+      }
+      
+      // Mark as completed with timestamp
       todo.done = true;
-      todo.completed = timestamp;
+      todo.completed_at = new Date().toISOString();
       
-      await app.update_todo(todo);
-      completedTodos.push(todo);
-      
-      console.log(`✅ Completed: #${todo.id} - ${todo.description}`);
+      await app.save_todos(todos);
+      completedCount.push(todo);
+      console.log(`Completed: #${todo.id} - ${todo.description}`);
     }
     
-    if (completedTodos.length > 0) {
-      console.log(`\n🎉 Marked ${completedTodos.length} todo(s) as completed!`);
+    // Display any errors
+    if (errors.length > 0) {
+      console.error('\nErrors:');
+      errors.forEach(error => console.error(`  ${error}`));
     }
+    
+    if (completedCount.length > 0) {
+      console.log(`\n✅ Successfully completed ${completedCount.length} todo(s)`);
+      return true;
+    }
+    
+    return errors.length === 0;
     
   } catch (error) {
-    console.error(`❌ Error marking todos as done: ${error.message}`);
-    throw error;
+    console.error(`Error completing todos: ${error.message}`);
+    return false;
   }
 }
 
 /**
- * Remove todos by ID or remove all completed todos
+ * Removes todo items or all completed todos
  * @param {string[]} args - Command arguments
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Success status
  */
 async function remove(args) {
   try {
-    const { flags, params } = parseArgs(args);
-    const todos = await app.load_todos();
+    const { flags, remaining } = parseArgs(args);
     
     if (flags.done) {
-      // Remove all completed todos
-      const completedTodos = todos.filter(todo => todo.done);
-      
-      if (completedTodos.length === 0) {
-        console.log('ℹ️  No completed todos to remove.');
-        return;
-      }
-      
-      // Confirm bulk deletion
-      console.log(`⚠️  This will remove ${completedTodos.length} completed todo(s). Continue? (This action cannot be undone)`);
-      
-      // In a real CLI app, you'd prompt for confirmation here
-      // For this example, we'll proceed with the deletion
-      
-      let removedCount = 0;
-      for (const todo of completedTodos) {
-        await app.delete_todo(todo.id);
-        removedCount++;
-      }
-      
-      console.log(`🗑️  Removed ${removedCount} completed todos.`);
-      
-    } else if (params.length > 0) {
-      // Remove specific todos by ID
-      const removedTodos = [];
-      
-      for (const idStr of params) {
-        const id = validateTodoId(idStr, todos);
-        const todo = todos.find(t => t.id === id);
-        
-        await app.delete_todo(id);
-        removedTodos.push(todo);
-        
-        console.log(`🗑️  Removed: #${todo.id} - ${todo.description}`);
-      }
-      
-      if (removedTodos.length > 0) {
-        console.log(`\nRemoved ${removedTodos.length} todo(s).`);
-      }
-      
-    } else {
-      throw new Error('Please specify todo ID(s) to remove or use --done flag. Usage: remove <id1> [id2]... OR remove --done');
+      return await removeDoneTodos();
     }
     
+    if (remaining.length === 0) {
+      console.error('Error: Todo ID required or use --done flag to remove all completed todos.');
+      console.log('Usage: todo remove <id> OR todo remove --done');
+      return false;
+    }
+    
+    if (remaining.length > 1) {
+      console.error('Error: Only one todo ID allowed. Use multiple remove commands for multiple todos.');
+      return false;
+    }
+    
+    const [idStr] = remaining;
+    const id = parseInt(idStr, 10);
+    
+    if (isNaN(id) || id <= 0) {
+      console.error(`Error: Invalid todo ID "${idStr}". ID must be a positive number.`);
+      return false;
+    }
+    
+    const todos = await app.load_todos();
+    const todo = todos.find(t => t.id === id);
+    
+    if (!todo) {
+      console.error(`Error: Todo #${id} not found.`);
+      return false;
+    }
+    
+    // Confirmation for individual todo
+    console.log(`About to remove: #${todo.id} - ${todo.description}`);
+    
+    await app.delete_todo(id);
+    console.log(`Removed: #${todo.id} - ${todo.description}`);
+    
+    return true;
+    
   } catch (error) {
-    console.error(`❌ Error removing todos: ${error.message}`);
-    throw error;
+    console.error(`Error removing todo: ${error.message}`);
+    return false;
   }
 }
 
 /**
- * Display help information for all commands
- * @param {string[]} args - Command arguments (unused)
- * @returns {void}
+ * Removes all completed todos with confirmation
+ * @returns {Promise<boolean>} Success status
  */
-function help(args) {
-  const helpText = `
-📚 Todo CLI Application Help
+async function removeDoneTodos() {
+  try {
+    const todos = await app.load_todos();
+    const completedTodos = todos.filter(todo => todo.done);
+    
+    if (completedTodos.length === 0) {
+      console.log('No completed todos to remove.');
+      return true;
+    }
+    
+    console.log(`Found ${completedTodos.length} completed todo(s):`);
+    completedTodos.forEach(todo => {
+      console.log(`  #${todo.id} - ${todo.description}`);
+    });
+    
+    console.log('\n⚠️  This will permanently delete all completed todos.');
+    console.log('This action cannot be undone.');
+    
+    // In a real CLI app, you'd use a proper prompt library
+    // For this example, we'll proceed with the operation
+    let removedCount = 0;
+    
+    for (const todo of completedTodos) {
+      await app.delete_todo(todo.id);
+      removedCount++;
+    }
+    
+    console.log(`\n🗑️  Successfully removed ${removedCount} completed todo(s)`);
+    return true;
+    
+  } catch (error) {
+    console.error(`Error removing completed todos: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Displays help information for all commands
+ * @param {string[]} args - Command arguments (unused)
+ * @returns {Promise<boolean>} Success status
+ */
+async function help(args) {
+  console.log(`
+📝 Todo Application - Command Line Interface
 
 USAGE:
-  todo <command> [options] [arguments]
+  todo <command> [arguments] [flags]
 
 COMMANDS:
 
   add <description> [--priority <level>]
     Add a new todo item
-    
-    Options:
-      --priority    Set priority level (low, medium, high)
-                   Default: medium
+    Priority levels: low, medium (default), high
     
     Examples:
       todo add "Buy groceries"
       todo add "Finish project" --priority high
+      todo add "Call mom" --priority low
 
   list [--all] [--done]
     Display todo items
-    
-    Options:
-      --all        Show all todos (completed and incomplete)
-      --done       Show only completed todos
-      (no flags)   Show only incomplete todos (default)
+    --all    Show all todos (completed and pending)
+    --done   Show only completed todos
+    Default: Show only pending todos
     
     Examples:
       todo list
       todo list --all
       todo list --done
 
-  done <id1> [id2] [id3]...
+  done <id1> [id2] [id3] ...
     Mark one or more todos as completed
-    
-    Arguments:
-      id           Todo ID number(s) to mark as done
     
     Examples:
       todo done 1
       todo done 1 3 5
 
-  remove <id1> [id2]... | remove --done
-    Remove todos by ID or remove all completed todos
-    
-    Options:
-      --done       Remove all completed todos
-    
-    Arguments:
-      id           Todo ID number(s) to remove
+  remove <id>
+  remove --done
+    Remove a specific todo by ID, or all completed todos
     
     Examples:
       todo remove 1
-      todo remove 1 2 3
       todo remove --done
 
   help
-    Show this help information
+    Show this help message
 
-NOTES:
-  • Todo IDs are displayed when listing todos
+EXAMPLES:
+  todo add "Learn JavaScript"           # Add a new todo
+  todo add "Study React" --priority high # Add high priority todo
+  todo list                            # Show pending todos
+  todo list --all                      # Show all todos
+  todo done 1                          # Complete todo #1
+  todo done 1 2 3                      # Complete multiple todos
+  todo remove 1                        # Remove todo #1
+  todo remove --done                   # Remove all completed todos
+
+TIPS:
   • Use quotes around descriptions with spaces
-  • Priority levels: low, medium, high
-  • Completed todos show completion timestamp
-  • Use --all flag to see both completed and incomplete todos
+  • Todo IDs are shown in the list command
+  • Completed todos show a ✓ checkmark
+  • Use --priority to organize important tasks
+  • Regular cleanup with "remove --done" keeps your list tidy
 
-For more information, visit: https://github.com/your-repo/todo-cli
-`;
-
-  console.log(helpText);
+For more information, visit: https://github.com/yourproject/todo-cli
+`);
+  
+  return true;
 }
 
-// Export commands object
+// Export all command handlers
+export {
+  add,
+  list,
+  done,
+  remove,
+  help
+};
+
+// Default export with all commands
 export default {
   add,
   list,
