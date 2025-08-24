@@ -1,153 +1,137 @@
 """
-User model module for SQLAlchemy-based application.
+User model definition with authentication capabilities.
 
-This module defines the User model with authentication capabilities,
-proper relationships, and comprehensive error handling.
+This module contains the User model with SQLAlchemy ORM mapping,
+authentication methods, and relationship definitions.
 """
 
-import re
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
-from sqlalchemy import (
-    String, Boolean, DateTime, Index, UniqueConstraint,
-    CheckConstraint, func
-)
+from sqlalchemy import Column, String, Boolean, DateTime, Index
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import relationship
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from core.database import Base
+from core.database import db
 
 
-class User(Base):
+class User(db.Model):
     """
-    User model representing application users with authentication capabilities.
+    User model with authentication capabilities.
     
-    This model handles user authentication, profile information, and maintains
-    relationships with other entities in the system.
-    
-    Attributes:
-        id: Unique identifier for the user
-        email: User's email address (unique)
-        password_hash: Hashed password for authentication
-        name: User's display name
-        is_active: Whether the user account is active
-        last_login: Timestamp of last successful login
-        created_at: Account creation timestamp
-        updated_at: Last modification timestamp
-        tasks: Related tasks owned by this user
+    Represents a user in the system with email-based authentication,
+    password hashing, and activity tracking.
     """
     
-    __tablename__ = "users"
+    __tablename__ = 'users'
     
     # Primary key
-    id: Mapped[uuid.UUID] = mapped_column(
+    id = Column(
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
         nullable=False
     )
     
-    # User credentials and profile
-    email: Mapped[str] = mapped_column(
+    # User credentials and information
+    email = Column(
         String(255),
         unique=True,
         nullable=False,
         index=True
     )
     
-    password_hash: Mapped[str] = mapped_column(
+    password_hash = Column(
         String(255),
         nullable=False
     )
     
-    name: Mapped[str] = mapped_column(
+    name = Column(
         String(100),
         nullable=False
     )
     
     # User status and activity
-    is_active: Mapped[bool] = mapped_column(
+    is_active = Column(
         Boolean,
         default=True,
         nullable=False
     )
     
-    last_login: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
+    last_login = Column(
+        DateTime,
         nullable=True
     )
     
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
         nullable=False
     )
     
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
         nullable=False
     )
     
     # Relationships
-    tasks: Mapped[List["Task"]] = relationship(
+    tasks = relationship(
         "Task",
         back_populates="user",
-        lazy="select",
+        lazy="dynamic",
         cascade="all, delete-orphan"
     )
     
-    # Table constraints
+    # Indexes
     __table_args__ = (
-        UniqueConstraint('email', name='uq_users_email'),
-        Index('ix_users_email_active', 'email', 'is_active'),
-        CheckConstraint(
-            "email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$'",
-            name='ck_users_email_format'
-        ),
-        CheckConstraint(
-            "char_length(name) >= 1",
-            name='ck_users_name_not_empty'
-        ),
+        Index('ix_users_email', 'email'),
+        Index('ix_users_created_at', 'created_at'),
+        Index('ix_users_is_active', 'is_active'),
     )
+    
+    def __init__(self, email: str, name: str, password: str = None, **kwargs):
+        """
+        Initialize a new User instance.
+        
+        Args:
+            email: User's email address
+            name: User's display name
+            password: Plain text password (will be hashed)
+            **kwargs: Additional keyword arguments
+        """
+        super().__init__(**kwargs)
+        self.email = email.lower().strip() if email else None
+        self.name = name.strip() if name else None
+        
+        if password:
+            self.set_password(password)
     
     def set_password(self, password: str) -> None:
         """
-        Hash and set the user's password.
+        Hash and store a password.
+        
+        Uses werkzeug's security utilities to generate a secure password hash
+        with salt. The hash is stored in the password_hash field.
         
         Args:
-            password: Plain text password to hash and store
+            password: Plain text password to hash
             
         Raises:
-            ValueError: If password is None, empty, or too short
-            RuntimeError: If password hashing fails
+            ValueError: If password is empty or None
         """
-        if password is None:
-            raise ValueError("Password cannot be None")
-        
-        if not isinstance(password, str):
-            raise ValueError("Password must be a string")
-        
-        if len(password.strip()) == 0:
+        if not password or not password.strip():
             raise ValueError("Password cannot be empty")
         
-        if len(password) < 8:
-            raise ValueError("Password must be at least 8 characters long")
-        
-        try:
-            self.password_hash = generate_password_hash(
-                password,
-                method='pbkdf2:sha256',
-                salt_length=16
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to hash password: {str(e)}") from e
+        self.password_hash = generate_password_hash(
+            password.strip(),
+            method='pbkdf2:sha256',
+            salt_length=16
+        )
     
     def check_password(self, password: str) -> bool:
         """
@@ -160,32 +144,28 @@ class User(Base):
             bool: True if password matches, False otherwise
             
         Raises:
-            ValueError: If password is None or not a string
+            ValueError: If password is None or password_hash is not set
         """
-        if password is None:
+        if not password:
             raise ValueError("Password cannot be None")
         
-        if not isinstance(password, str):
-            raise ValueError("Password must be a string")
-        
         if not self.password_hash:
-            return False
+            raise ValueError("No password hash set for user")
         
-        try:
-            return check_password_hash(self.password_hash, password)
-        except Exception:
-            # Log the exception in production, but don't expose details
-            return False
+        return check_password_hash(self.password_hash, password.strip())
     
     def to_dict(self, include_relationships: bool = False) -> Dict[str, Any]:
         """
         Convert user instance to dictionary representation.
         
+        Excludes sensitive information like password_hash from the output.
+        Converts UUID and datetime objects to string representations.
+        
         Args:
             include_relationships: Whether to include related objects
             
         Returns:
-            Dict containing user data (excluding password_hash)
+            Dict[str, Any]: Dictionary representation of the user
         """
         user_dict = {
             'id': str(self.id),
@@ -194,35 +174,41 @@ class User(Base):
             'is_active': self.is_active,
             'last_login': self.last_login.isoformat() if self.last_login else None,
             'created_at': self.created_at.isoformat(),
-            'updated_at': self.updated_at.isoformat(),
+            'updated_at': self.updated_at.isoformat()
         }
         
-        if include_relationships and self.tasks:
-            user_dict['tasks'] = [
-                {
-                    'id': str(task.id),
-                    'title': task.title,
-                    'status': task.status
-                }
-                for task in self.tasks
-            ]
+        if include_relationships:
+            user_dict['tasks_count'] = self.tasks.count()
         
         return user_dict
     
     def update_last_login(self) -> None:
-        """Update the last_login timestamp to current time."""
+        """
+        Update the last_login timestamp to current UTC time.
+        
+        This method should be called when a user successfully authenticates.
+        """
         self.last_login = datetime.utcnow()
     
     def deactivate(self) -> None:
-        """Deactivate the user account."""
+        """
+        Deactivate the user account.
+        
+        Sets is_active to False, preventing the user from logging in
+        while preserving their data.
+        """
         self.is_active = False
     
     def activate(self) -> None:
-        """Activate the user account."""
+        """
+        Activate the user account.
+        
+        Sets is_active to True, allowing the user to log in.
+        """
         self.is_active = True
     
     @classmethod
-    def find_by_email(cls, email: str) -> Optional["User"]:
+    def find_by_email(cls, email: str) -> Optional['User']:
         """
         Find a user by email address.
         
@@ -230,45 +216,46 @@ class User(Base):
             email: Email address to search for
             
         Returns:
-            User instance if found, None otherwise
+            Optional[User]: User instance if found, None otherwise
         """
-        from core.database import get_session
-        
-        if not email or not isinstance(email, str):
+        if not email:
             return None
         
-        try:
-            with get_session() as session:
-                return session.query(cls).filter(
-                    cls.email == email.lower().strip()
-                ).first()
-        except SQLAlchemyError:
-            return None
+        return cls.query.filter_by(email=email.lower().strip()).first()
     
-    @staticmethod
-    def validate_email(email: str) -> bool:
+    @classmethod
+    def find_active_by_email(cls, email: str) -> Optional['User']:
         """
-        Validate email format.
+        Find an active user by email address.
         
         Args:
-            email: Email address to validate
+            email: Email address to search for
             
         Returns:
-            bool: True if email format is valid
+            Optional[User]: Active user instance if found, None otherwise
         """
-        if not email or not isinstance(email, str):
-            return False
+        if not email:
+            return None
         
-        email_pattern = r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
-        return bool(re.match(email_pattern, email.strip()))
+        return cls.query.filter_by(
+            email=email.lower().strip(),
+            is_active=True
+        ).first()
     
     def __repr__(self) -> str:
-        """Return string representation of User instance."""
-        return (
-            f"<User(id={self.id}, email='{self.email}', "
-            f"name='{self.name}', is_active={self.is_active})>"
-        )
+        """
+        String representation of the User instance.
+        
+        Returns:
+            str: String representation showing id and email
+        """
+        return f'<User {self.id}: {self.email}>'
     
     def __str__(self) -> str:
-        """Return human-readable string representation."""
-        return f"{self.name} ({self.email})"
+        """
+        Human-readable string representation.
+        
+        Returns:
+            str: User's name and email
+        """
+        return f'{self.name} ({self.email})'

@@ -1,13 +1,13 @@
 """
-Authentication and authorization utilities for FastAPI application.
+Authentication module for FastAPI application.
 
-This module provides JWT token management, password hashing, and FastAPI
-dependencies for user authentication and authorization.
+This module provides JWT token management, password hashing, and user authentication
+functionality with proper security practices and error handling.
 """
 
 import os
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -16,190 +16,235 @@ from passlib.context import CryptContext
 
 from models.user import User
 
-
 # Configuration constants
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError("SECRET_KEY environment variable is required")
-if len(SECRET_KEY) < 32:
-    raise ValueError("SECRET_KEY must be at least 32 characters long")
-
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
-BCRYPT_ROUNDS = 12
 
-# Security contexts
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=BCRYPT_ROUNDS)
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
-
-def create_access_token(data: Dict[str, Any]) -> str:
-    """
-    Generate a JWT access token with 24-hour expiration.
-    
-    Args:
-        data: Dictionary containing claims to encode in the token
-        
-    Returns:
-        Encoded JWT token string
-        
-    Raises:
-        ValueError: If token generation fails
-    """
-    try:
-        to_encode = data.copy()
-        expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-        to_encode.update({"exp": expire})
-        
-        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-        return encoded_jwt
-    except Exception as e:
-        raise ValueError(f"Failed to create access token: {str(e)}")
-
-
-def verify_token(token: str) -> Dict[str, Any]:
-    """
-    Decode and validate a JWT token.
-    
-    Args:
-        token: JWT token string to validate
-        
-    Returns:
-        Dictionary containing the token payload
-        
-    Raises:
-        HTTPException: If token is invalid, expired, or malformed
-    """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+# Get secret key from environment variables
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    import warnings
+    warnings.warn(
+        "SECRET_KEY environment variable not set. Using default key for development only. "
+        "This is insecure for production use!",
+        UserWarning
     )
-    
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except jwt.JWTClaimsError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token claims",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except jwt.InvalidTokenError:
-        raise credentials_exception
-    except JWTError:
-        raise credentials_exception
+    SECRET_KEY = "your-secret-key-change-this-in-production"
+
+# Password hashing context with bcrypt and 12 salt rounds
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
+
+# OAuth2 scheme for token URL
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Exception for invalid credentials
+credentials_exception = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+
+# Exception for inactive user
+inactive_user_exception = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN,
+    detail="Inactive user",
+)
 
 
 def get_password_hash(password: str) -> str:
     """
-    Hash a password using bcrypt with 12 salt rounds.
+    Hash a plain text password using bcrypt.
     
     Args:
         password: Plain text password to hash
         
     Returns:
-        Bcrypt hashed password string
+        Hashed password string
         
     Raises:
-        ValueError: If password hashing fails
+        ValueError: If password is empty or None
     """
-    try:
-        if not password:
-            raise ValueError("Password cannot be empty")
-        return pwd_context.hash(password)
-    except Exception as e:
-        raise ValueError(f"Failed to hash password: {str(e)}")
+    if not password:
+        raise ValueError("Password cannot be empty")
+    
+    return pwd_context.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verify a plain password against a hashed password.
+    Verify a plain text password against a hashed password.
     
     Args:
         plain_password: Plain text password to verify
-        hashed_password: Bcrypt hashed password to compare against
+        hashed_password: Hashed password to compare against
         
     Returns:
         True if password matches, False otherwise
         
     Raises:
-        ValueError: If password verification fails
+        ValueError: If either password is empty or None
     """
+    if not plain_password or not hashed_password:
+        raise ValueError("Passwords cannot be empty")
+    
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """
+    Create a JWT access token with expiration.
+    
+    Args:
+        data: Dictionary containing the data to encode in the token
+        expires_delta: Optional custom expiration time delta
+        
+    Returns:
+        Encoded JWT token string
+        
+    Raises:
+        ValueError: If data is empty or None
+    """
+    if not data:
+        raise ValueError("Token data cannot be empty")
+    
+    to_encode = data.copy()
+    
+    # Set expiration time
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+    
+    to_encode.update({"exp": expire})
+    
     try:
-        if not plain_password or not hashed_password:
-            return False
-        return pwd_context.verify(plain_password, hashed_password)
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
     except Exception as e:
-        raise ValueError(f"Failed to verify password: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not create access token: {str(e)}"
+        )
+
+
+def verify_token(token: str) -> dict:
+    """
+    Verify and decode a JWT token.
+    
+    Args:
+        token: JWT token string to verify
+        
+    Returns:
+        Decoded token payload as dictionary
+        
+    Raises:
+        HTTPException: If token is invalid, expired, or malformed
+    """
+    if not token:
+        raise credentials_exception
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        
+        # Validate payload structure
+        if not isinstance(payload, dict):
+            raise credentials_exception
+            
+        # Check if token has expired (jose should handle this, but double-check)
+        exp = payload.get("exp")
+        if exp is None:
+            raise credentials_exception
+            
+        # Convert exp to datetime and check
+        if datetime.utcnow() > datetime.fromtimestamp(exp):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        return payload
+        
+    except JWTError as e:
+        # Handle specific JWT errors
+        error_msg = "Could not validate credentials"
+        if "expired" in str(e).lower():
+            error_msg = "Token has expired"
+        elif "invalid" in str(e).lower():
+            error_msg = "Invalid token"
+            
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=error_msg,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        # Handle any other unexpected errors
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     """
-    Extract and return user from JWT token.
+    Get the current user from JWT token.
     
-    FastAPI dependency that validates the JWT token and returns the current user.
+    This dependency extracts the user information from the JWT token
+    and retrieves the user from the database.
     
     Args:
-        token: JWT token from Authorization header
+        token: JWT token from OAuth2 scheme
         
     Returns:
-        User object for the authenticated user
+        User object from database
         
     Raises:
         HTTPException: If token is invalid or user not found
     """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
     try:
         # Verify and decode the token
         payload = verify_token(token)
-        user_id: Optional[str] = payload.get("sub")
         
-        if user_id is None:
+        # Extract username/user_id from token
+        username: Optional[str] = payload.get("sub")
+        if username is None:
             raise credentials_exception
             
-    except HTTPException:
-        raise
-    except Exception:
-        raise credentials_exception
-    
-    try:
-        # Get user from database
-        user = await User.get_by_id(user_id)
+        # Query user from database
+        user = await User.get_by_username(username)
         if user is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+            
         return user
         
     except HTTPException:
+        # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
+        # Handle any database or other errors
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve user information"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
 
-async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
+async def get_current_active_user(
+    current_user: User = Depends(get_current_user)
+) -> User:
     """
-    FastAPI dependency that ensures the current user is active.
+    Get the current active user.
+    
+    This dependency ensures the current user is active/enabled.
     
     Args:
-        current_user: User object from get_current_user dependency
+        current_user: Current user from get_current_user dependency
         
     Returns:
         Active user object
@@ -207,45 +252,86 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
     Raises:
         HTTPException: If user is inactive
     """
-    if not getattr(current_user, 'is_active', True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user account"
-        )
+    if not current_user.is_active:
+        raise inactive_user_exception
+    
     return current_user
 
 
-# Utility function for token extraction without dependency injection
-def extract_user_id_from_token(token: str) -> Optional[str]:
+# Utility function for authentication
+async def authenticate_user(username: str, password: str) -> Optional[User]:
     """
-    Extract user ID from JWT token without database lookup.
+    Authenticate a user with username and password.
     
     Args:
-        token: JWT token string
+        username: Username to authenticate
+        password: Plain text password
         
     Returns:
-        User ID if token is valid, None otherwise
+        User object if authentication successful, None otherwise
     """
+    if not username or not password:
+        return None
+    
     try:
-        payload = verify_token(token)
-        return payload.get("sub")
-    except HTTPException:
+        # Get user from database
+        user = await User.get_by_username(username)
+        if not user:
+            return None
+        
+        # Verify password
+        if not verify_password(password, user.hashed_password):
+            return None
+            
+        return user
+        
+    except Exception:
+        # Log the error in production, but don't expose details
         return None
 
 
-# Token validation utility
-def is_token_valid(token: str) -> bool:
+# Token creation helper for login endpoints
+def create_user_access_token(user: User) -> str:
     """
-    Check if a JWT token is valid without extracting payload.
+    Create an access token for a specific user.
     
     Args:
-        token: JWT token string to validate
+        user: User object to create token for
         
     Returns:
-        True if token is valid, False otherwise
+        JWT access token string
     """
-    try:
-        verify_token(token)
-        return True
-    except HTTPException:
-        return False
+    access_token_data = {
+        "sub": user.username,
+        "user_id": user.id,
+        "email": user.email,
+    }
+    
+    return create_access_token(data=access_token_data)
+
+
+# Optional: Dependency for admin users
+async def get_current_admin_user(
+    current_user: User = Depends(get_current_active_user)
+) -> User:
+    """
+    Get the current admin user.
+    
+    This dependency ensures the current user is an admin.
+    
+    Args:
+        current_user: Current active user
+        
+    Returns:
+        Admin user object
+        
+    Raises:
+        HTTPException: If user is not an admin
+    """
+    if not getattr(current_user, 'is_admin', False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    return current_user
