@@ -1,475 +1,491 @@
 /**
- * Task Model - Production-ready implementation
- * Handles task management with full validation and database operations
+ * Task Model
+ * Sequelize model definition for Task entity with comprehensive validation,
+ * relationships, and business logic methods.
+ * 
+ * @module models/task
+ * @requires sequelize
+ * @requires @core/database
+ * @requires crypto
  */
 
-const { v4: uuidv4, validate: validateUUID } = require('uuid');
-const db = require('./database'); // Assuming database connection module
-
-/**
- * Custom error classes for validation failures
- */
-class ValidationError extends Error {
-    constructor(message, field = null) {
-        super(message);
-        this.name = 'ValidationError';
-        this.field = field;
-    }
-}
-
-class DatabaseError extends Error {
-    constructor(message, operation = null) {
-        super(message);
-        this.name = 'DatabaseError';
-        this.operation = operation;
-    }
-}
+const { DataTypes, Model } = require('sequelize');
+const { sequelize } = require('@core/database');
+const { randomUUID } = require('crypto');
 
 /**
  * Task Model Class
- * Represents a task with full validation and database operations
+ * Represents a task entity with status tracking, priority management,
+ * and user association capabilities.
  * 
- * Database Indexes Recommended:
- * - CREATE INDEX idx_tasks_user_id ON tasks(user_id);
- * - CREATE INDEX idx_tasks_status ON tasks(status);
- * - CREATE INDEX idx_tasks_due_date ON tasks(due_date);
- * - CREATE INDEX idx_tasks_created_at ON tasks(created_at);
+ * @class Task
+ * @extends {Model}
  */
-class Task {
-    // Enum definitions
-    static STATUS_ENUM = ['pending', 'in_progress', 'completed'];
-    static PRIORITY_ENUM = ['low', 'medium', 'high'];
-    static TABLE_NAME = 'tasks';
+class Task extends Model {
+  /**
+   * Mark task as completed
+   * Sets status to 'completed' and updates completed_at timestamp
+   * 
+   * @async
+   * @method markComplete
+   * @returns {Promise<Task>} Updated task instance
+   * @throws {Error} Database operation errors
+   * 
+   * @example
+   * const task = await Task.findByPk(taskId);
+   * await task.markComplete();
+   */
+  async markComplete() {
+    try {
+      // Validate current state
+      if (this.status === 'completed') {
+        throw new Error('Task is already completed');
+      }
 
-    /**
-     * Task constructor
-     * @param {Object} data - Task data object
-     * @param {string} [data.id] - UUID, auto-generated if not provided
-     * @param {string} data.title - Task title (required, 1-200 chars)
-     * @param {string} [data.description] - Task description (optional)
-     * @param {string} [data.status='pending'] - Task status
-     * @param {string} [data.priority='medium'] - Task priority
-     * @param {string} data.user_id - User UUID (required)
-     * @param {Date} [data.due_date] - Due date (optional)
-     * @param {Date} [data.completed_at] - Completion timestamp
-     * @param {Date} [data.created_at] - Creation timestamp
-     * @param {Date} [data.updated_at] - Update timestamp
-     */
-    constructor(data = {}) {
-        const now = new Date();
-        
-        // Set defaults and validate
-        this.id = data.id || uuidv4();
-        this.title = this._sanitizeString(data.title);
-        this.description = data.description ? this._sanitizeString(data.description) : null;
-        this.status = data.status || 'pending';
-        this.priority = data.priority || 'medium';
-        this.user_id = data.user_id;
-        this.due_date = data.due_date || null;
-        this.completed_at = data.completed_at || null;
-        this.created_at = data.created_at || now;
-        this.updated_at = data.updated_at || now;
-
-        // Validate all fields
-        this._validateFields();
+      // Update task properties
+      this.status = 'completed';
+      this.completed_at = new Date();
+      
+      // Save changes to database
+      await this.save();
+      
+      return this;
+    } catch (error) {
+      throw new Error(`Failed to mark task as complete: ${error.message}`);
     }
+  }
 
-    /**
-     * Sanitize string input to prevent XSS and trim whitespace
-     * @param {string} str - Input string
-     * @returns {string} - Sanitized string
-     * @private
-     */
-    _sanitizeString(str) {
-        if (typeof str !== 'string') return str;
-        return str.trim().replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+  /**
+   * Check if task is overdue
+   * Compares due_date with current date, considering timezone
+   * 
+   * @method isOverdue
+   * @returns {boolean} True if task is past due date and not completed
+   * 
+   * @example
+   * const task = await Task.findByPk(taskId);
+   * if (task.isOverdue()) {
+   *   console.log('Task is overdue!');
+   * }
+   */
+  isOverdue() {
+    try {
+      // Return false if no due date set or task is completed
+      if (!this.due_date || this.status === 'completed') {
+        return false;
+      }
+
+      // Compare due date with current date (normalize to start of day)
+      const currentDate = new Date();
+      const dueDate = new Date(this.due_date);
+      
+      // Set time to start of day for accurate comparison
+      currentDate.setHours(0, 0, 0, 0);
+      dueDate.setHours(0, 0, 0, 0);
+      
+      return dueDate < currentDate;
+    } catch (error) {
+      console.error(`Error checking overdue status: ${error.message}`);
+      return false;
     }
+  }
 
-    /**
-     * Validate all model fields
-     * @private
-     */
-    _validateFields() {
-        this._validateId();
-        this._validateTitle();
-        this._validateStatus();
-        this._validatePriority();
-        this._validateUserId();
-        this._validateDates();
+  /**
+   * Get formatted due date string
+   * 
+   * @method getFormattedDueDate
+   * @returns {string|null} Formatted due date or null if not set
+   */
+  getFormattedDueDate() {
+    if (!this.due_date) return null;
+    
+    try {
+      return new Date(this.due_date).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+    } catch (error) {
+      console.error(`Error formatting due date: ${error.message}`);
+      return null;
     }
+  }
 
-    /**
-     * Validate ID field
-     * @private
-     */
-    _validateId() {
-        if (!validateUUID(this.id)) {
-            throw new ValidationError('Invalid UUID format for id', 'id');
+  /**
+   * Get task summary object
+   * 
+   * @method getSummary
+   * @returns {Object} Task summary with key information
+   */
+  getSummary() {
+    return {
+      id: this.id,
+      title: this.title,
+      status: this.status,
+      priority: this.priority,
+      isOverdue: this.isOverdue(),
+      dueDate: this.getFormattedDueDate(),
+      createdAt: this.created_at
+    };
+  }
+}
+
+// Initialize Task model with field definitions and constraints
+Task.init({
+  /**
+   * Primary key - UUID
+   */
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: () => randomUUID(),
+    primaryKey: true,
+    allowNull: false,
+    comment: 'Unique identifier for the task'
+  },
+
+  /**
+   * Task title with validation
+   */
+  title: {
+    type: DataTypes.STRING(200),
+    allowNull: false,
+    validate: {
+      notEmpty: {
+        msg: 'Task title cannot be empty'
+      },
+      len: {
+        args: [1, 200],
+        msg: 'Task title must be between 1 and 200 characters'
+      },
+      notNull: {
+        msg: 'Task title is required'
+      }
+    },
+    comment: 'Task title or summary'
+  },
+
+  /**
+   * Task description - optional detailed information
+   */
+  description: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    validate: {
+      len: {
+        args: [0, 5000],
+        msg: 'Task description cannot exceed 5000 characters'
+      }
+    },
+    comment: 'Detailed task description'
+  },
+
+  /**
+   * Task status with enum validation
+   */
+  status: {
+    type: DataTypes.ENUM('pending', 'in_progress', 'completed'),
+    allowNull: false,
+    defaultValue: 'pending',
+    validate: {
+      isIn: {
+        args: [['pending', 'in_progress', 'completed']],
+        msg: 'Status must be one of: pending, in_progress, completed'
+      }
+    },
+    comment: 'Current status of the task'
+  },
+
+  /**
+   * Task priority with enum validation
+   */
+  priority: {
+    type: DataTypes.ENUM('low', 'medium', 'high'),
+    allowNull: false,
+    defaultValue: 'medium',
+    validate: {
+      isIn: {
+        args: [['low', 'medium', 'high']],
+        msg: 'Priority must be one of: low, medium, high'
+      }
+    },
+    comment: 'Task priority level'
+  },
+
+  /**
+   * Foreign key reference to User model
+   */
+  user_id: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'users',
+      key: 'id'
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'CASCADE',
+    validate: {
+      notNull: {
+        msg: 'User ID is required'
+      },
+      isUUID: {
+        args: 4,
+        msg: 'User ID must be a valid UUID'
+      }
+    },
+    comment: 'Reference to the user who owns this task'
+  },
+
+  /**
+   * Optional due date
+   */
+  due_date: {
+    type: DataTypes.DATEONLY,
+    allowNull: true,
+    validate: {
+      isDate: {
+        msg: 'Due date must be a valid date'
+      },
+      isAfterToday(value) {
+        if (value && new Date(value) < new Date().setHours(0, 0, 0, 0)) {
+          throw new Error('Due date cannot be in the past');
         }
+      }
+    },
+    comment: 'Optional due date for the task'
+  },
+
+  /**
+   * Completion timestamp - set when task is marked complete
+   */
+  completed_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    validate: {
+      isDate: {
+        msg: 'Completed date must be a valid date'
+      }
+    },
+    comment: 'Timestamp when task was completed'
+  },
+
+  /**
+   * Creation timestamp
+   */
+  created_at: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    defaultValue: DataTypes.NOW,
+    comment: 'Task creation timestamp'
+  },
+
+  /**
+   * Last update timestamp
+   */
+  updated_at: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    defaultValue: DataTypes.NOW,
+    comment: 'Last modification timestamp'
+  }
+}, {
+  sequelize,
+  modelName: 'Task',
+  tableName: 'tasks',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+  underscored: true,
+  
+  // Database indexes for performance optimization
+  indexes: [
+    {
+      fields: ['user_id'],
+      name: 'idx_tasks_user_id',
+      comment: 'Index for user-based task queries'
+    },
+    {
+      fields: ['status'],
+      name: 'idx_tasks_status',
+      comment: 'Index for status-based filtering'
+    },
+    {
+      fields: ['due_date'],
+      name: 'idx_tasks_due_date',
+      comment: 'Index for due date queries and sorting'
+    },
+    {
+      fields: ['priority', 'status'],
+      name: 'idx_tasks_priority_status',
+      comment: 'Composite index for priority and status queries'
+    },
+    {
+      fields: ['user_id', 'status'],
+      name: 'idx_tasks_user_status',
+      comment: 'Composite index for user-specific status queries'
     }
+  ],
+
+  // Model-level validations
+  validate: {
+    /**
+     * Validate completion logic
+     */
+    completionLogic() {
+      if (this.status === 'completed' && !this.completed_at) {
+        throw new Error('Completed tasks must have a completion timestamp');
+      }
+      if (this.status !== 'completed' && this.completed_at) {
+        throw new Error('Only completed tasks can have a completion timestamp');
+      }
+    },
 
     /**
-     * Validate title field
-     * @private
+     * Validate due date logic
      */
-    _validateTitle() {
-        if (!this.title || typeof this.title !== 'string') {
-            throw new ValidationError('Title is required and must be a string', 'title');
-        }
-        if (this.title.length < 1 || this.title.length > 200) {
-            throw new ValidationError('Title must be between 1 and 200 characters', 'title');
-        }
+    dueDateLogic() {
+      if (this.due_date && this.completed_at && 
+          new Date(this.due_date) < new Date(this.completed_at)) {
+        // This is acceptable - task can be completed after due date
+        // Just log for tracking purposes
+        console.warn(`Task ${this.id} was completed after due date`);
+      }
     }
+  },
+
+  // Hooks for additional business logic
+  hooks: {
+    /**
+     * Before validation hook
+     */
+    beforeValidate: (task, options) => {
+      // Trim whitespace from title
+      if (task.title) {
+        task.title = task.title.trim();
+      }
+      
+      // Trim whitespace from description
+      if (task.description) {
+        task.description = task.description.trim();
+      }
+    },
 
     /**
-     * Validate status field
-     * @private
+     * Before update hook
      */
-    _validateStatus() {
-        if (!Task.STATUS_ENUM.includes(this.status)) {
-            throw new ValidationError(
-                `Status must be one of: ${Task.STATUS_ENUM.join(', ')}`, 
-                'status'
-            );
-        }
+    beforeUpdate: (task, options) => {
+      // Auto-set completed_at when status changes to completed
+      if (task.changed('status') && task.status === 'completed' && !task.completed_at) {
+        task.completed_at = new Date();
+      }
+      
+      // Clear completed_at when status changes from completed
+      if (task.changed('status') && task.status !== 'completed' && task.completed_at) {
+        task.completed_at = null;
+      }
+    }
+  },
+
+  comment: 'Task management table with status tracking and user association'
+});
+
+/**
+ * Define model associations
+ * This should be called after all models are defined
+ * 
+ * @static
+ * @method associate
+ * @param {Object} models - Object containing all defined models
+ */
+Task.associate = function(models) {
+  try {
+    // Many-to-one relationship with User
+    Task.belongsTo(models.User, {
+      foreignKey: 'user_id',
+      as: 'user',
+      onUpdate: 'CASCADE',
+      onDelete: 'CASCADE'
+    });
+  } catch (error) {
+    console.error('Error defining Task associations:', error.message);
+  }
+};
+
+/**
+ * Static method to find overdue tasks
+ * 
+ * @static
+ * @async
+ * @method findOverdueTasks
+ * @param {string} [userId] - Optional user ID to filter by
+ * @returns {Promise<Task[]>} Array of overdue tasks
+ */
+Task.findOverdueTasks = async function(userId = null) {
+  try {
+    const whereClause = {
+      due_date: {
+        [sequelize.Sequelize.Op.lt]: new Date()
+      },
+      status: {
+        [sequelize.Sequelize.Op.ne]: 'completed'
+      }
+    };
+
+    if (userId) {
+      whereClause.user_id = userId;
     }
 
-    /**
-     * Validate priority field
-     * @private
-     */
-    _validatePriority() {
-        if (!Task.PRIORITY_ENUM.includes(this.priority)) {
-            throw new ValidationError(
-                `Priority must be one of: ${Task.PRIORITY_ENUM.join(', ')}`, 
-                'priority'
-            );
-        }
-    }
+    return await this.findAll({
+      where: whereClause,
+      order: [['due_date', 'ASC']],
+      include: [{
+        model: sequelize.models.User,
+        as: 'user',
+        attributes: ['id', 'name', 'email']
+      }]
+    });
+  } catch (error) {
+    throw new Error(`Failed to find overdue tasks: ${error.message}`);
+  }
+};
 
-    /**
-     * Validate user_id field
-     * @private
-     */
-    _validateUserId() {
-        if (!this.user_id) {
-            throw new ValidationError('user_id is required', 'user_id');
-        }
-        if (!validateUUID(this.user_id)) {
-            throw new ValidationError('Invalid UUID format for user_id', 'user_id');
-        }
-    }
+/**
+ * Static method to get task statistics
+ * 
+ * @static
+ * @async
+ * @method getTaskStats
+ * @param {string} userId - User ID to get stats for
+ * @returns {Promise<Object>} Task statistics object
+ */
+Task.getTaskStats = async function(userId) {
+  try {
+    const stats = await this.findAll({
+      where: { user_id: userId },
+      attributes: [
+        'status',
+        [sequelize.fn('COUNT', sequelize.col('id')), 'count']
+      ],
+      group: ['status'],
+      raw: true
+    });
 
-    /**
-     * Validate date fields
-     * @private
-     */
-    _validateDates() {
-        const dateFields = ['due_date', 'completed_at', 'created_at', 'updated_at'];
-        
-        dateFields.forEach(field => {
-            if (this[field] !== null && this[field] !== undefined) {
-                if (!(this[field] instanceof Date) || isNaN(this[field].getTime())) {
-                    throw new ValidationError(`${field} must be a valid Date object`, field);
-                }
-            }
-        });
-    }
+    const result = {
+      pending: 0,
+      in_progress: 0,
+      completed: 0,
+      total: 0
+    };
 
-    /**
-     * Mark task as completed
-     * Sets status to 'completed' and sets completed_at timestamp
-     */
-    markComplete() {
-        this.status = 'completed';
-        this.completed_at = new Date();
-        this.updated_at = new Date();
-    }
+    stats.forEach(stat => {
+      result[stat.status] = parseInt(stat.count);
+      result.total += parseInt(stat.count);
+    });
 
-    /**
-     * Check if task is overdue
-     * @returns {boolean} - True if current date > due_date
-     */
-    isOverdue() {
-        if (!this.due_date || this.status === 'completed') {
-            return false;
-        }
-        return new Date() > this.due_date;
-    }
+    return result;
+  } catch (error) {
+    throw new Error(`Failed to get task statistics: ${error.message}`);
+  }
+};
 
-    /**
-     * Update task fields with validation
-     * @param {Object} updates - Fields to update
-     */
-    update(updates = {}) {
-        const allowedFields = [
-            'title', 'description', 'status', 'priority', 'due_date'
-        ];
-
-        // Apply updates
-        Object.keys(updates).forEach(key => {
-            if (allowedFields.includes(key)) {
-                if (key === 'title' || key === 'description') {
-                    this[key] = updates[key] ? this._sanitizeString(updates[key]) : updates[key];
-                } else {
-                    this[key] = updates[key];
-                }
-            }
-        });
-
-        this.updated_at = new Date();
-        this._validateFields();
-    }
-
-    /**
-     * Convert task to plain object for JSON serialization
-     * @returns {Object} - Plain object representation
-     */
-    toJSON() {
-        return {
-            id: this.id,
-            title: this.title,
-            description: this.description,
-            status: this.status,
-            priority: this.priority,
-            user_id: this.user_id,
-            due_date: this.due_date,
-            completed_at: this.completed_at,
-            created_at: this.created_at,
-            updated_at: this.updated_at
-        };
-    }
-
-    // Static Factory Methods
-
-    /**
-     * Create a new task instance
-     * @param {Object} data - Task data
-     * @returns {Task} - New task instance
-     */
-    static create(data) {
-        return new Task(data);
-    }
-
-    /**
-     * Create task from database row
-     * @param {Object} row - Database row object
-     * @returns {Task} - Task instance
-     */
-    static fromDatabaseRow(row) {
-        return new Task({
-            id: row.id,
-            title: row.title,
-            description: row.description,
-            status: row.status,
-            priority: row.priority,
-            user_id: row.user_id,
-            due_date: row.due_date ? new Date(row.due_date) : null,
-            completed_at: row.completed_at ? new Date(row.completed_at) : null,
-            created_at: new Date(row.created_at),
-            updated_at: new Date(row.updated_at)
-        });
-    }
-
-    // Database Operations
-
-    /**
-     * Save task to database (insert or update)
-     * @returns {Promise<Task>} - Saved task instance
-     */
-    async save() {
-        try {
-            const exists = await Task.findById(this.id);
-            
-            if (exists) {
-                return await this._update();
-            } else {
-                return await this._insert();
-            }
-        } catch (error) {
-            throw new DatabaseError(`Failed to save task: ${error.message}`, 'save');
-        }
-    }
-
-    /**
-     * Insert new task into database
-     * @returns {Promise<Task>} - Inserted task instance
-     * @private
-     */
-    async _insert() {
-        const query = `
-            INSERT INTO ${Task.TABLE_NAME} (
-                id, title, description, status, priority, user_id, 
-                due_date, completed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-
-        const params = [
-            this.id,
-            this.title,
-            this.description,
-            this.status,
-            this.priority,
-            this.user_id,
-            this.due_date,
-            this.completed_at,
-            this.created_at,
-            this.updated_at
-        ];
-
-        await db.execute(query, params);
-        return this;
-    }
-
-    /**
-     * Update existing task in database
-     * @returns {Promise<Task>} - Updated task instance
-     * @private
-     */
-    async _update() {
-        this.updated_at = new Date();
-        
-        const query = `
-            UPDATE ${Task.TABLE_NAME} 
-            SET title = ?, description = ?, status = ?, priority = ?, 
-                due_date = ?, completed_at = ?, updated_at = ?
-            WHERE id = ?
-        `;
-
-        const params = [
-            this.title,
-            this.description,
-            this.status,
-            this.priority,
-            this.due_date,
-            this.completed_at,
-            this.updated_at,
-            this.id
-        ];
-
-        const result = await db.execute(query, params);
-        
-        if (result.affectedRows === 0) {
-            throw new DatabaseError('Task not found for update', 'update');
-        }
-
-        return this;
-    }
-
-    /**
-     * Find task by ID
-     * @param {string} id - Task UUID
-     * @returns {Promise<Task|null>} - Task instance or null
-     */
-    static async findById(id) {
-        try {
-            if (!validateUUID(id)) {
-                throw new ValidationError('Invalid UUID format', 'id');
-            }
-
-            const query = `SELECT * FROM ${Task.TABLE_NAME} WHERE id = ?`;
-            const [rows] = await db.execute(query, [id]);
-
-            return rows.length > 0 ? Task.fromDatabaseRow(rows[0]) : null;
-        } catch (error) {
-            throw new DatabaseError(`Failed to find task by ID: ${error.message}`, 'findById');
-        }
-    }
-
-    /**
-     * Find tasks by user ID
-     * @param {string} userId - User UUID
-     * @param {Object} options - Query options
-     * @param {number} [options.limit=50] - Limit results
-     * @param {number} [options.offset=0] - Offset for pagination
-     * @param {string} [options.status] - Filter by status
-     * @param {string} [options.priority] - Filter by priority
-     * @returns {Promise<Task[]>} - Array of task instances
-     */
-    static async findByUserId(userId, options = {}) {
-        try {
-            if (!validateUUID(userId)) {
-                throw new ValidationError('Invalid UUID format for userId', 'userId');
-            }
-
-            const { limit = 50, offset = 0, status, priority } = options;
-            
-            let query = `SELECT * FROM ${Task.TABLE_NAME} WHERE user_id = ?`;
-            const params = [userId];
-
-            if (status && Task.STATUS_ENUM.includes(status)) {
-                query += ' AND status = ?';
-                params.push(status);
-            }
-
-            if (priority && Task.PRIORITY_ENUM.includes(priority)) {
-                query += ' AND priority = ?';
-                params.push(priority);
-            }
-
-            query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-            params.push(limit, offset);
-
-            const [rows] = await db.execute(query, params);
-            return rows.map(row => Task.fromDatabaseRow(row));
-        } catch (error) {
-            throw new DatabaseError(`Failed to find tasks by user ID: ${error.message}`, 'findByUserId');
-        }
-    }
-
-    /**
-     * Find overdue tasks
-     * @param {string} [userId] - Optional user ID filter
-     * @returns {Promise<Task[]>} - Array of overdue task instances
-     */
-    static async findOverdue(userId = null) {
-        try {
-            let query = `
-                SELECT * FROM ${Task.TABLE_NAME} 
-                WHERE due_date < ? AND status != 'completed'
-            `;
-            const params = [new Date()];
-
-            if (userId) {
-                if (!validateUUID(userId)) {
-                    throw new ValidationError('Invalid UUID format for userId', 'userId');
-                }
-                query += ' AND user_id = ?';
-                params.push(userId);
-            }
-
-            query += ' ORDER BY due_date ASC';
-
-            const [rows] = await db.execute(query, params);
-            return rows.map(row => Task.fromDatabaseRow(row));
-        } catch (error) {
-            throw new DatabaseError(`Failed to find overdue tasks: ${error.message}`, 'findOverdue');
-        }
-    }
-
-    /**
-     * Delete task by ID
-     * @param {string} id - Task UUID
-     * @returns {Promise<boolean>} - True if deleted, false if not found
-     */
-    static async deleteById(id) {
-        try {
-            if (!validateUUID(id)) {
-                throw new ValidationError('Invalid UUID format', 'id');
-            }
-
-            const query = `DELETE FROM ${Task.TABLE_NAME} WHERE id = ?`;
-            const result = await db.execute(query, [id]);
-
-            return result.affectedRows > 0;
-        } catch (error) {
-            throw new DatabaseError(`Failed to delete task: ${error.message}`, 'deleteById');
-        }
-    }
-
-    /**
-     * Get task statistics for a user
-     * @param {string} userId - User UUID
-     * @returns {Promise<Object>} - Statistics object
-     */
-    static async getStatsByUs
+// Export the Task model as default
+module.exports = Task;

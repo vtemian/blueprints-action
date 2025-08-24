@@ -1,432 +1,473 @@
 /**
- * Authentication and Authorization Module
- * Provides JWT token management, password security, and Express middleware
- * @module core.auth
+ * Authentication and Authorization Utility Module
+ * Provides JWT token management, password handling, and security utilities
+ * 
+ * Environment Variables Required:
+ * - JWT_SECRET: Secret key for JWT signing (minimum 32 characters recommended)
+ * 
+ * Usage Examples:
+ * import { createAccessToken, verifyToken, getPasswordHash } from './auth-utils.js';
+ * 
+ * // Generate token
+ * const token = await createAccessToken({ userId: 123, email: 'user@example.com' });
+ * 
+ * // Verify token
+ * const payload = await verifyToken(token);
+ * 
+ * // Hash password
+ * const hash = await getPasswordHash('userPassword123');
+ * 
+ * Rate Limiting Considerations:
+ * - Implement rate limiting on login endpoints (5 attempts per 15 minutes)
+ * - Consider progressive delays for failed authentication attempts
+ * - Monitor and log suspicious authentication patterns
  */
 
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
+import { User } from '@models/user';
 
-// Configuration constants
-const SALT_ROUNDS = 12;
-const TOKEN_EXPIRATION = '24h';
-const JWT_ALGORITHM = 'HS256';
-const BEARER_PREFIX = 'Bearer ';
-
-// Environment variable validation
+// Configuration
 const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = '24h';
+const BCRYPT_SALT_ROUNDS = 12;
+const TOKEN_EXPIRY_SECONDS = 24 * 60 * 60; // 24 hours in seconds
+
+// Validate JWT secret on module load
 if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET environment variable is required');
+    throw new Error('JWT_SECRET environment variable is required');
 }
 
 if (JWT_SECRET.length < 32) {
-  throw new Error('JWT_SECRET must be at least 32 characters long');
+    console.warn('WARNING: JWT_SECRET should be at least 32 characters for security');
 }
 
 /**
- * Custom error classes for better error handling
+ * Custom Error Classes for Authentication
  */
-class AuthenticationError extends Error {
-  constructor(message, statusCode = 401) {
-    super(message);
-    this.name = 'AuthenticationError';
-    this.statusCode = statusCode;
-  }
+export class AuthenticationError extends Error {
+    constructor(message = 'Authentication failed') {
+        super(message);
+        this.name = 'AuthenticationError';
+        this.statusCode = 401;
+    }
 }
 
-class ValidationError extends Error {
-  constructor(message, statusCode = 400) {
-    super(message);
-    this.name = 'ValidationError';
-    this.statusCode = statusCode;
-  }
+export class TokenExpiredError extends Error {
+    constructor(message = 'Token has expired') {
+        super(message);
+        this.name = 'TokenExpiredError';
+        this.statusCode = 401;
+    }
+}
+
+export class InvalidTokenError extends Error {
+    constructor(message = 'Invalid token provided') {
+        super(message);
+        this.name = 'InvalidTokenError';
+        this.statusCode = 401;
+    }
 }
 
 /**
- * Validates input parameters for null, undefined, or empty values
- * @param {*} value - Value to validate
- * @param {string} paramName - Parameter name for error messages
- * @throws {ValidationError} When validation fails
+ * Input validation utilities
  */
-const validateInput = (value, paramName) => {
-  if (value === null || value === undefined) {
-    throw new ValidationError(`${paramName} is required and cannot be null or undefined`);
-  }
-  
-  if (typeof value === 'string' && value.trim().length === 0) {
-    throw new ValidationError(`${paramName} cannot be empty`);
-  }
+const validateInput = {
+    /**
+     * Validates that a value is a non-empty string
+     * @param {any} value - Value to validate
+     * @param {string} fieldName - Name of the field for error messages
+     * @throws {Error} If validation fails
+     */
+    nonEmptyString(value, fieldName) {
+        if (typeof value !== 'string' || value.trim().length === 0) {
+            throw new Error(`${fieldName} must be a non-empty string`);
+        }
+    },
+
+    /**
+     * Validates that a value is a non-null object
+     * @param {any} value - Value to validate
+     * @param {string} fieldName - Name of the field for error messages
+     * @throws {Error} If validation fails
+     */
+    nonNullObject(value, fieldName) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            throw new Error(`${fieldName} must be a valid object`);
+        }
+    },
+
+    /**
+     * Validates password strength
+     * @param {string} password - Password to validate
+     * @throws {Error} If password doesn't meet requirements
+     */
+    passwordStrength(password) {
+        if (typeof password !== 'string') {
+            throw new Error('Password must be a string');
+        }
+        
+        if (password.length < 8) {
+            throw new Error('Password must be at least 8 characters long');
+        }
+        
+        if (password.length > 128) {
+            throw new Error('Password must not exceed 128 characters');
+        }
+        
+        // Check for at least one number, one lowercase, one uppercase letter
+        const hasNumber = /\d/.test(password);
+        const hasLowercase = /[a-z]/.test(password);
+        const hasUppercase = /[A-Z]/.test(password);
+        
+        if (!hasNumber || !hasLowercase || !hasUppercase) {
+            throw new Error('Password must contain at least one number, one lowercase letter, and one uppercase letter');
+        }
+    }
 };
 
 /**
- * Validates password strength
- * @param {string} password - Password to validate
- * @throws {ValidationError} When password doesn't meet requirements
- */
-const validatePassword = (password) => {
-  validateInput(password, 'Password');
-  
-  if (typeof password !== 'string') {
-    throw new ValidationError('Password must be a string');
-  }
-  
-  if (password.length < 8) {
-    throw new ValidationError('Password must be at least 8 characters long');
-  }
-  
-  if (password.length > 128) {
-    throw new ValidationError('Password must not exceed 128 characters');
-  }
-};
-
-/**
- * Creates a JWT access token with the provided data
- * @param {Object} data - Payload data to include in the token
- * @param {string|number} data.userId - User identifier
- * @param {string} [data.email] - User email
+ * Creates a JWT access token with user data
+ * @param {Object} data - User data to include in token payload
+ * @param {string|number} data.userId - User ID (required)
+ * @param {string} data.email - User email (required)
  * @param {string} [data.role] - User role
- * @returns {Promise<string>} JWT access token
- * @throws {ValidationError} When data is invalid
- * @throws {Error} When token generation fails
+ * @param {Object} [data.permissions] - User permissions
+ * @returns {Promise<string>} JWT token
+ * @throws {Error} If data validation fails or token creation fails
+ * 
+ * @example
+ * const token = await createAccessToken({
+ *   userId: 123,
+ *   email: 'user@example.com',
+ *   role: 'user'
+ * });
  */
-export const createAccessToken = async (data) => {
-  try {
-    validateInput(data, 'Token data');
-    
-    if (typeof data !== 'object' || Array.isArray(data)) {
-      throw new ValidationError('Token data must be an object');
+export async function createAccessToken(data) {
+    try {
+        // Validate input
+        validateInput.nonNullObject(data, 'Token data');
+        
+        if (!data.userId) {
+            throw new Error('userId is required in token data');
+        }
+        
+        if (!data.email || typeof data.email !== 'string') {
+            throw new Error('Valid email is required in token data');
+        }
+
+        // Create token payload
+        const payload = {
+            userId: data.userId,
+            email: data.email.toLowerCase().trim(),
+            role: data.role || 'user',
+            permissions: data.permissions || {},
+            iat: Math.floor(Date.now() / 1000),
+            exp: Math.floor(Date.now() / 1000) + TOKEN_EXPIRY_SECONDS
+        };
+
+        // Generate token
+        const token = jwt.sign(payload, JWT_SECRET, {
+            algorithm: 'HS256',
+            expiresIn: JWT_EXPIRES_IN
+        });
+
+        return token;
+
+    } catch (error) {
+        if (error.name === 'JsonWebTokenError') {
+            throw new AuthenticationError('Failed to create access token');
+        }
+        throw error;
     }
-    
-    validateInput(data.userId, 'User ID');
-    
-    const payload = {
-      userId: data.userId,
-      email: data.email || null,
-      role: data.role || 'user',
-      iat: Math.floor(Date.now() / 1000),
-      type: 'access'
-    };
-    
-    const token = jwt.sign(payload, JWT_SECRET, {
-      expiresIn: TOKEN_EXPIRATION,
-      algorithm: JWT_ALGORITHM,
-      issuer: 'core.auth',
-      audience: 'api'
-    });
-    
-    return token;
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      throw error;
-    }
-    throw new Error(`Failed to create access token: ${error.message}`);
-  }
-};
+}
 
 /**
  * Verifies and decodes a JWT token
  * @param {string} token - JWT token to verify
  * @returns {Promise<Object>} Decoded token payload
- * @throws {ValidationError} When token format is invalid
- * @throws {AuthenticationError} When token is invalid or expired
+ * @throws {InvalidTokenError} If token is malformed or invalid
+ * @throws {TokenExpiredError} If token has expired
+ * @throws {AuthenticationError} For other authentication failures
+ * 
+ * @example
+ * try {
+ *   const payload = await verifyToken(userToken);
+ *   console.log('User ID:', payload.userId);
+ * } catch (error) {
+ *   if (error instanceof TokenExpiredError) {
+ *     // Handle expired token
+ *   }
+ * }
  */
-export const verifyToken = async (token) => {
-  try {
-    validateInput(token, 'Token');
-    
-    if (typeof token !== 'string') {
-      throw new ValidationError('Token must be a string');
+export async function verifyToken(token) {
+    try {
+        // Validate input
+        validateInput.nonEmptyString(token, 'Token');
+
+        // Clean token (remove Bearer prefix if present)
+        const cleanToken = token.replace(/^Bearer\s+/i, '').trim();
+        
+        if (!cleanToken) {
+            throw new InvalidTokenError('Token cannot be empty');
+        }
+
+        // Verify token structure (basic JWT format check)
+        const tokenParts = cleanToken.split('.');
+        if (tokenParts.length !== 3) {
+            throw new InvalidTokenError('Malformed token structure');
+        }
+
+        // Verify and decode token
+        const decoded = jwt.verify(cleanToken, JWT_SECRET, {
+            algorithms: ['HS256']
+        });
+
+        // Additional payload validation
+        if (!decoded.userId || !decoded.email) {
+            throw new InvalidTokenError('Token payload is missing required fields');
+        }
+
+        return decoded;
+
+    } catch (error) {
+        // Handle specific JWT errors
+        if (error.name === 'TokenExpiredError') {
+            throw new TokenExpiredError('Token has expired');
+        }
+        
+        if (error.name === 'JsonWebTokenError') {
+            throw new InvalidTokenError('Invalid token signature or format');
+        }
+        
+        if (error.name === 'NotBeforeError') {
+            throw new InvalidTokenError('Token not active yet');
+        }
+
+        // Re-throw custom errors
+        if (error instanceof InvalidTokenError || 
+            error instanceof TokenExpiredError || 
+            error instanceof AuthenticationError) {
+            throw error;
+        }
+
+        // Generic authentication error for unexpected issues
+        throw new AuthenticationError('Token verification failed');
     }
-    
-    // Remove Bearer prefix if present
-    const cleanToken = token.startsWith(BEARER_PREFIX) 
-      ? token.slice(BEARER_PREFIX.length) 
-      : token;
-    
-    if (!cleanToken) {
-      throw new ValidationError('Token cannot be empty after removing Bearer prefix');
-    }
-    
-    const decoded = jwt.verify(cleanToken, JWT_SECRET, {
-      algorithms: [JWT_ALGORITHM],
-      issuer: 'core.auth',
-      audience: 'api'
-    });
-    
-    // Validate token type
-    if (decoded.type !== 'access') {
-      throw new AuthenticationError('Invalid token type');
-    }
-    
-    return decoded;
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      throw error;
-    }
-    
-    if (error instanceof jwt.JsonWebTokenError) {
-      if (error.name === 'TokenExpiredError') {
-        throw new AuthenticationError('Token has expired');
-      }
-      if (error.name === 'JsonWebTokenError') {
-        throw new AuthenticationError('Invalid token format');
-      }
-      if (error.name === 'NotBeforeError') {
-        throw new AuthenticationError('Token not active yet');
-      }
-    }
-    
-    throw new AuthenticationError(`Token verification failed: ${error.message}`);
-  }
-};
+}
 
 /**
- * Hashes a password using bcrypt
+ * Hashes a password using bcrypt with salt rounds
  * @param {string} password - Plain text password to hash
  * @returns {Promise<string>} Hashed password
- * @throws {ValidationError} When password is invalid
- * @throws {Error} When hashing fails
+ * @throws {Error} If password validation fails or hashing fails
+ * 
+ * @example
+ * const hashedPassword = await getPasswordHash('userPassword123');
+ * // Store hashedPassword in database
  */
-export const getPasswordHash = async (password) => {
-  try {
-    validatePassword(password);
-    
-    const hash = await bcrypt.hash(password, SALT_ROUNDS);
-    return hash;
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      throw error;
+export async function getPasswordHash(password) {
+    try {
+        // Validate password
+        validateInput.passwordStrength(password);
+
+        // Generate hash
+        const hash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+        
+        if (!hash) {
+            throw new Error('Failed to generate password hash');
+        }
+
+        return hash;
+
+    } catch (error) {
+        // Don't log the actual password for security
+        if (error.message.includes('Password')) {
+            throw error; // Re-throw validation errors
+        }
+        
+        throw new Error('Password hashing failed');
     }
-    throw new Error(`Failed to hash password: ${error.message}`);
-  }
-};
+}
 
 /**
  * Verifies a plain password against a hashed password
- * @param {string} plainPassword - Plain text password
+ * @param {string} plainPassword - Plain text password to verify
  * @param {string} hashedPassword - Hashed password to compare against
  * @returns {Promise<boolean>} True if passwords match, false otherwise
- * @throws {ValidationError} When parameters are invalid
- * @throws {Error} When verification fails
+ * @throws {Error} If input validation fails
+ * 
+ * @example
+ * const isValid = await verifyPassword('userInput', storedHashFromDB);
+ * if (isValid) {
+ *   // Password is correct
+ * }
  */
-export const verifyPassword = async (plainPassword, hashedPassword) => {
-  try {
-    validateInput(plainPassword, 'Plain password');
-    validateInput(hashedPassword, 'Hashed password');
-    
-    if (typeof plainPassword !== 'string') {
-      throw new ValidationError('Plain password must be a string');
+export async function verifyPassword(plainPassword, hashedPassword) {
+    try {
+        // Validate inputs
+        validateInput.nonEmptyString(plainPassword, 'Plain password');
+        validateInput.nonEmptyString(hashedPassword, 'Hashed password');
+
+        // Verify password using constant-time comparison
+        const isMatch = await bcrypt.compare(plainPassword, hashedPassword);
+        
+        return Boolean(isMatch);
+
+    } catch (error) {
+        // Don't log passwords for security
+        if (error.message.includes('password')) {
+            throw error; // Re-throw validation errors
+        }
+        
+        // For bcrypt errors, return false instead of throwing
+        // This prevents timing attacks and handles corrupted hashes gracefully
+        console.error('Password verification error:', error.message);
+        return false;
     }
-    
-    if (typeof hashedPassword !== 'string') {
-      throw new ValidationError('Hashed password must be a string');
-    }
-    
-    // Basic bcrypt hash format validation
-    if (!hashedPassword.startsWith('$2') || hashedPassword.length < 59) {
-      throw new ValidationError('Invalid hash format');
-    }
-    
-    const isValid = await bcrypt.compare(plainPassword, hashedPassword);
-    return isValid;
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      throw error;
-    }
-    throw new Error(`Failed to verify password: ${error.message}`);
-  }
-};
+}
 
 /**
- * Extracts and validates user information from a JWT token
- * @param {string} token - JWT token containing user data
- * @returns {Promise<Object>} User information from token
- * @throws {ValidationError|AuthenticationError} When token is invalid
+ * Extracts and validates current user from JWT token
+ * @param {string} token - JWT token containing user information
+ * @returns {Promise<Object>} User object with validated data
+ * @throws {InvalidTokenError} If token is invalid
+ * @throws {TokenExpiredError} If token has expired
+ * @throws {AuthenticationError} If user validation fails
+ * 
+ * @example
+ * const currentUser = await getCurrentUser(authToken);
+ * console.log('Current user:', currentUser.email);
  */
-export const getCurrentUser = async (token) => {
-  try {
-    const decoded = await verifyToken(token);
-    
-    const user = {
-      userId: decoded.userId,
-      email: decoded.email,
-      role: decoded.role,
-      iat: decoded.iat,
-      exp: decoded.exp
-    };
-    
-    return user;
-  } catch (error) {
-    throw error; // Re-throw validation and authentication errors
-  }
-};
+export async function getCurrentUser(token) {
+    try {
+        // Verify token and get payload
+        const payload = await verifyToken(token);
+
+        // Extract user data from payload
+        const userData = {
+            userId: payload.userId,
+            email: payload.email,
+            role: payload.role || 'user',
+            permissions: payload.permissions || {},
+            tokenIssuedAt: payload.iat,
+            tokenExpiresAt: payload.exp
+        };
+
+        // Optional: Validate user still exists in database
+        // Uncomment if you want to check user existence on every request
+        /*
+        try {
+            const dbUser = await User.findById(userData.userId);
+            if (!dbUser || !dbUser.isActive) {
+                throw new AuthenticationError('User account is no longer valid');
+            }
+            
+            // Merge database user data if needed
+            userData.isActive = dbUser.isActive;
+            userData.lastLoginAt = dbUser.lastLoginAt;
+        } catch (dbError) {
+            throw new AuthenticationError('User validation failed');
+        }
+        */
+
+        return userData;
+
+    } catch (error) {
+        // Re-throw token-related errors
+        if (error instanceof InvalidTokenError || 
+            error instanceof TokenExpiredError || 
+            error instanceof AuthenticationError) {
+            throw error;
+        }
+
+        // Generic error for unexpected issues
+        throw new AuthenticationError('Failed to get current user');
+    }
+}
 
 /**
- * Extracts Bearer token from Authorization header
+ * Utility function to extract token from Authorization header
  * @param {string} authHeader - Authorization header value
  * @returns {string|null} Extracted token or null if not found
+ * 
+ * @example
+ * const token = extractTokenFromHeader(req.headers.authorization);
+ * if (token) {
+ *   const user = await getCurrentUser(token);
+ * }
  */
-const extractBearerToken = (authHeader) => {
-  if (!authHeader || typeof authHeader !== 'string') {
-    return null;
-  }
-  
-  if (!authHeader.startsWith(BEARER_PREFIX)) {
-    return null;
-  }
-  
-  const token = authHeader.slice(BEARER_PREFIX.length).trim();
-  return token || null;
-};
+export function extractTokenFromHeader(authHeader) {
+    if (!authHeader || typeof authHeader !== 'string') {
+        return null;
+    }
+
+    const matches = authHeader.match(/^Bearer\s+(.+)$/i);
+    return matches ? matches[1].trim() : null;
+}
 
 /**
- * Express middleware to authenticate requests using JWT tokens
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
- */
-export const authenticateToken = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    const token = extractBearerToken(authHeader);
-    
-    if (!token) {
-      return res.status(401).json({
-        error: 'Authentication required',
-        message: 'Bearer token must be provided in Authorization header'
-      });
-    }
-    
-    const decoded = await verifyToken(token);
-    req.user = decoded;
-    req.token = token;
-    
-    next();
-  } catch (error) {
-    const statusCode = error.statusCode || 401;
-    return res.status(statusCode).json({
-      error: error.name || 'AuthenticationError',
-      message: error.message
-    });
-  }
-};
-
-/**
- * Express middleware to verify user authentication and attach user data
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
- */
-export const requireAuth = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    const token = extractBearerToken(authHeader);
-    
-    if (!token) {
-      return res.status(401).json({
-        error: 'AuthenticationRequired',
-        message: 'Valid authentication token is required'
-      });
-    }
-    
-    const user = await getCurrentUser(token);
-    req.user = user;
-    req.token = token;
-    
-    next();
-  } catch (error) {
-    const statusCode = error.statusCode || 401;
-    return res.status(statusCode).json({
-      error: error.name || 'AuthenticationError',
-      message: error.message
-    });
-  }
-};
-
-/**
- * Express middleware to verify active user status
- * Requires user to be authenticated first
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
- */
-export const requireActiveUser = async (req, res, next) => {
-  try {
-    if (!req.user) {
-      return res.status(401).json({
-        error: 'AuthenticationRequired',
-        message: 'User authentication required before checking active status'
-      });
-    }
-    
-    // Check if token is not expired (additional safety check)
-    const currentTime = Math.floor(Date.now() / 1000);
-    if (req.user.exp && req.user.exp < currentTime) {
-      return res.status(401).json({
-        error: 'TokenExpired',
-        message: 'Authentication token has expired'
-      });
-    }
-    
-    // Verify user has required fields
-    if (!req.user.userId) {
-      return res.status(401).json({
-        error: 'InvalidUser',
-        message: 'User information is incomplete'
-      });
-    }
-    
-    next();
-  } catch (error) {
-    return res.status(500).json({
-      error: 'AuthorizationError',
-      message: 'Failed to verify user status'
-    });
-  }
-};
-
-/**
- * Express middleware factory for role-based authorization
- * @param {string|string[]} allowedRoles - Role or array of roles allowed to access the route
+ * Middleware factory for protecting routes with JWT authentication
+ * @param {Object} options - Middleware options
+ * @param {boolean} [options.required=true] - Whether authentication is required
+ * @param {Array<string>} [options.roles] - Required roles for access
  * @returns {Function} Express middleware function
+ * 
+ * @example
+ * // Protect route - authentication required
+ * app.get('/protected', createAuthMiddleware(), (req, res) => {
+ *   res.json({ user: req.user });
+ * });
+ * 
+ * // Admin only route
+ * app.get('/admin', createAuthMiddleware({ roles: ['admin'] }), (req, res) => {
+ *   res.json({ message: 'Admin access granted' });
+ * });
  */
-export const requireRole = (allowedRoles) => {
-  const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-  
-  return (req, res, next) => {
-    try {
-      if (!req.user) {
-        return res.status(401).json({
-          error: 'AuthenticationRequired',
-          message: 'User authentication required for role verification'
-        });
-      }
-      
-      const userRole = req.user.role;
-      if (!userRole || !roles.includes(userRole)) {
-        return res.status(403).json({
-          error: 'InsufficientPermissions',
-          message: `Access denied. Required roles: ${roles.join(', ')}`
-        });
-      }
-      
-      next();
-    } catch (error) {
-      return res.status(500).json({
-        error: 'AuthorizationError',
-        message: 'Failed to verify user role'
-      });
-    }
-  };
-};
+export function createAuthMiddleware(options = {}) {
+    const { required = true, roles = [] } = options;
 
-// Export error classes for external use
-export { AuthenticationError, ValidationError };
+    return async (req, res, next) => {
+        try {
+            const authHeader = req.headers.authorization;
+            const token = extractTokenFromHeader(authHeader);
 
-// Export configuration constants
-export const AUTH_CONFIG = {
-  SALT_ROUNDS,
-  TOKEN_EXPIRATION,
-  JWT_ALGORITHM,
-  BEARER_PREFIX
-};
+            if (!token) {
+                if (required) {
+                    return res.status(401).json({
+                        error: 'Authentication required',
+                        message: 'No token provided'
+                    });
+                }
+                return next();
+            }
+
+            // Get current user from token
+            const user = await getCurrentUser(token);
+            
+            // Check role requirements
+            if (roles.length > 0 && !roles.includes(user.role)) {
+                return res.status(403).json({
+                    error: 'Insufficient permissions',
+                    message: 'Access denied for current role'
+                });
+            }
+
+            // Attach user to request object
+            req.user = user;
+            req.token = token;
+            
+            next();
+
+        } catch (error) {
+            let statusCode = 401;
+            let errorType = 'Authentication failed';
+
+            if (error instanceof TokenExpiredError) {
+                errorType = 'Token expired';
+            } else if (error instanceof InvalidTokenError) {
+                errorType = 'Invalid token';
+            }
+
+            res.status(statusCode).json({
+                error: errorType,
