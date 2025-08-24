@@ -1,77 +1,93 @@
-// Package main provides the entry point for the todo CLI application.
-// It handles command routing and error management for todo operations.
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"./app"
 	"./commands"
 )
 
 func main() {
-	// Defer panic recovery to handle any unexpected errors gracefully
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "Error: An unexpected error occurred: %v\n", r)
+	// Ensure we have at least the program name in os.Args
+	if len(os.Args) < 1 {
+		fmt.Fprintf(os.Stderr, "Error: Unable to determine program name\n")
+		os.Exit(1)
+	}
+
+	// If no command provided, show help
+	if len(os.Args) < 2 {
+		if err := commands.Help(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
 			os.Exit(1)
 		}
-	}()
-
-	// Get command line arguments, excluding the program name
-	args := os.Args[1:]
-
-	// Handle empty arguments - show help and exit successfully
-	if len(args) == 0 {
-		commands.Help()
 		os.Exit(0)
 	}
 
-	// Extract the command from the first argument
-	command := args[0]
+	// Extract command and arguments
+	command := os.Args[1]
+	args := os.Args[2:] // Remaining arguments after the command
 
-	// Initialize the application (if needed)
-	_ = app
-
-	// Route commands to their respective handlers
+	// Route commands to appropriate handlers
 	switch command {
 	case "add":
-		err := commands.Add()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to add todo item: %v\n", err)
+		// Validate that we have something to add
+		if len(args) == 0 {
+			fmt.Fprintf(os.Stderr, "Error: 'add' command requires a task description\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s add <task description>\n", os.Args[0])
+			os.Exit(1)
+		}
+		
+		if err := commands.Add(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error adding task: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "list":
-		err := commands.List()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to list todo items: %v\n", err)
+		if err := commands.List(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing tasks: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "done":
-		err := commands.Done()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to mark todo item as done: %v\n", err)
+		// Validate that we have a task ID to mark as done
+		if len(args) == 0 {
+			fmt.Fprintf(os.Stderr, "Error: 'done' command requires a task ID\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s done <task_id>\n", os.Args[0])
+			os.Exit(1)
+		}
+		
+		if err := commands.Done(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error marking task as done: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "remove":
-		err := commands.Remove()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to remove todo item: %v\n", err)
+		// Validate that we have a task ID to remove
+		if len(args) == 0 {
+			fmt.Fprintf(os.Stderr, "Error: 'remove' command requires a task ID\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s remove <task_id>\n", os.Args[0])
+			os.Exit(1)
+		}
+		
+		if err := commands.Remove(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error removing task: %v\n", err)
 			os.Exit(1)
 		}
 
-	case "help":
-		commands.Help()
-		os.Exit(0)
+	case "help", "-h", "--help":
+		if err := commands.Help(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
+			os.Exit(1)
+		}
 
 	default:
-		// Handle unknown commands
-		fmt.Fprintf(os.Stderr, "Error: Unknown command '%s'\n", command)
-		commands.Help()
+		// Handle invalid commands
+		fmt.Fprintf(os.Stderr, "Error: Unknown command '%s'\n\n", command)
+		
+		// Show help for invalid commands
+		if err := commands.Help(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
+		}
 		os.Exit(1)
 	}
 

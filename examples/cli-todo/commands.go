@@ -1,167 +1,150 @@
-// Package commands implements CLI command handlers for todo list operations.
-// It provides functions for adding, listing, completing, removing, and getting help for todos.
 package commands
 
 import (
+	"flag"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"app"
 	"utils"
 )
 
-// add creates a new todo item with optional priority flag.
-// Usage: add [--priority high|medium|low] <todo description>
-func Add(args []string) error {
+// Add creates a new todo item with optional priority
+func Add(args []string) {
 	if len(args) == 0 {
-		return fmt.Errorf("add command requires todo description")
+		fmt.Fprintf(os.Stderr, "Error: task text is required\n")
+		os.Exit(1)
 	}
 
-	var priority string
-	var textParts []string
-
-	// Parse arguments and extract priority flag
-	for i, arg := range args {
-		if arg == "--priority" {
-			if i+1 >= len(args) {
-				return fmt.Errorf("--priority flag requires a value (high|medium|low)")
-			}
-			priority = args[i+1]
-			// Skip the next argument as it's the priority value
-			i++
-			continue
-		}
-		// Skip if this is a priority value that follows --priority
-		if i > 0 && args[i-1] == "--priority" {
-			continue
-		}
-		textParts = append(textParts, arg)
+	// Create flag set for this command
+	fs := flag.NewFlagSet("add", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: todo add [--priority=high|medium|low] <task text>\n")
+	}
+	
+	priority := fs.String("priority", "medium", "Task priority (high, medium, low)")
+	
+	// Parse flags
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
 	}
 
-	// Join remaining parts as todo text
-	text := strings.TrimSpace(strings.Join(textParts, " "))
-	if text == "" {
-		return fmt.Errorf("todo description cannot be empty")
+	// Get remaining arguments as task text
+	remaining := fs.Args()
+	if len(remaining) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: task text is required\n")
+		os.Exit(1)
 	}
 
-	// Validate priority if provided
-	if priority != "" {
-		validPriorities := map[string]bool{"high": true, "medium": true, "low": true}
-		if !validPriorities[strings.ToLower(priority)] {
-			return fmt.Errorf("invalid priority '%s'. Valid options: high, medium, low", priority)
-		}
-		priority = strings.ToLower(priority)
+	text := strings.Join(remaining, " ")
+	if strings.TrimSpace(text) == "" {
+		fmt.Fprintf(os.Stderr, "Error: task text cannot be empty\n")
+		os.Exit(1)
 	}
 
-	// Add todo using app package
-	id, err := app.AddTodo(text, priority)
+	// Validate priority
+	validPriorities := map[string]bool{"high": true, "medium": true, "low": true}
+	if !validPriorities[*priority] {
+		fmt.Fprintf(os.Stderr, "Error: invalid priority '%s'. Use high, medium, or low\n", *priority)
+		os.Exit(1)
+	}
+
+	// Add todo
+	id, err := app.AddTodo(text, *priority)
 	if err != nil {
-		return fmt.Errorf("failed to add todo: %w", err)
+		fmt.Fprintf(os.Stderr, "Error adding todo: %v\n", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Added: #%d - %s", id, text)
-	if priority != "" {
-		fmt.Printf(" [Priority: %s]", priority)
-	}
-	fmt.Println()
-
-	return nil
+	fmt.Printf("Added: #%d - %s\n", id, text)
 }
 
-// List displays todos with optional filtering flags.
-// Usage: list [--all] [--done]
-func List(args []string) error {
-	var showAll, showDone bool
-
-	// Parse flags
-	for _, arg := range args {
-		switch arg {
-		case "--all":
-			showAll = true
-		case "--done":
-			showDone = true
-		default:
-			return fmt.Errorf("unknown flag: %s. Valid flags: --all, --done", arg)
-		}
+// List displays todo items with optional filtering
+func List(args []string) {
+	// Create flag set for this command
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: todo list [--all] [--done]\n")
 	}
 
-	// Load todos from app
+	showAll := fs.Bool("all", false, "Show all todos (completed and incomplete)")
+	showDone := fs.Bool("done", false, "Show only completed todos")
+
+	// Parse flags
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	// Load todos
 	todos, err := app.LoadTodos()
 	if err != nil {
-		return fmt.Errorf("failed to load todos: %w", err)
+		fmt.Fprintf(os.Stderr, "Error loading todos: %v\n", err)
+		os.Exit(1)
 	}
 
 	if len(todos) == 0 {
-		fmt.Println("No todos found. Use 'add' command to create your first todo!")
-		return nil
+		fmt.Println("No todos found. Use 'todo add <task>' to create one.")
+		return
 	}
 
 	// Filter todos based on flags
 	var filteredTodos []app.Todo
 	for _, todo := range todos {
-		if showAll {
+		if *showAll {
 			filteredTodos = append(filteredTodos, todo)
-		} else if showDone && todo.Done {
+		} else if *showDone && todo.Done {
 			filteredTodos = append(filteredTodos, todo)
-		} else if !showDone && !todo.Done {
+		} else if !*showDone && !todo.Done {
 			filteredTodos = append(filteredTodos, todo)
 		}
 	}
 
 	if len(filteredTodos) == 0 {
-		if showDone {
+		if *showDone {
 			fmt.Println("No completed todos found.")
-		} else if !showAll {
+		} else if !*showAll {
 			fmt.Println("No pending todos found.")
 		}
-		return nil
+		return
 	}
 
 	// Prepare data for table formatting
 	var tableData [][]string
-	tableData = append(tableData, []string{"ID", "Status", "Description", "Priority", "Completed"})
+	tableData = append(tableData, []string{"ID", "Status", "Priority", "Task", "Created"})
 
 	for _, todo := range filteredTodos {
 		status := "[ ]"
-		completed := ""
 		if todo.Done {
 			status = "[✓]"
-			if !todo.CompletedAt.IsZero() {
-				completed = todo.CompletedAt.Format("2006-01-02 15:04")
-			}
 		}
 
-		priority := todo.Priority
-		if priority == "" {
-			priority = "-"
+		// Truncate long task descriptions
+		task := todo.Text
+		if len(task) > 50 {
+			task = task[:47] + "..."
 		}
 
 		tableData = append(tableData, []string{
 			fmt.Sprintf("#%d", todo.ID),
 			status,
-			todo.Description,
-			priority,
-			completed,
+			todo.Priority,
+			task,
+			todo.CreatedAt.Format("2006-01-02"),
 		})
 	}
 
-	// Use utils package for table formatting
-	formattedTable, err := utils.FormatTable(tableData)
-	if err != nil {
-		return fmt.Errorf("failed to format todo list: %w", err)
-	}
-
-	fmt.Print(formattedTable)
-	return nil
+	// Use utils package to format and display table
+	utils.FormatTable(tableData)
 }
 
-// Done marks one or more todos as completed.
-// Usage: done <id1> [id2] [id3] ...
-func Done(args []string) error {
+// Done marks one or more todos as complete
+func Done(args []string) {
 	if len(args) == 0 {
-		return fmt.Errorf("done command requires at least one todo ID")
+		fmt.Fprintf(os.Stderr, "Error: at least one todo ID is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: todo done <id1> [id2] [id3]...\n")
+		os.Exit(1)
 	}
 
 	// Parse and validate all IDs first
@@ -169,10 +152,8 @@ func Done(args []string) error {
 	for _, arg := range args {
 		id, err := strconv.Atoi(arg)
 		if err != nil {
-			return fmt.Errorf("invalid todo ID '%s': must be a number", arg)
-		}
-		if id <= 0 {
-			return fmt.Errorf("invalid todo ID %d: must be positive", id)
+			fmt.Fprintf(os.Stderr, "Error: invalid todo ID '%s'\n", arg)
+			os.Exit(1)
 		}
 		ids = append(ids, id)
 	}
@@ -180,212 +161,208 @@ func Done(args []string) error {
 	// Load todos to validate IDs exist
 	todos, err := app.LoadTodos()
 	if err != nil {
-		return fmt.Errorf("failed to load todos: %w", err)
+		fmt.Fprintf(os.Stderr, "Error loading todos: %v\n", err)
+		os.Exit(1)
 	}
 
-	// Create a map for quick ID lookup
+	// Create map for quick lookup
 	todoMap := make(map[int]*app.Todo)
 	for i := range todos {
 		todoMap[todos[i].ID] = &todos[i]
 	}
 
-	// Validate all IDs exist before processing any
+	// Validate all IDs exist before making any changes
 	for _, id := range ids {
 		if _, exists := todoMap[id]; !exists {
-			return fmt.Errorf("todo with ID %d not found", id)
+			fmt.Fprintf(os.Stderr, "Error: todo #%d not found\n", id)
+			os.Exit(1)
 		}
 		if todoMap[id].Done {
-			return fmt.Errorf("todo #%d is already completed", id)
+			fmt.Fprintf(os.Stderr, "Warning: todo #%d is already completed\n", id)
 		}
 	}
 
-	// Mark todos as done
-	completedAt := time.Now()
+	// Mark todos as done and save
 	var completedTodos []app.Todo
-
 	for _, id := range ids {
 		todo := todoMap[id]
-		todo.Done = true
-		todo.CompletedAt = completedAt
-
-		err := app.UpdateTodo(*todo)
-		if err != nil {
-			return fmt.Errorf("failed to update todo #%d: %w", id, err)
+		if !todo.Done {
+			err := app.MarkTodoDone(id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error marking todo #%d as done: %v\n", id, err)
+				os.Exit(1)
+			}
+			completedTodos = append(completedTodos, *todo)
 		}
-
-		completedTodos = append(completedTodos, *todo)
 	}
 
-	// Print success messages
+	// Print confirmation for each completed todo
 	for _, todo := range completedTodos {
-		fmt.Printf("Completed: #%d - %s\n", todo.ID, todo.Description)
+		task := todo.Text
+		if len(task) > 40 {
+			task = task[:37] + "..."
+		}
+		fmt.Printf("Completed: #%d - %s\n", todo.ID, task)
 	}
 
-	return nil
+	if len(completedTodos) == 0 {
+		fmt.Println("No todos were marked as completed (all were already done).")
+	}
 }
 
-// Remove deletes a specific todo by ID or all completed todos.
-// Usage: remove <id> OR remove --done
-func Remove(args []string) error {
+// Remove deletes todo items or all completed todos
+func Remove(args []string) {
 	if len(args) == 0 {
-		return fmt.Errorf("remove command requires todo ID or --done flag")
+		fmt.Fprintf(os.Stderr, "Error: todo ID or --done flag is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: todo remove <id> OR todo remove --done\n")
+		os.Exit(1)
 	}
 
+	// Check if --done flag is used
 	if len(args) == 1 && args[0] == "--done" {
-		return removeCompletedTodos()
+		removeAllCompleted()
+		return
 	}
 
-	if len(args) > 1 {
-		return fmt.Errorf("remove command accepts only one ID or --done flag")
+	// Handle single ID removal
+	if len(args) != 1 {
+		fmt.Fprintf(os.Stderr, "Error: provide either a single todo ID or --done flag\n")
+		os.Exit(1)
 	}
 
-	// Parse single todo ID
 	id, err := strconv.Atoi(args[0])
 	if err != nil {
-		return fmt.Errorf("invalid todo ID '%s': must be a number", args[0])
+		fmt.Fprintf(os.Stderr, "Error: invalid todo ID '%s'\n", args[0])
+		os.Exit(1)
 	}
 
-	if id <= 0 {
-		return fmt.Errorf("invalid todo ID %d: must be positive", id)
-	}
-
-	// Get todo details before deletion for confirmation message
-	todo, err := app.GetTodo(id)
+	// Load todos to get todo details before deletion
+	todos, err := app.LoadTodos()
 	if err != nil {
-		return fmt.Errorf("todo with ID %d not found", id)
+		fmt.Fprintf(os.Stderr, "Error loading todos: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Find the todo to get its details
+	var todoToRemove *app.Todo
+	for _, todo := range todos {
+		if todo.ID == id {
+			todoToRemove = &todo
+			break
+		}
+	}
+
+	if todoToRemove == nil {
+		fmt.Fprintf(os.Stderr, "Error: todo #%d not found\n", id)
+		os.Exit(1)
 	}
 
 	// Delete the todo
 	err = app.DeleteTodo(id)
 	if err != nil {
-		return fmt.Errorf("failed to remove todo #%d: %w", id, err)
+		fmt.Fprintf(os.Stderr, "Error removing todo: %v\n", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Removed: #%d - %s\n", todo.ID, todo.Description)
-	return nil
+	// Truncate long descriptions for display
+	task := todoToRemove.Text
+	if len(task) > 40 {
+		task = task[:37] + "..."
+	}
+
+	fmt.Printf("Removed: #%d - %s\n", id, task)
 }
 
-// removeCompletedTodos is a helper function to remove all completed todos.
-func removeCompletedTodos() error {
+// removeAllCompleted removes all completed todos
+func removeAllCompleted() {
+	todos, err := app.LoadTodos()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading todos: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Find all completed todos
+	var completedIDs []int
+	for _, todo := range todos {
+		if todo.Done {
+			completedIDs = append(completedIDs, todo.ID)
+		}
+	}
+
+	if len(completedIDs) == 0 {
+		fmt.Println("No completed todos to remove.")
+		return
+	}
+
+	// Remove all completed todos
+	removedCount := 0
+	for _, id := range completedIDs {
+		err := app.DeleteTodo(id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error removing todo #%d: %v\n", id, err)
+			continue
+		}
+		removedCount++
+	}
+
+	if removedCount == 1 {
+		fmt.Printf("Removed 1 completed todo.\n")
+	} else {
+		fmt.Printf("Removed %d completed todos.\n", removedCount)
+	}
+}
+
+// Help displays usage information and available commands
+func Help(args []string) {
+	fmt.Printf("Todo CLI - Task Management Tool v1.0.0\n\n")
+	
+	fmt.Printf("USAGE:\n")
+	fmt.Printf("  todo <command> [arguments]\n\n")
+	
+	fmt.Printf("COMMANDS:\n")
+	fmt.Printf("  add      Add a new todo item\n")
+	fmt.Printf("  list     Display todo items\n")
+	fmt.Printf("  done     Mark todos as complete\n")
+	fmt.Printf("  remove   Delete todo items\n")
+	fmt.Printf("  help     Show this help message\n\n")
+	
+	fmt.Printf("EXAMPLES:\n")
+	fmt.Printf("  todo add \"Buy groceries\"                    # Add a simple task\n")
+	fmt.Printf("  todo add --priority=high \"Fix critical bug\" # Add high priority task\n")
+	fmt.Printf("  todo list                                   # Show pending todos\n")
+	fmt.Printf("  todo list --all                             # Show all todos\n")
+	fmt.Printf("  todo list --done                            # Show completed todos\n")
+	fmt.Printf("  todo done 1                                 # Mark todo #1 as complete\n")
+	fmt.Printf("  todo done 1 2 3                             # Mark multiple todos as complete\n")
+	fmt.Printf("  todo remove 1                               # Remove todo #1\n")
+	fmt.Printf("  todo remove --done                          # Remove all completed todos\n\n")
+	
+	fmt.Printf("FLAGS:\n")
+	fmt.Printf("  --priority=LEVEL  Set task priority (high, medium, low) [add command]\n")
+	fmt.Printf("  --all            Show all todos [list command]\n")
+	fmt.Printf("  --done           Show/remove completed todos [list/remove commands]\n\n")
+	
+	fmt.Printf("For more information about a specific command, use:\n")
+	fmt.Printf("  todo <command> --help\n")
+}
+
+// loadModifySave implements the common pattern for todo operations
+// This helper function can be used by commands that need to load, modify, and save todos
+func loadModifySave(modifyFunc func([]app.Todo) ([]app.Todo, error)) error {
 	todos, err := app.LoadTodos()
 	if err != nil {
 		return fmt.Errorf("failed to load todos: %w", err)
 	}
 
-	var completedTodos []app.Todo
-	for _, todo := range todos {
-		if todo.Done {
-			completedTodos = append(completedTodos, todo)
-		}
+	modifiedTodos, err := modifyFunc(todos)
+	if err != nil {
+		return fmt.Errorf("failed to modify todos: %w", err)
 	}
 
-	if len(completedTodos) == 0 {
-		fmt.Println("No completed todos to remove.")
-		return nil
+	err = app.SaveTodos(modifiedTodos)
+	if err != nil {
+		return fmt.Errorf("failed to save todos: %w", err)
 	}
 
-	// Remove completed todos
-	var removedCount int
-	for _, todo := range completedTodos {
-		err := app.DeleteTodo(todo.ID)
-		if err != nil {
-			fmt.Printf("Warning: failed to remove todo #%d: %v\n", todo.ID, err)
-			continue
-		}
-		fmt.Printf("Removed: #%d - %s\n", todo.ID, todo.Description)
-		removedCount++
-	}
-
-	fmt.Printf("Removed %d completed todo(s).\n", removedCount)
 	return nil
-}
-
-// Help displays usage information and examples for all commands.
-func Help(args []string) error {
-	helpText := `Todo CLI - Command Reference
-
-USAGE:
-  todo <command> [arguments]
-
-COMMANDS:
-  add [--priority <level>] <description>
-    Add a new todo item with optional priority
-    Priority levels: high, medium, low
-    
-    Examples:
-      todo add "Buy groceries"
-      todo add --priority high "Finish project report"
-      todo add --priority medium "Call dentist for appointment"
-
-  list [--all] [--done]
-    Display todo items with optional filters
-    
-    Examples:
-      todo list                 # Show pending todos only
-      todo list --all          # Show all todos
-      todo list --done         # Show completed todos only
-
-  done <id> [id2] [id3] ...
-    Mark one or more todos as completed
-    
-    Examples:
-      todo done 1              # Complete todo #1
-      todo done 1 3 5          # Complete todos #1, #3, and #5
-
-  remove <id>
-  remove --done
-    Remove a specific todo by ID or all completed todos
-    
-    Examples:
-      todo remove 2            # Remove todo #2
-      todo remove --done       # Remove all completed todos
-
-  help
-    Show this help information
-
-EXAMPLES:
-  # Basic workflow
-  todo add "Learn Go programming"
-  todo add --priority high "Submit assignment"
-  todo list
-  todo done 1
-  todo list --all
-  todo remove --done
-
-For more information, visit: https://github.com/your-repo/todo-cli
-`
-
-	fmt.Print(helpText)
-	return nil
-}
-
-// parseFlags is a helper function to extract flags from arguments.
-func parseFlags(args []string, validFlags map[string]bool) (map[string]string, []string, error) {
-	flags := make(map[string]string)
-	var remainingArgs []string
-
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "--") {
-			flagName := arg[2:]
-			if !validFlags[flagName] {
-				return nil, nil, fmt.Errorf("unknown flag: %s", arg)
-			}
-
-			// Check if flag expects a value
-			if flagName == "priority" {
-				if i+1 >= len(args) {
-					return nil, nil, fmt.Errorf("flag %s requires a value", arg)
-				}
-				flags[flagName] = args[i+1]
-				i++ // Skip next argument as it's the flag value
-			} else {
-				flags[flagName] = "true"
-			}
-		} else {
-			remainingArgs = append(remainingArgs, arg)
-		}
-	}
-
-	return flags, remainingArgs, nil
 }
