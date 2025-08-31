@@ -1,31 +1,30 @@
 """
-User model definition with authentication capabilities.
+User model module for SQLAlchemy ORM.
 
-This module contains the User model with SQLAlchemy ORM mapping,
-authentication methods, and relationship definitions.
+This module defines the User model with authentication capabilities,
+proper password hashing, and database relationships.
 """
-
-import uuid
-from datetime import datetime
-from typing import Dict, Any, Optional
 
 from sqlalchemy import Column, String, Boolean, DateTime, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
-from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timezone
+import uuid
+import bcrypt
+from typing import Optional, Dict, Any
 
-from core.database import db
+from core.database import Base
 
 
-class User(db.Model):
+class User(Base):
     """
-    User model with authentication capabilities.
+    User model for authentication and user management.
     
-    Represents a user in the system with email-based authentication,
-    password hashing, and activity tracking.
+    This model handles user authentication with secure password hashing,
+    tracks user activity, and maintains relationships with other entities.
     """
     
-    __tablename__ = 'users'
+    __tablename__ = "users"
     
     # Primary key
     id = Column(
@@ -35,7 +34,7 @@ class User(db.Model):
         nullable=False
     )
     
-    # User credentials and information
+    # User credentials and info
     email = Column(
         String(255),
         unique=True,
@@ -61,21 +60,21 @@ class User(db.Model):
     )
     
     last_login = Column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=True
     )
     
     # Timestamps
     created_at = Column(
-        DateTime,
-        default=datetime.utcnow,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
         nullable=False
     )
     
     updated_at = Column(
-        DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False
     )
     
@@ -83,55 +82,49 @@ class User(db.Model):
     tasks = relationship(
         "Task",
         back_populates="user",
-        lazy="dynamic",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        lazy="dynamic"
     )
     
-    # Indexes
+    # Database indexes
     __table_args__ = (
         Index('ix_users_email', 'email'),
         Index('ix_users_created_at', 'created_at'),
         Index('ix_users_is_active', 'is_active'),
     )
     
-    def __init__(self, email: str, name: str, password: str = None, **kwargs):
-        """
-        Initialize a new User instance.
-        
-        Args:
-            email: User's email address
-            name: User's display name
-            password: Plain text password (will be hashed)
-            **kwargs: Additional keyword arguments
-        """
-        super().__init__(**kwargs)
-        self.email = email.lower().strip() if email else None
-        self.name = name.strip() if name else None
-        
-        if password:
-            self.set_password(password)
+    def __repr__(self) -> str:
+        """String representation of User instance for debugging."""
+        return f"<User(id={self.id}, email='{self.email}', name='{self.name}')>"
     
     def set_password(self, password: str) -> None:
         """
-        Hash and store a password.
-        
-        Uses werkzeug's security utilities to generate a secure password hash
-        with salt. The hash is stored in the password_hash field.
+        Hash and set the user's password.
         
         Args:
-            password: Plain text password to hash
+            password: Plain text password to hash and store
             
         Raises:
-            ValueError: If password is empty or None
+            ValueError: If password is empty or too short
+            TypeError: If password is not a string
         """
-        if not password or not password.strip():
+        if not isinstance(password, str):
+            raise TypeError("Password must be a string")
+            
+        if not password or len(password.strip()) == 0:
             raise ValueError("Password cannot be empty")
+            
+        if len(password) < 8:
+            raise ValueError("Password must be at least 8 characters long")
         
-        self.password_hash = generate_password_hash(
-            password.strip(),
-            method='pbkdf2:sha256',
-            salt_length=16
-        )
+        # Generate salt and hash password with bcrypt
+        # Using 12 rounds for good security/performance balance
+        salt = bcrypt.gensalt(rounds=12)
+        password_bytes = password.encode('utf-8')
+        hashed = bcrypt.hashpw(password_bytes, salt)
+        
+        # Store the hash as a string
+        self.password_hash = hashed.decode('utf-8')
     
     def check_password(self, password: str) -> bool:
         """
@@ -142,120 +135,101 @@ class User(db.Model):
             
         Returns:
             bool: True if password matches, False otherwise
-            
-        Raises:
-            ValueError: If password is None or password_hash is not set
         """
-        if not password:
-            raise ValueError("Password cannot be None")
+        if not isinstance(password, str):
+            return False
+            
+        if not password or not self.password_hash:
+            return False
         
-        if not self.password_hash:
-            raise ValueError("No password hash set for user")
-        
-        return check_password_hash(self.password_hash, password.strip())
+        try:
+            password_bytes = password.encode('utf-8')
+            hash_bytes = self.password_hash.encode('utf-8')
+            return bcrypt.checkpw(password_bytes, hash_bytes)
+        except (ValueError, TypeError):
+            # Handle any bcrypt errors gracefully
+            return False
     
-    def to_dict(self, include_relationships: bool = False) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """
-        Convert user instance to dictionary representation.
+        Convert User instance to dictionary representation.
         
-        Excludes sensitive information like password_hash from the output.
-        Converts UUID and datetime objects to string representations.
+        Excludes sensitive information like password_hash and converts
+        complex types to JSON-serializable formats.
         
-        Args:
-            include_relationships: Whether to include related objects
-            
         Returns:
-            Dict[str, Any]: Dictionary representation of the user
+            dict: Dictionary representation of the user
         """
-        user_dict = {
-            'id': str(self.id),
+        return {
+            'id': str(self.id) if self.id else None,
             'email': self.email,
             'name': self.name,
             'is_active': self.is_active,
-            'last_login': self.last_login.isoformat() if self.last_login else None,
-            'created_at': self.created_at.isoformat(),
-            'updated_at': self.updated_at.isoformat()
+            'last_login': (
+                self.last_login.isoformat() 
+                if self.last_login else None
+            ),
+            'created_at': (
+                self.created_at.isoformat() 
+                if self.created_at else None
+            ),
+            'updated_at': (
+                self.updated_at.isoformat() 
+                if self.updated_at else None
+            )
         }
-        
-        if include_relationships:
-            user_dict['tasks_count'] = self.tasks.count()
-        
-        return user_dict
     
     def update_last_login(self) -> None:
-        """
-        Update the last_login timestamp to current UTC time.
-        
-        This method should be called when a user successfully authenticates.
-        """
-        self.last_login = datetime.utcnow()
+        """Update the last_login timestamp to current UTC time."""
+        self.last_login = datetime.now(timezone.utc)
     
     def deactivate(self) -> None:
-        """
-        Deactivate the user account.
-        
-        Sets is_active to False, preventing the user from logging in
-        while preserving their data.
-        """
+        """Deactivate the user account."""
         self.is_active = False
+        self.updated_at = datetime.now(timezone.utc)
     
     def activate(self) -> None:
-        """
-        Activate the user account.
-        
-        Sets is_active to True, allowing the user to log in.
-        """
+        """Activate the user account."""
         self.is_active = True
+        self.updated_at = datetime.now(timezone.utc)
     
     @classmethod
-    def find_by_email(cls, email: str) -> Optional['User']:
+    def create_user(
+        cls, 
+        email: str, 
+        password: str, 
+        name: str, 
+        is_active: bool = True
+    ) -> 'User':
         """
-        Find a user by email address.
+        Class method to create a new user with proper validation.
         
         Args:
-            email: Email address to search for
+            email: User's email address
+            password: Plain text password
+            name: User's display name
+            is_active: Whether the user account is active
             
         Returns:
-            Optional[User]: User instance if found, None otherwise
-        """
-        if not email:
-            return None
-        
-        return cls.query.filter_by(email=email.lower().strip()).first()
-    
-    @classmethod
-    def find_active_by_email(cls, email: str) -> Optional['User']:
-        """
-        Find an active user by email address.
-        
-        Args:
-            email: Email address to search for
+            User: New User instance with hashed password
             
-        Returns:
-            Optional[User]: Active user instance if found, None otherwise
+        Raises:
+            ValueError: If any required field is invalid
         """
-        if not email:
-            return None
+        if not email or not email.strip():
+            raise ValueError("Email is required")
+            
+        if not name or not name.strip():
+            raise ValueError("Name is required")
         
-        return cls.query.filter_by(
-            email=email.lower().strip(),
-            is_active=True
-        ).first()
-    
-    def __repr__(self) -> str:
-        """
-        String representation of the User instance.
+        # Create user instance
+        user = cls(
+            email=email.strip().lower(),
+            name=name.strip(),
+            is_active=is_active
+        )
         
-        Returns:
-            str: String representation showing id and email
-        """
-        return f'<User {self.id}: {self.email}>'
-    
-    def __str__(self) -> str:
-        """
-        Human-readable string representation.
+        # Set password (this will validate and hash it)
+        user.set_password(password)
         
-        Returns:
-            str: User's name and email
-        """
-        return f'{self.name} ({self.email})'
+        return user

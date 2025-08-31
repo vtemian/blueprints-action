@@ -2,35 +2,53 @@
 FastAPI Application Entry Point
 
 This module serves as the main entry point for the FastAPI application.
-It configures and launches the uvicorn ASGI server with appropriate
-settings for both development and production environments.
+It imports the FastAPI app instance and configures the uvicorn server
+for development with hot reload capabilities and container-compatible
+host binding.
 
-The application is designed to be container-friendly with 0.0.0.0 host
-binding and configurable through the uvicorn server settings.
+Usage:
+    python main.py
 """
 
+import sys
 import uvicorn
-from typing import Optional
+from typing import NoReturn
 
 
-def main() -> None:
+def main() -> NoReturn:
     """
-    Main function to configure and run the FastAPI application.
+    Main function to start the FastAPI application with uvicorn server.
     
-    Uses uvicorn as the ASGI server with development-friendly settings
-    including auto-reload capability and broad host binding for
-    container compatibility.
+    Configures and runs the uvicorn server with:
+    - Host: 0.0.0.0 (container-compatible)
+    - Port: 8000
+    - Reload: enabled for development
+    
+    Raises:
+        SystemExit: On server startup failure or keyboard interrupt
     """
-    uvicorn.run(
-        "app:app",  # String reference to app instance in app.py module
-        host="0.0.0.0",  # Bind to all interfaces for container compatibility
-        port=8000,  # Standard HTTP port
-        reload=True,  # Enable auto-reload for development
-        log_level="info",  # Set appropriate logging level
-        access_log=True,  # Enable access logging
-    )
+    try:
+        uvicorn.run(
+            "app:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=True
+        )
+    except ImportError as e:
+        print(f"Error: Failed to import required modules: {e}", file=sys.stderr)
+        print("Make sure the 'app' module exists and contains a FastAPI instance named 'app'", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"Error: Failed to bind to host/port: {e}", file=sys.stderr)
+        print("Port 8000 might already be in use or host binding failed", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nServer shutdown requested by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Unexpected error starting server: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Entry point guard - only run if script is executed directly
     main()
