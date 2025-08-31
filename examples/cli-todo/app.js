@@ -1,107 +1,121 @@
-const fs = require('fs').promises;
-const path = require('path');
-const os = require('os');
+/**
+ * Todo Storage Module
+ * Handles todo storage and core operations with file-based persistence
+ * @module app
+ */
+
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import * as utils from './utils.js';
 
 // Constants
-const TODOS_FILE = path.join(os.homedir(), '.todos.json');
+const TODOS_FILE_PATH = path.join(os.homedir(), '.todos.json');
+const BACKUP_FILE_PATH = path.join(os.homedir(), '.todos.json.backup');
 const VALID_PRIORITIES = ['low', 'medium', 'high'];
+const DEFAULT_PRIORITY = 'medium';
 
 /**
- * Load todos from the JSON file
- * @returns {Promise<Array>} Array of todo objects
+ * Loads todos from the storage file
+ * Handles file creation, corruption, and various error scenarios
+ * @returns {Array} Array of todo objects
+ * @throws {Error} For critical file system errors (excluding ENOENT and JSON parse errors)
  */
-async function loadTodos() {
+export function loadTodos() {
     try {
-        const data = await fs.readFile(TODOS_FILE, 'utf8');
+        // Check if file exists, create if it doesn't
+        if (!fs.existsSync(TODOS_FILE_PATH)) {
+            console.log('Todos file not found, creating new file...');
+            fs.writeFileSync(TODOS_FILE_PATH, JSON.stringify([], null, 2), 'utf8');
+            return [];
+        }
+
+        // Read file content
+        const fileContent = fs.readFileSync(TODOS_FILE_PATH, 'utf8');
         
         // Handle empty file
-        if (!data.trim()) {
+        if (!fileContent.trim()) {
+            console.log('Empty todos file detected, initializing with empty array...');
+            fs.writeFileSync(TODOS_FILE_PATH, JSON.stringify([], null, 2), 'utf8');
             return [];
         }
+
+        // Parse JSON content
+        const todos = JSON.parse(fileContent);
         
-        try {
-            const todos = JSON.parse(data);
-            
-            // Validate that we have an array
-            if (!Array.isArray(todos)) {
-                throw new Error('Invalid data structure: expected array');
-            }
-            
-            // Validate each todo structure
-            const validTodos = todos.filter(todo => {
-                return todo && 
-                       typeof todo.id === 'number' && 
-                       typeof todo.text === 'string' && 
-                       typeof todo.done === 'boolean' &&
-                       typeof todo.created === 'string' &&
-                       typeof todo.priority === 'string' &&
-                       VALID_PRIORITIES.includes(todo.priority);
-            });
-            
-            return validTodos;
-            
-        } catch (parseError) {
-            // Backup corrupted file
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const backupFile = `${TODOS_FILE}.backup-${timestamp}`;
-            
-            try {
-                await fs.copyFile(TODOS_FILE, backupFile);
-                console.warn(`Corrupted todos file backed up to: ${backupFile}`);
-            } catch (backupError) {
-                console.error('Failed to backup corrupted file:', backupError.message);
-            }
-            
-            // Create new empty file
-            await saveTodos([]);
-            return [];
+        // Validate that parsed content is an array
+        if (!Array.isArray(todos)) {
+            throw new Error('Invalid todos format: expected array');
         }
+
+        // Validate todo structure
+        const validTodos = todos.filter(todo => validateTodoStructure(todo));
         
+        // If some todos were invalid, save the cleaned version
+        if (validTodos.length !== todos.length) {
+            console.warn(`Removed ${todos.length - validTodos.length} invalid todo(s)`);
+            saveTodos(validTodos);
+        }
+
+        return validTodos;
+
     } catch (error) {
         if (error.code === 'ENOENT') {
-            // File doesn't exist, create it
-            await saveTodos([]);
+            // File not found - create new file
+            console.log('Todos file not found, creating new file...');
+            fs.writeFileSync(TODOS_FILE_PATH, JSON.stringify([], null, 2), 'utf8');
             return [];
         } else if (error.code === 'EACCES') {
-            throw new Error(`Permission denied: Cannot read todos file at ${TODOS_FILE}. Please check file permissions.`);
+            // Permission denied
+            throw new Error(`Permission denied accessing todos file: ${TODOS_FILE_PATH}`);
+        } else if (error instanceof SyntaxError || error.name === 'SyntaxError') {
+            // JSON parse error - backup and recreate
+            console.warn('Corrupted todos file detected, creating backup and starting fresh...');
+            try {
+                // Create backup of corrupted file
+                const corruptedContent = fs.readFileSync(TODOS_FILE_PATH, 'utf8');
+                fs.writeFileSync(BACKUP_FILE_PATH, corruptedContent, 'utf8');
+                console.log(`Backup created at: ${BACKUP_FILE_PATH}`);
+                
+                // Create fresh todos file
+                fs.writeFileSync(TODOS_FILE_PATH, JSON.stringify([], null, 2), 'utf8');
+                return [];
+            } catch (backupError) {
+                throw new Error(`Failed to handle corrupted todos file: ${backupError.message}`);
+            }
         } else {
+            // Other unexpected errors
             throw new Error(`Failed to load todos: ${error.message}`);
         }
     }
 }
 
 /**
- * Save todos array to the JSON file
+ * Saves todos array to the storage file
  * @param {Array} todos - Array of todo objects to save
- * @returns {Promise<void>}
+ * @throws {Error} For file system errors or invalid input
  */
-async function saveTodos(todos) {
+export function saveTodos(todos) {
     // Validate input
     if (!Array.isArray(todos)) {
         throw new Error('Invalid input: todos must be an array');
     }
-    
-    // Validate each todo structure before saving
-    for (const todo of todos) {
-        if (!todo || 
-            typeof todo.id !== 'number' || 
-            typeof todo.text !== 'string' || 
-            typeof todo.done !== 'boolean' ||
-            typeof todo.created !== 'string' ||
-            typeof todo.priority !== 'string' ||
-            !VALID_PRIORITIES.includes(todo.priority)) {
-            throw new Error(`Invalid todo structure: ${JSON.stringify(todo)}`);
-        }
+
+    // Validate each todo structure
+    const invalidTodos = todos.filter(todo => !validateTodoStructure(todo));
+    if (invalidTodos.length > 0) {
+        throw new Error(`Cannot save: ${invalidTodos.length} todo(s) have invalid structure`);
     }
-    
+
     try {
-        const data = JSON.stringify(todos, null, 2);
-        await fs.writeFile(TODOS_FILE, data, 'utf8');
+        // Write to file with pretty formatting
+        const jsonContent = JSON.stringify(todos, null, 2);
+        fs.writeFileSync(TODOS_FILE_PATH, jsonContent, 'utf8');
     } catch (error) {
         if (error.code === 'EACCES') {
-            throw new Error(`Permission denied: Cannot write to todos file at ${TODOS_FILE}. Please check file permissions.`);
+            throw new Error(`Permission denied writing to todos file: ${TODOS_FILE_PATH}`);
         } else if (error.code === 'ENOSPC') {
-            throw new Error('No space left on device: Cannot save todos file.');
+            throw new Error('Insufficient disk space to save todos');
         } else {
             throw new Error(`Failed to save todos: ${error.message}`);
         }
@@ -109,27 +123,30 @@ async function saveTodos(todos) {
 }
 
 /**
- * Add a new todo item
- * @param {string} text - The todo text description
- * @param {string} priority - Priority level (low, medium, high)
- * @returns {Promise<Object>} The created todo object
+ * Adds a new todo to the storage
+ * @param {string} text - The todo description
+ * @param {string} [priority="medium"] - Priority level (low, medium, high)
+ * @returns {Object} The created todo object
+ * @throws {Error} For invalid input or storage errors
  */
-async function addTodo(text, priority = 'medium') {
-    // Validate input
+export function addTodo(text, priority = DEFAULT_PRIORITY) {
+    // Validate input parameters
     if (typeof text !== 'string' || !text.trim()) {
         throw new Error('Todo text must be a non-empty string');
     }
-    
+
     if (!VALID_PRIORITIES.includes(priority)) {
-        throw new Error(`Invalid priority. Must be one of: ${VALID_PRIORITIES.join(', ')}`);
+        throw new Error(`Invalid priority: ${priority}. Must be one of: ${VALID_PRIORITIES.join(', ')}`);
     }
+
+    // Load existing todos
+    const todos = loadTodos();
     
-    const todos = await loadTodos();
-    
-    // Generate new ID (highest existing ID + 1, or 1 if no todos exist)
+    // Generate new ID (find max ID and increment)
     const maxId = todos.length > 0 ? Math.max(...todos.map(todo => todo.id)) : 0;
     const newId = maxId + 1;
-    
+
+    // Create new todo object
     const newTodo = {
         id: newId,
         text: text.trim(),
@@ -137,162 +154,226 @@ async function addTodo(text, priority = 'medium') {
         created: new Date().toISOString(),
         priority: priority
     };
-    
+
+    // Add to todos array and save
     todos.push(newTodo);
-    await saveTodos(todos);
-    
+    saveTodos(todos);
+
     return newTodo;
 }
 
 /**
- * Get a todo by ID
- * @param {number} id - The todo ID to find
- * @returns {Promise<Object|null>} The todo object or null if not found
+ * Retrieves a todo by its ID
+ * @param {number} id - The todo ID to search for
+ * @returns {Object|null} The todo object if found, null otherwise
+ * @throws {Error} For invalid ID parameter
  */
-async function getTodo(id) {
-    // Validate input
-    if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) {
-        throw new Error('ID must be a positive integer');
+export function getTodo(id) {
+    // Validate ID parameter
+    if (!Number.isInteger(id) || id <= 0) {
+        throw new Error('Todo ID must be a positive integer');
     }
-    
-    const todos = await loadTodos();
+
+    // Load todos and find by ID
+    const todos = loadTodos();
     const todo = todos.find(todo => todo.id === id);
     
     return todo || null;
 }
 
 /**
- * Update an existing todo
- * @param {number} id - The todo ID to update
+ * Updates an existing todo with new values
+ * @param {number} id - The ID of the todo to update
  * @param {Object} changes - Object containing fields to update
- * @returns {Promise<Object|null>} The updated todo object or null if not found
+ * @returns {Object|null} The updated todo object, or null if not found
+ * @throws {Error} For invalid parameters or update failures
  */
-async function updateTodo(id, changes) {
-    // Validate input
-    if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) {
-        throw new Error('ID must be a positive integer');
+export function updateTodo(id, changes) {
+    // Validate ID parameter
+    if (!Number.isInteger(id) || id <= 0) {
+        throw new Error('Todo ID must be a positive integer');
     }
-    
+
+    // Validate changes parameter
     if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
-        throw new Error('Changes must be a valid object');
+        throw new Error('Changes must be a non-null object');
     }
-    
-    // Validate allowed fields and their types
+
+    // Validate allowed fields and values
     const allowedFields = ['text', 'done', 'priority'];
     const changeKeys = Object.keys(changes);
     
     if (changeKeys.length === 0) {
         throw new Error('No valid changes provided');
     }
-    
-    for (const key of changeKeys) {
-        if (!allowedFields.includes(key)) {
-            throw new Error(`Invalid field: ${key}. Allowed fields: ${allowedFields.join(', ')}`);
-        }
-        
-        if (key === 'text' && (typeof changes[key] !== 'string' || !changes[key].trim())) {
-            throw new Error('Text must be a non-empty string');
-        }
-        
-        if (key === 'done' && typeof changes[key] !== 'boolean') {
-            throw new Error('Done must be a boolean');
-        }
-        
-        if (key === 'priority' && !VALID_PRIORITIES.includes(changes[key])) {
-            throw new Error(`Invalid priority. Must be one of: ${VALID_PRIORITIES.join(', ')}`);
-        }
+
+    // Check for invalid fields
+    const invalidFields = changeKeys.filter(key => !allowedFields.includes(key));
+    if (invalidFields.length > 0) {
+        throw new Error(`Invalid fields: ${invalidFields.join(', ')}. Allowed: ${allowedFields.join(', ')}`);
+    }
+
+    // Validate specific field values
+    if ('text' in changes && (typeof changes.text !== 'string' || !changes.text.trim())) {
+        throw new Error('Text must be a non-empty string');
     }
     
-    const todos = await loadTodos();
+    if ('done' in changes && typeof changes.done !== 'boolean') {
+        throw new Error('Done must be a boolean value');
+    }
+    
+    if ('priority' in changes && !VALID_PRIORITIES.includes(changes.priority)) {
+        throw new Error(`Invalid priority: ${changes.priority}. Must be one of: ${VALID_PRIORITIES.join(', ')}`);
+    }
+
+    // Load todos and find the target
+    const todos = loadTodos();
     const todoIndex = todos.findIndex(todo => todo.id === id);
     
     if (todoIndex === -1) {
         return null;
     }
-    
+
     // Apply changes
     const updatedTodo = { ...todos[todoIndex] };
     
-    for (const [key, value] of Object.entries(changes)) {
-        if (key === 'text') {
-            updatedTodo[key] = value.trim();
-        } else {
-            updatedTodo[key] = value;
-        }
+    if ('text' in changes) {
+        updatedTodo.text = changes.text.trim();
     }
-    
+    if ('done' in changes) {
+        updatedTodo.done = changes.done;
+    }
+    if ('priority' in changes) {
+        updatedTodo.priority = changes.priority;
+    }
+
+    // Update the todos array and save
     todos[todoIndex] = updatedTodo;
-    await saveTodos(todos);
-    
+    saveTodos(todos);
+
     return updatedTodo;
 }
 
 /**
- * Delete a todo by ID
- * @param {number} id - The todo ID to delete
- * @returns {Promise<boolean>} True if deleted, false if not found
+ * Deletes a todo by its ID
+ * @param {number} id - The ID of the todo to delete
+ * @returns {boolean} True if deleted successfully, false if not found
+ * @throws {Error} For invalid ID parameter or deletion failures
  */
-async function deleteTodo(id) {
-    // Validate input
-    if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) {
-        throw new Error('ID must be a positive integer');
+export function deleteTodo(id) {
+    // Validate ID parameter
+    if (!Number.isInteger(id) || id <= 0) {
+        throw new Error('Todo ID must be a positive integer');
     }
-    
-    const todos = await loadTodos();
+
+    // Load todos and find the target
+    const todos = loadTodos();
     const initialLength = todos.length;
     const filteredTodos = todos.filter(todo => todo.id !== id);
-    
+
+    // Check if any todo was removed
     if (filteredTodos.length === initialLength) {
         return false; // Todo not found
     }
-    
-    await saveTodos(filteredTodos);
+
+    // Save the updated todos array
+    saveTodos(filteredTodos);
     return true;
 }
 
 /**
- * Filter todos by done status and/or priority
+ * Filters todos based on completion status and/or priority
  * @param {Array} todos - Array of todos to filter
- * @param {boolean|null} done - Filter by done status (null for no filter)
- * @param {string|null} priority - Filter by priority (null for no filter)
+ * @param {Object} [options={}] - Filter options
+ * @param {boolean} [options.done] - Filter by completion status
+ * @param {string} [options.priority] - Filter by priority level
  * @returns {Array} Filtered array of todos
+ * @throws {Error} For invalid parameters
  */
-function filterTodos(todos, done = null, priority = null) {
-    // Validate input
+export function filterTodos(todos, options = {}) {
+    // Validate todos parameter
     if (!Array.isArray(todos)) {
         throw new Error('Todos must be an array');
     }
-    
-    if (done !== null && typeof done !== 'boolean') {
-        throw new Error('Done filter must be a boolean or null');
+
+    // Validate options parameter
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        throw new Error('Options must be an object');
     }
-    
-    if (priority !== null && !VALID_PRIORITIES.includes(priority)) {
-        throw new Error(`Invalid priority filter. Must be one of: ${VALID_PRIORITIES.join(', ')} or null`);
+
+    // Validate option values
+    if ('done' in options && typeof options.done !== 'boolean') {
+        throw new Error('Done filter must be a boolean value');
     }
-    
-    return todos.filter(todo => {
-        // Filter by done status
-        if (done !== null && todo.done !== done) {
-            return false;
-        }
-        
-        // Filter by priority
-        if (priority !== null && todo.priority !== priority) {
-            return false;
-        }
-        
-        return true;
-    });
+
+    if ('priority' in options && !VALID_PRIORITIES.includes(options.priority)) {
+        throw new Error(`Invalid priority filter: ${options.priority}. Must be one of: ${VALID_PRIORITIES.join(', ')}`);
+    }
+
+    // Apply filters
+    let filteredTodos = [...todos];
+
+    // Filter by completion status
+    if ('done' in options) {
+        filteredTodos = filteredTodos.filter(todo => todo.done === options.done);
+    }
+
+    // Filter by priority
+    if ('priority' in options) {
+        filteredTodos = filteredTodos.filter(todo => todo.priority === options.priority);
+    }
+
+    return filteredTodos;
 }
 
-// Export all functions
-module.exports = {
-    loadTodos,
-    saveTodos,
-    addTodo,
-    getTodo,
-    updateTodo,
-    deleteTodo,
-    filterTodos
-};
+/**
+ * Validates the structure of a todo object
+ * @private
+ * @param {*} todo - The todo object to validate
+ * @returns {boolean} True if valid, false otherwise
+ */
+function validateTodoStructure(todo) {
+    if (!todo || typeof todo !== 'object' || Array.isArray(todo)) {
+        return false;
+    }
+
+    // Check required fields and types
+    const requiredFields = {
+        id: 'number',
+        text: 'string',
+        done: 'boolean',
+        created: 'string',
+        priority: 'string'
+    };
+
+    for (const [field, expectedType] of Object.entries(requiredFields)) {
+        if (!(field in todo) || typeof todo[field] !== expectedType) {
+            return false;
+        }
+    }
+
+    // Validate specific field constraints
+    if (!Number.isInteger(todo.id) || todo.id <= 0) {
+        return false;
+    }
+
+    if (!todo.text.trim()) {
+        return false;
+    }
+
+    if (!VALID_PRIORITIES.includes(todo.priority)) {
+        return false;
+    }
+
+    // Validate ISO date string
+    try {
+        const date = new Date(todo.created);
+        if (isNaN(date.getTime()) || date.toISOString() !== todo.created) {
+            return false;
+        }
+    } catch {
+        return false;
+    }
+
+    return true;
+}
