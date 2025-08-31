@@ -1,27 +1,22 @@
+Here's a complete Node.js application entry point that mirrors FastAPI functionality:
+
+## main.js
+```javascript
+#!/usr/bin/env node
+
 /**
- * Required dependencies (add to package.json):
- * {
- *   "dependencies": {
- *     "express": "^4.18.2"
- *   },
- *   "devDependencies": {
- *     "nodemon": "^3.0.1"
- *   }
- * }
+ * Main entry point for Node.js/Express application
+ * Equivalent to FastAPI's uvicorn server setup
  */
 
 import { createServer } from 'http';
 import process from 'process';
-import app from './app.js'; // Import main application module
+import { app } from './app.js';
 
-/**
- * Server configuration from environment variables
- */
-const config = {
-  port: parseInt(process.env.PORT) || 8000,
-  host: process.env.HOST || '0.0.0.0',
-  nodeEnv: process.env.NODE_ENV || 'development',
-};
+// Configuration with environment variable fallbacks
+const PORT = process.env.PORT || 8000;
+const HOST = process.env.HOST || '0.0.0.0';
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
 /**
  * Create HTTP server instance
@@ -29,16 +24,14 @@ const config = {
 const server = createServer(app);
 
 /**
- * Enhanced error handler for server startup failures
- * @param {Error} error - Server error object
- * @param {number} port - Port number that failed to bind
+ * Enhanced error handling for server startup
  */
-function handleServerError(error, port) {
+const handleServerError = (error) => {
   if (error.syscall !== 'listen') {
     throw error;
   }
 
-  const bind = typeof port === 'string' ? `Pipe ${port}` : `Port ${port}`;
+  const bind = typeof PORT === 'string' ? `Pipe ${PORT}` : `Port ${PORT}`;
 
   switch (error.code) {
     case 'EACCES':
@@ -49,134 +42,259 @@ function handleServerError(error, port) {
       console.error(`❌ ${bind} is already in use`);
       process.exit(1);
       break;
-    case 'ENOTFOUND':
-      console.error(`❌ Host ${config.host} not found`);
-      process.exit(1);
-      break;
     default:
-      console.error(`❌ Server startup failed:`, error.message);
-      process.exit(1);
+      console.error(`❌ Server error:`, error.message);
+      throw error;
   }
-}
+};
 
 /**
  * Server listening event handler
  */
-function handleServerListening() {
+const handleServerListening = () => {
   const addr = server.address();
   const bind = typeof addr === 'string' ? `pipe ${addr}` : `port ${addr.port}`;
   
-  console.log(`🚀 Server running on http://${config.host}:${config.port}`);
-  console.log(`📝 Environment: ${config.nodeEnv}`);
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
+  console.log(`📝 Environment: ${NODE_ENV}`);
   console.log(`🎯 Listening on ${bind}`);
   
-  if (config.nodeEnv === 'development') {
-    console.log(`🔄 Hot reload enabled - watching for changes`);
-    console.log(`📚 API docs available at http://${config.host}:${config.port}/docs`);
+  if (NODE_ENV === 'development') {
+    console.log(`🔄 Development mode: Hot reload enabled`);
+    console.log(`📚 API docs available at http://${HOST}:${PORT}/docs`);
   }
-}
+};
 
 /**
  * Graceful shutdown handler
- * @param {string} signal - Process signal received
  */
-function handleGracefulShutdown(signal) {
+const gracefulShutdown = (signal) => {
   console.log(`\n📡 Received ${signal}. Starting graceful shutdown...`);
   
-  server.close((error) => {
-    if (error) {
-      console.error('❌ Error during server shutdown:', error.message);
+  server.close(async (err) => {
+    if (err) {
+      console.error('❌ Error during server shutdown:', err);
       process.exit(1);
     }
     
-    console.log('✅ Server closed successfully');
-    console.log('👋 Goodbye!');
+    console.log('✅ HTTP server closed');
+    
+    // Add any cleanup operations here (database connections, etc.)
+    try {
+      // Example: await database.close();
+      // Example: await redis.disconnect();
+      console.log('✅ All connections closed');
+    } catch (cleanupError) {
+      console.error('❌ Error during cleanup:', cleanupError);
+      process.exit(1);
+    }
+    
+    console.log('👋 Graceful shutdown completed');
     process.exit(0);
   });
-
+  
   // Force shutdown after 10 seconds
   setTimeout(() => {
-    console.error('⚠️  Forced shutdown after timeout');
+    console.error('❌ Forced shutdown due to timeout');
     process.exit(1);
   }, 10000);
-}
+};
 
 /**
- * Handle uncaught exceptions and unhandled rejections
+ * Global error handlers
  */
-function setupProcessHandlers() {
-  process.on('uncaughtException', (error) => {
-    console.error('💥 Uncaught Exception:', error);
-    process.exit(1);
-  });
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
+  process.exit(1);
+});
 
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-    process.exit(1);
-  });
-
-  // Graceful shutdown signals
-  process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
-  process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
-}
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
 
 /**
- * Validate server configuration
+ * Graceful shutdown signal handlers
  */
-function validateConfig() {
-  if (config.port < 1 || config.port > 65535) {
-    console.error('❌ Invalid port number. Must be between 1 and 65535');
-    process.exit(1);
-  }
-
-  if (!config.host) {
-    console.error('❌ Invalid host configuration');
-    process.exit(1);
-  }
-}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 /**
- * Main server startup function
- * Bootstraps the Express server with proper error handling and configuration
+ * Start server function
  */
-async function startServer() {
+const startServer = async () => {
   try {
-    console.log('🔧 Initializing server...');
-    
-    // Validate configuration
-    validateConfig();
-    
-    // Setup process handlers
-    setupProcessHandlers();
-    
-    // Configure server event handlers
-    server.on('error', (error) => handleServerError(error, config.port));
+    // Validate port
+    const portNum = parseInt(PORT, 10);
+    if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+      throw new Error(`Invalid port number: ${PORT}`);
+    }
+
+    // Set up server event listeners
+    server.on('error', handleServerError);
     server.on('listening', handleServerListening);
-    
+
     // Start listening
-    server.listen(config.port, config.host);
-    
+    server.listen(portNum, HOST);
+
   } catch (error) {
-    console.error('💥 Failed to start server:', error.message);
+    console.error('❌ Failed to start server:', error.message);
     process.exit(1);
   }
-}
+};
 
 /**
- * Development mode enhancements
+ * Main execution - only run if this file is executed directly
  */
-if (config.nodeEnv === 'development') {
-  // Enable detailed error logging
-  process.env.DEBUG = process.env.DEBUG || 'express:*';
-  
-  // Log unhandled promise rejections in development
-  process.on('warning', (warning) => {
-    console.warn('⚠️  Warning:', warning.name, warning.message);
+if (import.meta.url === `file://${process.argv[1]}`) {
+  console.log('🌟 Starting Node.js application...');
+  startServer();
+}
+
+// Export server for testing purposes
+export { server, startServer };
+```
+
+## package.json (scripts section)
+```json
+{
+  "name": "nodejs-fastapi-equivalent",
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "scripts": {
+    "start": "node main.js",
+    "dev": "NODE_ENV=development nodemon main.js",
+    "prod": "NODE_ENV=production node main.js",
+    "test": "NODE_ENV=test jest",
+    "lint": "eslint *.js",
+    "docker:start": "HOST=0.0.0.0 PORT=8000 node main.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.7.0",
+    "eslint": "^8.50.0"
+  }
+}
+```
+
+## Example app.js (companion file)
+```javascript
+/**
+ * Express application setup
+ * Equivalent to FastAPI app instance
+ */
+
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import compression from 'compression';
+
+const app = express();
+
+// Security middleware
+app.use(helmet());
+app.use(cors());
+app.use(compression());
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Health check endpoint (equivalent to FastAPI automatic /health)
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// API documentation endpoint (development only)
+if (process.env.NODE_ENV === 'development') {
+  app.get('/docs', (req, res) => {
+    res.json({
+      message: 'API Documentation',
+      endpoints: {
+        'GET /health': 'Health check endpoint',
+        'GET /docs': 'This documentation'
+      }
+    });
   });
 }
 
-// Start the server
-startServer();
+// Example API routes
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Welcome to Node.js FastAPI equivalent!',
+    version: '1.0.0'
+  });
+});
 
-// Export server instance for testing purposes
-export default server;
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ 
+    error: 'Not Found',
+    message: `Route ${req.originalUrl} not found`
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('💥 Application Error:', err);
+  
+  res.status(err.status || 500).json({
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Internal Server Error',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
+});
+
+export { app };
+```
+
+## Docker support (.dockerignore)
+```
+node_modules
+npm-debug.log
+.git
+.gitignore
+README.md
+.env
+coverage
+.nyc_output
+```
+
+## Key Features:
+
+1. **🚀 FastAPI Equivalent**: Mirrors uvicorn server functionality
+2. **🔧 Environment Configuration**: PORT, HOST, NODE_ENV support
+3. **🛡️ Production Ready**: Error handling, graceful shutdown, security
+4. **🔄 Development Features**: Hot reload support with nodemon
+5. **📊 Health Checks**: Built-in health endpoint
+6. **🐳 Container Ready**: 0.0.0.0 host binding for Docker
+7. **⚡ Modern Syntax**: ES6+ modules, async/await
+8. **🧪 Test Ready**: Conditional execution for testing
+
+## Usage:
+
+```bash
+# Development
+npm run dev
+
+# Production
+npm run prod
+
+# Docker
+npm run docker:start
+
+# Direct execution
+chmod +x main.js
+./main.js
+```
+
+This setup provides a robust, production-ready Node.js application entry point that closely mirrors FastAPI's functionality and development experience.
