@@ -1,182 +1,210 @@
 #!/usr/bin/env node
 
-'use strict';
+/**
+ * Todo CLI Application Entry Point
+ * 
+ * Main entry point for the command-line todo application.
+ * Handles argument parsing, command routing, and error management.
+ * 
+ * @author Todo CLI Team
+ * @version 1.0.0
+ */
 
-import { createRequire } from 'module';
-import * as commands from './commands.js';
-import app from './app.js';
-
-const require = createRequire(import.meta.url);
 const process = require('process');
+const app = require('./app');
+const commands = require('./commands');
 
 /**
- * Main entry point for the Todo CLI application
- * Parses command-line arguments and routes to appropriate command handlers
+ * Parses command-line arguments and extracts command and parameters
  * 
- * @async
- * @function main
- * @returns {Promise<void>}
- * @throws {Error} When command execution fails or invalid arguments provided
+ * @param {string[]} argv - Process arguments array
+ * @returns {Object} Parsed command object with command name and arguments
+ */
+function parseCommand(argv) {
+  // Skip 'node' and script path (first 2 elements)
+  const args = argv.slice(2);
+  
+  if (args.length === 0) {
+    return { command: 'help', args: [] };
+  }
+  
+  const [command, ...commandArgs] = args;
+  return {
+    command: command.toLowerCase(),
+    args: commandArgs
+  };
+}
+
+/**
+ * Validates if the provided command is supported
+ * 
+ * @param {string} command - Command name to validate
+ * @returns {boolean} True if command is valid, false otherwise
+ */
+function isValidCommand(command) {
+  const validCommands = ['add', 'list', 'done', 'remove', 'help'];
+  return validCommands.includes(command);
+}
+
+/**
+ * Routes command to appropriate handler function
+ * 
+ * @param {string} command - Command name
+ * @param {string[]} args - Command arguments
+ * @returns {Promise<void>} Promise that resolves when command completes
+ */
+async function routeCommand(command, args) {
+  switch (command) {
+    case 'add':
+      if (args.length === 0) {
+        console.error('Error: Missing task description');
+        console.error('Usage: todo add <task description>');
+        process.exit(1);
+      }
+      await commands.add(args.join(' '));
+      break;
+      
+    case 'list':
+      await commands.list();
+      break;
+      
+    case 'done':
+      if (args.length === 0) {
+        console.error('Error: Missing task ID');
+        console.error('Usage: todo done <task-id>');
+        process.exit(1);
+      }
+      const taskId = parseInt(args[0], 10);
+      if (isNaN(taskId)) {
+        console.error('Error: Task ID must be a number');
+        process.exit(1);
+      }
+      await commands.done(taskId);
+      break;
+      
+    case 'remove':
+      if (args.length === 0) {
+        console.error('Error: Missing task ID');
+        console.error('Usage: todo remove <task-id>');
+        process.exit(1);
+      }
+      const removeId = parseInt(args[0], 10);
+      if (isNaN(removeId)) {
+        console.error('Error: Task ID must be a number');
+        process.exit(1);
+      }
+      await commands.remove(removeId);
+      break;
+      
+    case 'help':
+    default:
+      await commands.help();
+      break;
+  }
+}
+
+/**
+ * Main application function
+ * Orchestrates the entire CLI flow from argument parsing to command execution
+ * 
+ * @returns {Promise<void>} Promise that resolves when application completes
  */
 async function main() {
-    try {
-        // Parse command-line arguments (skip node path and script path)
-        const args = process.argv.slice(2);
-        
-        // Handle empty arguments - show help
-        if (args.length === 0) {
-            await commands.help();
-            process.exit(0);
-        }
-
-        // Extract command and remaining arguments
-        const [command, ...commandArgs] = args;
-        const normalizedCommand = command.toLowerCase().trim();
-
-        // Command routing logic
-        switch (normalizedCommand) {
-            case 'add':
-                if (commandArgs.length === 0) {
-                    console.error('Error: Missing task description');
-                    console.error('Usage: todo add <task description>');
-                    console.error('Example: todo add "Buy groceries"');
-                    process.exit(1);
-                }
-                await commands.add(commandArgs.join(' '));
-                break;
-
-            case 'list':
-                await commands.list();
-                break;
-
-            case 'done':
-                if (commandArgs.length === 0) {
-                    console.error('Error: Missing task ID');
-                    console.error('Usage: todo done <task_id>');
-                    console.error('Example: todo done 1');
-                    process.exit(1);
-                }
-                
-                const doneTaskId = parseInt(commandArgs[0], 10);
-                if (isNaN(doneTaskId) || doneTaskId <= 0) {
-                    console.error('Error: Task ID must be a positive number');
-                    console.error('Usage: todo done <task_id>');
-                    process.exit(1);
-                }
-                
-                await commands.done(doneTaskId);
-                break;
-
-            case 'remove':
-                if (commandArgs.length === 0) {
-                    console.error('Error: Missing task ID');
-                    console.error('Usage: todo remove <task_id>');
-                    console.error('Example: todo remove 1');
-                    process.exit(1);
-                }
-                
-                const removeTaskId = parseInt(commandArgs[0], 10);
-                if (isNaN(removeTaskId) || removeTaskId <= 0) {
-                    console.error('Error: Task ID must be a positive number');
-                    console.error('Usage: todo remove <task_id>');
-                    process.exit(1);
-                }
-                
-                await commands.remove(removeTaskId);
-                break;
-
-            case 'help':
-            case '--help':
-            case '-h':
-                await commands.help();
-                break;
-
-            default:
-                console.error(`Error: Unknown command '${command}'`);
-                console.error('Run "todo help" to see available commands');
-                await commands.help();
-                process.exit(1);
-        }
-
-        // Successful completion
-        process.exit(0);
-
-    } catch (error) {
-        // Handle different types of errors with appropriate messages
-        if (error.code === 'ENOENT') {
-            console.error('Error: Todo data file not found. Run "todo list" to initialize.');
-        } else if (error.code === 'EACCES') {
-            console.error('Error: Permission denied. Check file permissions for todo data.');
-        } else if (error.code === 'EMFILE' || error.code === 'ENFILE') {
-            console.error('Error: Too many open files. Please try again.');
-        } else if (error.name === 'SyntaxError') {
-            console.error('Error: Todo data file is corrupted. Please check the file format.');
-        } else if (error.message.includes('Task not found')) {
-            console.error(`Error: ${error.message}`);
-            console.error('Run "todo list" to see available tasks');
-        } else if (error.message.includes('Invalid task')) {
-            console.error(`Error: ${error.message}`);
-        } else {
-            // Generic error handling
-            console.error(`Error: ${error.message || 'An unexpected error occurred'}`);
-            
-            // In development, show stack trace
-            if (process.env.NODE_ENV === 'development') {
-                console.error('Stack trace:', error.stack);
-            }
-        }
-        
-        process.exit(1);
+  try {
+    // Initialize application
+    await app.initialize();
+    
+    // Parse command-line arguments
+    const { command, args } = parseCommand(process.argv);
+    
+    // Validate command
+    if (!isValidCommand(command)) {
+      console.error(`Error: Unknown command '${command}'`);
+      console.error('Run "todo help" to see available commands');
+      process.exit(1);
     }
+    
+    // Route and execute command
+    await routeCommand(command, args);
+    
+    // Successful execution
+    process.exit(0);
+    
+  } catch (error) {
+    // Handle different types of errors
+    if (error.code === 'ENOENT') {
+      console.error('Error: Todo data file not found or inaccessible');
+    } else if (error.code === 'EACCES') {
+      console.error('Error: Permission denied accessing todo data');
+    } else if (error.code === 'ENOSPC') {
+      console.error('Error: No space left on device');
+    } else if (error.name === 'ValidationError') {
+      console.error(`Error: ${error.message}`);
+    } else if (error.name === 'TaskNotFoundError') {
+      console.error(`Error: ${error.message}`);
+    } else {
+      // Generic error handling
+      console.error('Error: An unexpected error occurred');
+      
+      // In development, show full error details
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Debug info:', error);
+      }
+    }
+    
+    // Exit with error code
+    process.exit(1);
+  }
 }
 
 /**
- * Error boundary for the main application
- * Ensures any unhandled errors are caught and logged appropriately
+ * Handle uncaught exceptions gracefully
  */
-async function bootstrap() {
-    try {
-        await main();
-    } catch (error) {
-        console.error('Fatal error: Application failed to start');
-        console.error(error.message);
-        
-        if (process.env.NODE_ENV === 'development') {
-            console.error('Stack trace:', error.stack);
-        }
-        
-        process.exit(1);
-    }
+process.on('uncaughtException', (error) => {
+  console.error('Fatal Error: Uncaught exception occurred');
+  if (process.env.NODE_ENV === 'development') {
+    console.error(error);
+  }
+  process.exit(1);
+});
+
+/**
+ * Handle unhandled promise rejections
+ */
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Fatal Error: Unhandled promise rejection');
+  if (process.env.NODE_ENV === 'development') {
+    console.error('Reason:', reason);
+    console.error('Promise:', promise);
+  }
+  process.exit(1);
+});
+
+/**
+ * Handle graceful shutdown on SIGINT (Ctrl+C)
+ */
+process.on('SIGINT', () => {
+  console.log('\nGracefully shutting down...');
+  process.exit(0);
+});
+
+/**
+ * Handle graceful shutdown on SIGTERM
+ */
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down gracefully...');
+  process.exit(0);
+});
+
+// Execute main function if this file is run directly
+if (require.main === module) {
+  main();
 }
 
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    process.exit(1);
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error.message);
-    if (process.env.NODE_ENV === 'development') {
-        console.error('Stack trace:', error.stack);
-    }
-    process.exit(1);
-});
-
-// Graceful shutdown on SIGINT (Ctrl+C)
-process.on('SIGINT', () => {
-    console.log('\nTodo application interrupted. Goodbye!');
-    process.exit(0);
-});
-
-// Graceful shutdown on SIGTERM
-process.on('SIGTERM', () => {
-    console.log('Todo application terminated. Goodbye!');
-    process.exit(0);
-});
-
-// Start the application
-bootstrap();
-
-export default main;
+// Export main function for testing purposes
+module.exports = {
+  main,
+  parseCommand,
+  isValidCommand,
+  routeCommand
+};
