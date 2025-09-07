@@ -1,482 +1,501 @@
-I'll create a complete Go web application that matches your specifications. Here's the production-ready implementation:
+I'll create a complete Go web application that mirrors FastAPI functionality with proper Go idioms and best practices.
+
+## Project Structure
+
+```
+task-management-api/
+├── go.mod
+├── go.sum
+├── main.go
+├── .env.example
+├── app/
+│   ├── config.go
+│   ├── server.go
+│   └── container.go
+├── internal/
+│   ├── api/
+│   │   ├── tasks/
+│   │   │   └── handler.go
+│   │   └── users/
+│   │       └── handler.go
+│   ├── core/
+│   │   ├── auth/
+│   │   │   └── jwt.go
+│   │   └── database/
+│   │       └── connection.go
+│   └── middleware/
+│       ├── cors.go
+│       ├── auth.go
+│       └── recovery.go
+└── tests/
+    └── app_test.go
+```
 
 ## go.mod
+
 ```go
 module task-management-api
 
 go 1.21
 
 require (
-    github.com/golang-jwt/jwt/v5 v5.2.0
-    github.com/gorilla/mux v1.8.1
-    github.com/lib/pq v1.10.9
-    github.com/rs/cors v1.10.1
+    github.com/gin-gonic/gin v1.9.1
+    github.com/golang-jwt/jwt/v5 v5.0.0
     github.com/sirupsen/logrus v1.9.3
-)
-
-require (
-    golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8 // indirect
+    github.com/spf13/viper v1.16.0
+    github.com/stretchr/testify v1.8.4
+    gorm.io/driver/postgres v1.5.2
+    gorm.io/gorm v1.25.4
 )
 ```
 
+## .env.example
+
+```env
+# Server Configuration
+SERVER_HOST=localhost
+SERVER_PORT=8080
+SERVER_READ_TIMEOUT=30s
+SERVER_WRITE_TIMEOUT=30s
+
+# Database Configuration
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=postgres
+DB_PASSWORD=password
+DB_NAME=taskmanagement
+DB_SSL_MODE=disable
+
+# JWT Configuration
+JWT_SECRET=your-super-secret-jwt-key
+JWT_EXPIRY=24h
+
+# CORS Configuration
+CORS_ALLOWED_ORIGINS=http://localhost:3000
+
+# Logging
+LOG_LEVEL=info
+```
+
 ## main.go
+
 ```go
 package main
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"task-management-api/internal/database"
-	"task-management-api/internal/handlers"
-	"task-management-api/internal/middleware"
+	"task-management-api/app"
 
-	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
-
-const (
-	AppName    = "Task Management API"
-	AppVersion = "1.0.0"
-	Port       = "8080"
-)
-
-type App struct {
-	Router *mux.Router
-	DB     *database.DB
-	Logger *logrus.Logger
-}
 
 func main() {
 	// Initialize logger
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
-	logger.SetLevel(logrus.InfoLevel)
-
-	// Initialize database
-	db, err := database.NewConnection(logger)
+	
+	// Load configuration
+	config, err := app.LoadConfig()
 	if err != nil {
-		logger.WithError(err).Fatal("Failed to connect to database")
-	}
-	defer db.Close()
-
-	// Initialize app
-	app := &App{
-		Router: mux.NewRouter(),
-		DB:     db,
-		Logger: logger,
+		logger.WithError(err).Fatal("Failed to load configuration")
 	}
 
-	// Setup routes and middleware
-	app.setupRoutes()
-	app.setupMiddleware()
+	// Set log level
+	level, err := logrus.ParseLevel(config.LogLevel)
+	if err != nil {
+		logger.WithError(err).Warn("Invalid log level, using info")
+		level = logrus.InfoLevel
+	}
+	logger.SetLevel(level)
 
-	// Create HTTP server
-	server := &http.Server{
-		Addr:         ":" + Port,
-		Handler:      app.Router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	// Create dependency container
+	container, err := app.NewContainer(config, logger)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to create dependency container")
+	}
+	defer container.Close()
+
+	// Create and configure server
+	server, err := app.NewServer(config, container, logger)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to create server")
 	}
 
 	// Start server in goroutine
 	go func() {
 		logger.WithFields(logrus.Fields{
-			"app":     AppName,
-			"version": AppVersion,
-			"port":    Port,
-		}).Info("Starting server")
-
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			"host": config.Server.Host,
+			"port": config.Server.Port,
+		}).Info("Starting Task Management API server")
+		
+		if err := server.Start(); err != nil {
 			logger.WithError(err).Fatal("Server failed to start")
 		}
 	}()
 
-	// Wait for interrupt signal for graceful shutdown
+	// Wait for interrupt signal to gracefully shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	logger.Info("Shutting down server...")
 
-	// Graceful shutdown with timeout
+	// Create shutdown context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		logger.WithError(err).Fatal("Server forced to shutdown")
+		logger.WithError(err).Error("Server forced to shutdown")
+	} else {
+		logger.Info("Server shutdown complete")
 	}
-
-	logger.Info("Server exited")
-}
-
-func (app *App) setupRoutes() {
-	// Health check endpoint (unprotected)
-	app.Router.HandleFunc("/health", handlers.NewHealthHandler(app.DB, app.Logger)).Methods("GET")
-
-	// API routes (protected)
-	api := app.Router.PathPrefix("/api").Subrouter()
-	
-	// Task routes
-	taskHandler := handlers.NewTaskHandler(app.DB, app.Logger)
-	tasks := api.PathPrefix("/tasks").Subrouter()
-	tasks.HandleFunc("", taskHandler.GetTasks).Methods("GET")
-	tasks.HandleFunc("", taskHandler.CreateTask).Methods("POST")
-	tasks.HandleFunc("/{id}", taskHandler.GetTask).Methods("GET")
-	tasks.HandleFunc("/{id}", taskHandler.UpdateTask).Methods("PUT")
-	tasks.HandleFunc("/{id}", taskHandler.DeleteTask).Methods("DELETE")
-
-	// User routes
-	userHandler := handlers.NewUserHandler(app.DB, app.Logger)
-	users := api.PathPrefix("/users").Subrouter()
-	users.HandleFunc("", userHandler.GetUsers).Methods("GET")
-	users.HandleFunc("", userHandler.CreateUser).Methods("POST")
-	users.HandleFunc("/{id}", userHandler.GetUser).Methods("GET")
-	users.HandleFunc("/{id}", userHandler.UpdateUser).Methods("PUT")
-	users.HandleFunc("/{id}", userHandler.DeleteUser).Methods("DELETE")
-	
-	// Auth routes (unprotected)
-	users.HandleFunc("/login", userHandler.Login).Methods("POST")
-	users.HandleFunc("/register", userHandler.Register).Methods("POST")
-}
-
-func (app *App) setupMiddleware() {
-	// Recovery middleware (first)
-	app.Router.Use(middleware.RecoveryMiddleware(app.Logger))
-	
-	// CORS middleware
-	app.Router.Use(middleware.CORSMiddleware())
-	
-	// Logging middleware
-	app.Router.Use(middleware.LoggingMiddleware(app.Logger))
-	
-	// JSON content-type middleware
-	app.Router.Use(middleware.JSONMiddleware)
-	
-	// JWT authentication for /api routes (except auth endpoints)
-	api := app.Router.PathPrefix("/api").Subrouter()
-	api.Use(middleware.JWTMiddleware(app.Logger))
 }
 ```
 
-## internal/database/connection.go
+## app/config.go
+
 ```go
-package database
+package app
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
-	"os"
-	"strconv"
 	"time"
 
-	_ "github.com/lib/pq"
-	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 )
 
-type DB struct {
-	*sql.DB
-	logger *logrus.Logger
-}
-
+// Config holds all application configuration
 type Config struct {
-	Host     string
-	Port     int
-	Name     string
-	User     string
-	Password string
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
+	JWT      JWTConfig      `mapstructure:"jwt"`
+	CORS     CORSConfig     `mapstructure:"cors"`
+	LogLevel string         `mapstructure:"log_level"`
 }
 
-// NewConnection creates a new database connection with retry logic
-func NewConnection(logger *logrus.Logger) (*DB, error) {
-	config := getConfigFromEnv()
-	
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		config.Host, config.Port, config.User, config.Password, config.Name)
-
-	var db *sql.DB
-	var err error
-
-	// Retry logic for database connection
-	maxRetries := 5
-	for i := 0; i < maxRetries; i++ {
-		db, err = sql.Open("postgres", dsn)
-		if err != nil {
-			logger.WithError(err).Warnf("Failed to open database connection, attempt %d/%d", i+1, maxRetries)
-			time.Sleep(time.Duration(i+1) * time.Second)
-			continue
-		}
-
-		// Test the connection
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err = db.PingContext(ctx)
-		cancel()
-
-		if err != nil {
-			logger.WithError(err).Warnf("Failed to ping database, attempt %d/%d", i+1, maxRetries)
-			db.Close()
-			time.Sleep(time.Duration(i+1) * time.Second)
-			continue
-		}
-
-		break
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database after %d attempts: %w", maxRetries, err)
-	}
-
-	// Configure connection pool
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-	db.SetConnMaxIdleTime(1 * time.Minute)
-
-	logger.Info("Successfully connected to database")
-
-	return &DB{
-		DB:     db,
-		logger: logger,
-	}, nil
+// ServerConfig holds server-related configuration
+type ServerConfig struct {
+	Host         string        `mapstructure:"host"`
+	Port         int           `mapstructure:"port"`
+	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout time.Duration `mapstructure:"write_timeout"`
 }
 
-// HealthCheck verifies database connectivity
-func (db *DB) HealthCheck(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
+// DatabaseConfig holds database-related configuration
+type DatabaseConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	User     string `mapstructure:"user"`
+	Password string `mapstructure:"password"`
+	Name     string `mapstructure:"name"`
+	SSLMode  string `mapstructure:"ssl_mode"`
+}
 
-	if err := db.PingContext(ctx); err != nil {
-		db.logger.WithError(err).Error("Database health check failed")
-		return err
+// JWTConfig holds JWT-related configuration
+type JWTConfig struct {
+	Secret string        `mapstructure:"secret"`
+	Expiry time.Duration `mapstructure:"expiry"`
+}
+
+// CORSConfig holds CORS-related configuration
+type CORSConfig struct {
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
+}
+
+// LoadConfig loads configuration from environment variables and config files
+func LoadConfig() (*Config, error) {
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("./config")
+
+	// Set environment variable prefix
+	viper.SetEnvPrefix("")
+	viper.AutomaticEnv()
+
+	// Set defaults
+	setDefaults()
+
+	// Read config file (optional)
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
+		}
 	}
 
+	var config Config
+	if err := viper.Unmarshal(&config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	if err := validateConfig(&config); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return &config, nil
+}
+
+func setDefaults() {
+	// Server defaults
+	viper.SetDefault("SERVER_HOST", "localhost")
+	viper.SetDefault("SERVER_PORT", 8080)
+	viper.SetDefault("SERVER_READ_TIMEOUT", "30s")
+	viper.SetDefault("SERVER_WRITE_TIMEOUT", "30s")
+
+	// Database defaults
+	viper.SetDefault("DB_HOST", "localhost")
+	viper.SetDefault("DB_PORT", 5432)
+	viper.SetDefault("DB_SSL_MODE", "disable")
+
+	// JWT defaults
+	viper.SetDefault("JWT_EXPIRY", "24h")
+
+	// CORS defaults
+	viper.SetDefault("CORS_ALLOWED_ORIGINS", []string{"http://localhost:3000"})
+
+	// Logging defaults
+	viper.SetDefault("LOG_LEVEL", "info")
+
+	// Bind environment variables
+	viper.BindEnv("server.host", "SERVER_HOST")
+	viper.BindEnv("server.port", "SERVER_PORT")
+	viper.BindEnv("server.read_timeout", "SERVER_READ_TIMEOUT")
+	viper.BindEnv("server.write_timeout", "SERVER_WRITE_TIMEOUT")
+	viper.BindEnv("database.host", "DB_HOST")
+	viper.BindEnv("database.port", "DB_PORT")
+	viper.BindEnv("database.user", "DB_USER")
+	viper.BindEnv("database.password", "DB_PASSWORD")
+	viper.BindEnv("database.name", "DB_NAME")
+	viper.BindEnv("database.ssl_mode", "DB_SSL_MODE")
+	viper.BindEnv("jwt.secret", "JWT_SECRET")
+	viper.BindEnv("jwt.expiry", "JWT_EXPIRY")
+	viper.BindEnv("cors.allowed_origins", "CORS_ALLOWED_ORIGINS")
+	viper.BindEnv("log_level", "LOG_LEVEL")
+}
+
+func validateConfig(config *Config) error {
+	if config.Database.User == "" {
+		return fmt.Errorf("database user is required")
+	}
+	if config.Database.Password == "" {
+		return fmt.Errorf("database password is required")
+	}
+	if config.Database.Name == "" {
+		return fmt.Errorf("database name is required")
+	}
+	if config.JWT.Secret == "" {
+		return fmt.Errorf("JWT secret is required")
+	}
 	return nil
 }
+```
 
-// Close closes the database connection
-func (db *DB) Close() error {
-	db.logger.Info("Closing database connection")
-	return db.DB.Close()
+## app/container.go
+
+```go
+package app
+
+import (
+	"fmt"
+
+	"task-management-api/internal/api/tasks"
+	"task-management-api/internal/api/users"
+	"task-management-api/internal/core/auth"
+	"task-management-api/internal/core/database"
+
+	"github.com/sirupsen/logrus"
+)
+
+// Container holds all application dependencies
+type Container struct {
+	Config       *Config
+	Logger       *logrus.Logger
+	Database     database.Connection
+	AuthService  auth.Service
+	TasksHandler tasks.Handler
+	UsersHandler users.Handler
 }
 
-func getConfigFromEnv() Config {
-	port, _ := strconv.Atoi(getEnvOrDefault("DB_PORT", "5432"))
-	
-	return Config{
-		Host:     getEnvOrDefault("DB_HOST", "localhost"),
-		Port:     port,
-		Name:     getEnvOrDefault("DB_NAME", "taskdb"),
-		User:     getEnvOrDefault("DB_USER", "postgres"),
-		Password: getEnvOrDefault("DB_PASS", "password"),
+// NewContainer creates a new dependency container
+func NewContainer(config *Config, logger *logrus.Logger) (*Container, error) {
+	container := &Container{
+		Config: config,
+		Logger: logger,
 	}
+
+	// Initialize database connection
+	db, err := database.NewConnection(config.Database, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	}
+	container.Database = db
+
+	// Initialize auth service
+	authService, err := auth.NewJWTService(config.JWT, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize auth service: %w", err)
+	}
+	container.AuthService = authService
+
+	// Initialize handlers
+	container.TasksHandler = tasks.NewHandler(db, logger)
+	container.UsersHandler = users.NewHandler(db, authService, logger)
+
+	return container, nil
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+// Close closes all resources in the container
+func (c *Container) Close() error {
+	if c.Database != nil {
+		return c.Database.Close()
 	}
-	return defaultValue
+	return nil
 }
 ```
 
-## internal/handlers/health.go
+## app/server.go
+
 ```go
-package handlers
+package app
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
-	"task-management-api/internal/database"
+	"task-management-api/internal/middleware"
 
+	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 )
 
-type HealthResponse struct {
-	Status    string    `json:"status"`
-	Version   string    `json:"version"`
-	Database  string    `json:"database"`
-	Timestamp time.Time `json:"timestamp"`
+// Server represents the HTTP server
+type Server struct {
+	config    *Config
+	container *Container
+	logger    *logrus.Logger
+	engine    *gin.Engine
+	server    *http.Server
 }
 
-// NewHealthHandler creates a new health check handler
-func NewHealthHandler(db *database.DB, logger *logrus.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
+// AppInfo represents application information
+type AppInfo struct {
+	Title   string `json:"title"`
+	Version string `json:"version"`
+}
 
-		response := HealthResponse{
-			Status:    "healthy",
-			Version:   "1.0.0",
-			Database:  "connected",
-			Timestamp: time.Now().UTC(),
-		}
-
-		// Check database connectivity
-		if err := db.HealthCheck(ctx); err != nil {
-			logger.WithError(err).Error("Health check failed - database unavailable")
-			response.Status = "unhealthy"
-			response.Database = "disconnected"
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			logger.WithError(err).Error("Failed to encode health response")
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-		}
+// NewServer creates a new HTTP server
+func NewServer(config *Config, container *Container, logger *logrus.Logger) (*Server, error) {
+	// Set Gin mode based on log level
+	if config.LogLevel == "debug" {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
 	}
-}
-```
 
-## internal/handlers/tasks.go
-```go
-package handlers
-
-import (
-	"encoding/json"
-	"net/http"
-
-	"task-management-api/internal/database"
-
-	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
-)
-
-type TaskHandler struct {
-	db     *database.DB
-	logger *logrus.Logger
-}
-
-type Task struct {
-	ID          int    `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Completed   bool   `json:"completed"`
-	UserID      int    `json:"user_id"`
-}
-
-// NewTaskHandler creates a new task handler
-func NewTaskHandler(db *database.DB, logger *logrus.Logger) *TaskHandler {
-	return &TaskHandler{
-		db:     db,
-		logger: logger,
-	}
-}
-
-// GetTasks handles GET /api/tasks
-func (h *TaskHandler) GetTasks(w http.ResponseWriter, r *http.Request) {
-	userID := getUserIDFromContext(r.Context())
+	engine := gin.New()
 	
-	h.logger.WithField("user_id", userID).Info("Fetching tasks")
-	
-	// Placeholder response
-	tasks := []Task{
-		{ID: 1, Title: "Sample Task", Description: "This is a sample task", Completed: false, UserID: userID},
+	server := &Server{
+		config:    config,
+		container: container,
+		logger:    logger,
+		engine:    engine,
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"tasks": tasks,
-		"count": len(tasks),
+	// Setup middleware
+	server.setupMiddleware()
+
+	// Setup routes
+	server.setupRoutes()
+
+	// Create HTTP server
+	server.server = &http.Server{
+		Addr:         fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port),
+		Handler:      engine,
+		ReadTimeout:  config.Server.ReadTimeout,
+		WriteTimeout: config.Server.WriteTimeout,
+	}
+
+	return server, nil
+}
+
+// setupMiddleware configures all middleware
+func (s *Server) setupMiddleware() {
+	// Recovery middleware
+	s.engine.Use(middleware.Recovery(s.logger))
+
+	// CORS middleware
+	s.engine.Use(middleware.CORS(s.config.CORS))
+
+	// Request logging middleware
+	s.engine.Use(middleware.RequestLogger(s.logger))
+}
+
+// setupRoutes configures all routes
+func (s *Server) setupRoutes() {
+	// Health check endpoint
+	s.engine.GET("/health", s.healthCheck)
+
+	// API info endpoint
+	s.engine.GET("/", s.appInfo)
+
+	// API routes
+	api := s.engine.Group("/api")
+	{
+		// Tasks routes
+		tasks := api.Group("/tasks")
+		{
+			tasks.GET("", s.container.TasksHandler.GetTasks)
+			tasks.POST("", middleware.JWTAuth(s.container.AuthService), s.container.TasksHandler.CreateTask)
+			tasks.GET("/:id", s.container.TasksHandler.GetTask)
+			tasks.PUT("/:id", middleware.JWTAuth(s.container.AuthService), s.container.TasksHandler.UpdateTask)
+			tasks.DELETE("/:id", middleware.JWTAuth(s.container.AuthService), s.container.TasksHandler.DeleteTask)
+		}
+
+		// Users routes
+		users := api.Group("/users")
+		{
+			users.POST("/register", s.container.UsersHandler.Register)
+			users.POST("/login", s.container.UsersHandler.Login)
+			users.GET("/profile", middleware.JWTAuth(s.container.AuthService), s.container.UsersHandler.GetProfile)
+			users.PUT("/profile", middleware.JWTAuth(s.container.AuthService), s.container.UsersHandler.UpdateProfile)
+		}
+	}
+}
+
+// healthCheck handles health check requests
+func (s *Server) healthCheck(c *gin.Context) {
+	status := "healthy"
+	dbStatus := "connected"
+
+	// Check database connectivity
+	if err := s.container.Database.Ping(c.Request.Context()); err != nil {
+		s.logger.WithError(err).Error("Database health check failed")
+		dbStatus = "disconnected"
+		status = "unhealthy"
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":   status,
+			"database": dbStatus,
+			"error":    err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   status,
+		"database": dbStatus,
+		"timestamp": time.Now().UTC(),
 	})
 }
 
-// CreateTask handles POST /api/tasks
-func (h *TaskHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
-	userID := getUserIDFromContext(r.Context())
-	
-	var task Task
-	if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
-		h.logger.WithError(err).Error("Failed to decode task request")
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Validate input
-	if task.Title == "" {
-		http.Error(w, "Title is required", http.StatusBadRequest)
-		return
-	}
-
-	task.UserID = userID
-	task.ID = 1 // Placeholder
-
-	h.logger.WithFields(logrus.Fields{
-		"user_id": userID,
-		"task_id": task.ID,
-	}).Info("Task created")
-
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(task)
-}
-
-// GetTask handles GET /api/tasks/{id}
-func (h *TaskHandler) GetTask(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	taskID := vars["id"]
-	userID := getUserIDFromContext(r.Context())
-
-	h.logger.WithFields(logrus.Fields{
-		"user_id": userID,
-		"task_id": taskID,
-	}).Info("Fetching task")
-
-	// Placeholder response
-	task := Task{
-		ID:          1,
-		Title:       "Sample Task",
-		Description: "This is a sample task",
-		Completed:   false,
-		UserID:      userID,
-	}
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(task)
-}
-
-// UpdateTask handles PUT /api/tasks/{id}
-func (h *TaskHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	taskID := vars["id"]
-	userID := getUserIDFromContext(r.Context())
-
-	var task Task
-	if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
-		h.logger.WithError(err).Error("Failed to decode task update request")
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Validate input
-	if task.Title == "" {
-		http.Error(w, "Title is required", http.StatusBadRequest)
-		return
-	}
-
-	task.UserID = userID
-
-	h.logger.WithFields(logrus.Fields{
-		"user_id": userID,
-		"task_id": taskID,
-	}).Info("Task updated")
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(task)
-}
-
-// DeleteTask handles DELETE /api/tasks/{id}
-func (h *TaskHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
+// appInfo handles application info requests
+func (s *Server) appInfo(c *gin.Context) {
+	info := AppInfo{
+		Title:   "

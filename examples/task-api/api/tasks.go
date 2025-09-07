@@ -1,420 +1,382 @@
-I'll create a production-ready Task management API in Go with proper structure, error handling, and security. Here's the complete implementation:
-
-## Project Structure
-```
-api/
-├── tasks/
-│   ├── handlers.go
-│   ├── models.go
-│   ├── repository.go
-│   ├── service.go
-│   └── errors.go
-├── middleware/
-│   └── auth.go
-└── main.go
-```
-
-## 1. Task Models and DTOs (`api/tasks/models.go`)
-
-```go
-package tasks
-
-import (
-	"time"
-)
-
-// Task represents the main task entity
-type Task struct {
-	ID          int        `json:"id" db:"id"`
-	UserID      int        `json:"user_id" db:"user_id"`
-	Title       string     `json:"title" db:"title"`
-	Description string     `json:"description" db:"description"`
-	Status      string     `json:"status" db:"status"`
-	Priority    string     `json:"priority" db:"priority"`
-	DueDate     *time.Time `json:"due_date,omitempty" db:"due_date"`
-	CompletedAt *time.Time `json:"completed_at,omitempty" db:"completed_at"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
-	DeletedAt   *time.Time `json:"-" db:"deleted_at"`
-}
-
-// CreateTaskRequest represents the request payload for creating a task
-type CreateTaskRequest struct {
-	Title       string     `json:"title" validate:"required,min=1,max=255"`
-	Description string     `json:"description" validate:"required,min=1,max=1000"`
-	Priority    string     `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	DueDate     *time.Time `json:"due_date,omitempty"`
-}
-
-// UpdateTaskRequest represents the request payload for updating a task
-type UpdateTaskRequest struct {
-	Title       *string    `json:"title,omitempty" validate:"omitempty,min=1,max=255"`
-	Description *string    `json:"description,omitempty" validate:"omitempty,min=1,max=1000"`
-	Status      *string    `json:"status,omitempty" validate:"omitempty,oneof=pending in_progress completed"`
-	Priority    *string    `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	DueDate     *time.Time `json:"due_date,omitempty"`
-	UserID      *int       `json:"user_id,omitempty"` // This will be ignored in updates
-}
-
-// TaskListQuery represents query parameters for listing tasks
-type TaskListQuery struct {
-	Status    string     `json:"status,omitempty" validate:"omitempty,oneof=pending in_progress completed"`
-	Priority  string     `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	DueBefore *time.Time `json:"due_before,omitempty"`
-	DueAfter  *time.Time `json:"due_after,omitempty"`
-	Page      int        `json:"page" validate:"min=1"`
-	Limit     int        `json:"limit" validate:"min=1,max=100"`
-}
-
-// TaskListResponse represents the paginated response for task listing
-type TaskListResponse struct {
-	Tasks      []Task           `json:"tasks"`
-	Pagination PaginationMeta   `json:"pagination"`
-}
-
-// PaginationMeta contains pagination metadata
-type PaginationMeta struct {
-	Page       int `json:"page"`
-	Limit      int `json:"limit"`
-	Total      int `json:"total"`
-	TotalPages int `json:"total_pages"`
-}
-
-// ErrorResponse represents a standard error response
-type ErrorResponse struct {
-	Error   string            `json:"error"`
-	Message string            `json:"message"`
-	Details map[string]string `json:"details,omitempty"`
-}
-
-// User represents the authenticated user context
-type User struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
-}
-```
-
-## 2. Custom Errors (`api/tasks/errors.go`)
-
-```go
-package tasks
-
-import (
-	"fmt"
-	"net/http"
-)
-
-// Custom error types
-type AppError struct {
-	Type    string
-	Message string
-	Code    int
-	Details map[string]string
-}
-
-func (e *AppError) Error() string {
-	return e.Message
-}
-
-// Error constructors
-func NewNotFoundError(resource string, id interface{}) *AppError {
-	return &AppError{
-		Type:    "NOT_FOUND",
-		Message: fmt.Sprintf("%s with id %v not found", resource, id),
-		Code:    http.StatusNotFound,
-	}
-}
-
-func NewForbiddenError(message string) *AppError {
-	return &AppError{
-		Type:    "FORBIDDEN",
-		Message: message,
-		Code:    http.StatusForbidden,
-	}
-}
-
-func NewValidationError(message string, details map[string]string) *AppError {
-	return &AppError{
-		Type:    "VALIDATION_ERROR",
-		Message: message,
-		Code:    http.StatusBadRequest,
-		Details: details,
-	}
-}
-
-func NewUnauthorizedError(message string) *AppError {
-	return &AppError{
-		Type:    "UNAUTHORIZED",
-		Message: message,
-		Code:    http.StatusUnauthorized,
-	}
-}
-
-func NewInternalError(message string) *AppError {
-	return &AppError{
-		Type:    "INTERNAL_ERROR",
-		Message: message,
-		Code:    http.StatusInternalServerError,
-	}
-}
-```
-
-## 3. Repository Interface (`api/tasks/repository.go`)
-
-```go
 package tasks
 
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/pkg/errors"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
-// TaskRepository defines the interface for task data operations
+// Custom error types
+type TaskError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Details string `json:"details,omitempty"`
+}
+
+func (e TaskError) Error() string {
+	return e.Message
+}
+
+var (
+	ErrTaskNotFound     = TaskError{Code: "TASK_NOT_FOUND", Message: "Task not found"}
+	ErrUnauthorized     = TaskError{Code: "UNAUTHORIZED", Message: "Unauthorized access"}
+	ErrInvalidInput     = TaskError{Code: "INVALID_INPUT", Message: "Invalid input parameters"}
+	ErrInternalServer   = TaskError{Code: "INTERNAL_ERROR", Message: "Internal server error"}
+	ErrForbidden        = TaskError{Code: "FORBIDDEN", Message: "Access forbidden"}
+	ErrTaskAlreadyDone  = TaskError{Code: "TASK_ALREADY_COMPLETED", Message: "Task is already completed"}
+)
+
+// Task model
+type Task struct {
+	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	UserID      uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	Title       string     `json:"title" gorm:"not null;size:255"`
+	Description string     `json:"description" gorm:"type:text"`
+	Priority    string     `json:"priority" gorm:"default:'medium';check:priority IN ('low','medium','high')"`
+	Status      string     `json:"status" gorm:"default:'pending';check:status IN ('pending','in_progress','completed','deleted')"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at" gorm:"autoCreateTime"`
+	UpdatedAt   time.Time  `json:"updated_at" gorm:"autoUpdateTime"`
+	DeletedAt   *time.Time `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// Request/Response DTOs
+type CreateTaskRequest struct {
+	Title       string     `json:"title" validate:"required,min=1,max=255"`
+	Description string     `json:"description" validate:"max=2000"`
+	Priority    string     `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+}
+
+type UpdateTaskRequest struct {
+	Title       *string    `json:"title,omitempty" validate:"omitempty,min=1,max=255"`
+	Description *string    `json:"description,omitempty" validate:"omitempty,max=2000"`
+	Priority    *string    `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
+	Status      *string    `json:"status,omitempty" validate:"omitempty,oneof=pending in_progress completed"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+}
+
+type TaskListResponse struct {
+	Tasks      []Task     `json:"tasks"`
+	Pagination Pagination `json:"pagination"`
+}
+
+type Pagination struct {
+	Page       int   `json:"page"`
+	Limit      int   `json:"limit"`
+	Total      int64 `json:"total"`
+	TotalPages int   `json:"total_pages"`
+}
+
+type TaskFilters struct {
+	Status    string     `form:"status" validate:"omitempty,oneof=pending in_progress completed"`
+	Priority  string     `form:"priority" validate:"omitempty,oneof=low medium high"`
+	DueBefore *time.Time `form:"due_before" time_format:"2006-01-02T15:04:05Z07:00"`
+	DueAfter  *time.Time `form:"due_after" time_format:"2006-01-02T15:04:05Z07:00"`
+	Page      int        `form:"page" validate:"omitempty,min=1"`
+	Limit     int        `form:"limit" validate:"omitempty,min=1,max=100"`
+}
+
+type ErrorResponse struct {
+	Error TaskError `json:"error"`
+}
+
+type SuccessResponse struct {
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// JWT Claims
+type JWTClaims struct {
+	UserID uuid.UUID `json:"user_id"`
+	jwt.RegisteredClaims
+}
+
+// Database interface for dependency injection
 type TaskRepository interface {
-	Create(ctx context.Context, task *Task) (*Task, error)
-	GetByID(ctx context.Context, id int) (*Task, error)
-	Update(ctx context.Context, task *Task) (*Task, error)
-	Delete(ctx context.Context, id int) error
-	List(ctx context.Context, userID int, query TaskListQuery) ([]Task, int, error)
-	MarkCompleted(ctx context.Context, id int, completedAt time.Time) error
+	Create(ctx context.Context, task *Task) error
+	GetByID(ctx context.Context, id uuid.UUID) (*Task, error)
+	GetByUserID(ctx context.Context, userID uuid.UUID, filters TaskFilters) ([]Task, int64, error)
+	Update(ctx context.Context, task *Task) error
+	SoftDelete(ctx context.Context, id uuid.UUID) error
+	MarkCompleted(ctx context.Context, id uuid.UUID, completedAt time.Time) error
 }
 
-// PostgreSQLTaskRepository implements TaskRepository for PostgreSQL
-type PostgreSQLTaskRepository struct {
-	db *sql.DB
+// GORM implementation of TaskRepository
+type GormTaskRepository struct {
+	db *gorm.DB
 }
 
-// NewPostgreSQLTaskRepository creates a new PostgreSQL task repository
-func NewPostgreSQLTaskRepository(db *sql.DB) *PostgreSQLTaskRepository {
-	return &PostgreSQLTaskRepository{db: db}
+func NewGormTaskRepository(db *gorm.DB) *GormTaskRepository {
+	return &GormTaskRepository{db: db}
 }
 
-// Create inserts a new task into the database
-func (r *PostgreSQLTaskRepository) Create(ctx context.Context, task *Task) (*Task, error) {
-	query := `
-		INSERT INTO tasks (user_id, title, description, status, priority, due_date, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, created_at, updated_at`
+func (r *GormTaskRepository) Create(ctx context.Context, task *Task) error {
+	return r.db.WithContext(ctx).Create(task).Error
+}
 
-	now := time.Now()
-	task.CreatedAt = now
-	task.UpdatedAt = now
-	task.Status = "pending" // Default status
-
-	err := r.db.QueryRowContext(ctx, query,
-		task.UserID, task.Title, task.Description, task.Status,
-		task.Priority, task.DueDate, task.CreatedAt, task.UpdatedAt,
-	).Scan(&task.ID, &task.CreatedAt, &task.UpdatedAt)
-
+func (r *GormTaskRepository) GetByID(ctx context.Context, id uuid.UUID) (*Task, error) {
+	var task Task
+	err := r.db.WithContext(ctx).Where("id = ? AND deleted_at IS NULL", id).First(&task).Error
 	if err != nil {
-		return nil, fmt.Errorf("failed to create task: %w", err)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTaskNotFound
+		}
+		return nil, err
 	}
-
-	return task, nil
+	return &task, nil
 }
 
-// GetByID retrieves a task by its ID
-func (r *PostgreSQLTaskRepository) GetByID(ctx context.Context, id int) (*Task, error) {
-	query := `
-		SELECT id, user_id, title, description, status, priority, due_date, 
-		       completed_at, created_at, updated_at
-		FROM tasks 
-		WHERE id = $1 AND deleted_at IS NULL`
+func (r *GormTaskRepository) GetByUserID(ctx context.Context, userID uuid.UUID, filters TaskFilters) ([]Task, int64, error) {
+	query := r.db.WithContext(ctx).Where("user_id = ? AND deleted_at IS NULL", userID)
 
-	task := &Task{}
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
-		&task.ID, &task.UserID, &task.Title, &task.Description,
-		&task.Status, &task.Priority, &task.DueDate, &task.CompletedAt,
-		&task.CreatedAt, &task.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, NewNotFoundError("Task", id)
+	// Apply filters
+	if filters.Status != "" {
+		query = query.Where("status = ?", filters.Status)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get task: %w", err)
+	if filters.Priority != "" {
+		query = query.Where("priority = ?", filters.Priority)
 	}
-
-	return task, nil
-}
-
-// Update modifies an existing task
-func (r *PostgreSQLTaskRepository) Update(ctx context.Context, task *Task) (*Task, error) {
-	query := `
-		UPDATE tasks 
-		SET title = $1, description = $2, status = $3, priority = $4, 
-		    due_date = $5, updated_at = $6
-		WHERE id = $7 AND deleted_at IS NULL
-		RETURNING updated_at`
-
-	task.UpdatedAt = time.Now()
-
-	err := r.db.QueryRowContext(ctx, query,
-		task.Title, task.Description, task.Status, task.Priority,
-		task.DueDate, task.UpdatedAt, task.ID,
-	).Scan(&task.UpdatedAt)
-
-	if err == sql.ErrNoRows {
-		return nil, NewNotFoundError("Task", task.ID)
+	if filters.DueBefore != nil {
+		query = query.Where("due_date < ?", *filters.DueBefore)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to update task: %w", err)
+	if filters.DueAfter != nil {
+		query = query.Where("due_date > ?", *filters.DueAfter)
 	}
-
-	return task, nil
-}
-
-// Delete soft deletes a task
-func (r *PostgreSQLTaskRepository) Delete(ctx context.Context, id int) error {
-	query := `UPDATE tasks SET deleted_at = $1 WHERE id = $2 AND deleted_at IS NULL`
-
-	result, err := r.db.ExecContext(ctx, query, time.Now(), id)
-	if err != nil {
-		return fmt.Errorf("failed to delete task: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get affected rows: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return NewNotFoundError("Task", id)
-	}
-
-	return nil
-}
-
-// List retrieves tasks with filtering and pagination
-func (r *PostgreSQLTaskRepository) List(ctx context.Context, userID int, query TaskListQuery) ([]Task, int, error) {
-	// Build WHERE clause
-	whereConditions := []string{"user_id = $1", "deleted_at IS NULL"}
-	args := []interface{}{userID}
-	argIndex := 2
-
-	if query.Status != "" {
-		whereConditions = append(whereConditions, fmt.Sprintf("status = $%d", argIndex))
-		args = append(args, query.Status)
-		argIndex++
-	}
-
-	if query.Priority != "" {
-		whereConditions = append(whereConditions, fmt.Sprintf("priority = $%d", argIndex))
-		args = append(args, query.Priority)
-		argIndex++
-	}
-
-	if query.DueBefore != nil {
-		whereConditions = append(whereConditions, fmt.Sprintf("due_date < $%d", argIndex))
-		args = append(args, *query.DueBefore)
-		argIndex++
-	}
-
-	if query.DueAfter != nil {
-		whereConditions = append(whereConditions, fmt.Sprintf("due_date > $%d", argIndex))
-		args = append(args, *query.DueAfter)
-		argIndex++
-	}
-
-	whereClause := strings.Join(whereConditions, " AND ")
 
 	// Count total records
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM tasks WHERE %s", whereClause)
-	var total int
-	err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to count tasks: %w", err)
+	var total int64
+	if err := query.Model(&Task{}).Count(&total).Error; err != nil {
+		return nil, 0, err
 	}
 
-	// Get paginated results
-	offset := (query.Page - 1) * query.Limit
-	listQuery := fmt.Sprintf(`
-		SELECT id, user_id, title, description, status, priority, due_date, 
-		       completed_at, created_at, updated_at
-		FROM tasks 
-		WHERE %s
-		ORDER BY created_at DESC
-		LIMIT $%d OFFSET $%d`, whereClause, argIndex, argIndex+1)
-
-	args = append(args, query.Limit, offset)
-
-	rows, err := r.db.QueryContext(ctx, listQuery, args...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to list tasks: %w", err)
+	// Apply pagination
+	if filters.Page < 1 {
+		filters.Page = 1
 	}
-	defer rows.Close()
+	if filters.Limit < 1 {
+		filters.Limit = 20
+	}
+	offset := (filters.Page - 1) * filters.Limit
 
 	var tasks []Task
-	for rows.Next() {
-		var task Task
-		err := rows.Scan(
-			&task.ID, &task.UserID, &task.Title, &task.Description,
-			&task.Status, &task.Priority, &task.DueDate, &task.CompletedAt,
-			&task.CreatedAt, &task.UpdatedAt,
-		)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to scan task: %w", err)
+	err := query.Order("created_at DESC").Offset(offset).Limit(filters.Limit).Find(&tasks).Error
+	return tasks, total, err
+}
+
+func (r *GormTaskRepository) Update(ctx context.Context, task *Task) error {
+	return r.db.WithContext(ctx).Save(task).Error
+}
+
+func (r *GormTaskRepository) SoftDelete(ctx context.Context, id uuid.UUID) error {
+	return r.db.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":     "deleted",
+		"deleted_at": time.Now(),
+	}).Error
+}
+
+func (r *GormTaskRepository) MarkCompleted(ctx context.Context, id uuid.UUID, completedAt time.Time) error {
+	return r.db.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":       "completed",
+		"completed_at": completedAt,
+	}).Error
+}
+
+// Handler struct with dependencies
+type TaskHandler struct {
+	repo      TaskRepository
+	validator *validator.Validate
+	logger    *zap.Logger
+	jwtSecret string
+}
+
+func NewTaskHandler(repo TaskRepository, logger *zap.Logger, jwtSecret string) *TaskHandler {
+	return &TaskHandler{
+		repo:      repo,
+		validator: validator.New(),
+		logger:    logger,
+		jwtSecret: jwtSecret,
+	}
+}
+
+// Middleware for JWT authentication
+func (h *TaskHandler) AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			c.Abort()
+			return
 		}
-		tasks = append(tasks, task)
-	}
 
-	return tasks, total, nil
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		if tokenString == authHeader {
+			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			c.Abort()
+			return
+		}
+
+		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(h.jwtSecret), nil
+		})
+
+		if err != nil {
+			h.logger.Error("JWT parsing error", zap.Error(err))
+			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			c.Abort()
+			return
+		}
+
+		if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
+			c.Set("user_id", claims.UserID)
+			c.Next()
+		} else {
+			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			c.Abort()
+		}
+	}
 }
 
-// MarkCompleted marks a task as completed
-func (r *PostgreSQLTaskRepository) MarkCompleted(ctx context.Context, id int, completedAt time.Time) error {
-	query := `
-		UPDATE tasks 
-		SET status = 'completed', completed_at = $1, updated_at = $2
-		WHERE id = $3 AND deleted_at IS NULL`
+// Middleware for task ownership verification
+func (h *TaskHandler) OwnershipMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, exists := c.Get("user_id")
+		if !exists {
+			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			c.Abort()
+			return
+		}
 
-	result, err := r.db.ExecContext(ctx, query, completedAt, time.Now(), id)
+		taskIDStr := c.Param("task_id")
+		taskID, err := uuid.Parse(taskIDStr)
+		if err != nil {
+			h.respondWithError(c, http.StatusBadRequest, TaskError{
+				Code:    "INVALID_TASK_ID",
+				Message: "Invalid task ID format",
+			})
+			c.Abort()
+			return
+		}
+
+		task, err := h.repo.GetByID(c.Request.Context(), taskID)
+		if err != nil {
+			if errors.Is(err, ErrTaskNotFound) {
+				h.respondWithError(c, http.StatusNotFound, ErrTaskNotFound)
+			} else {
+				h.logger.Error("Database error", zap.Error(err))
+				h.respondWithError(c, http.StatusInternalServerError, ErrInternalServer)
+			}
+			c.Abort()
+			return
+		}
+
+		if task.UserID != userID.(uuid.UUID) {
+			h.respondWithError(c, http.StatusForbidden, ErrForbidden)
+			c.Abort()
+			return
+		}
+
+		c.Set("task", task)
+		c.Next()
+	}
+}
+
+// Handler functions
+func (h *TaskHandler) ListTasks(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+
+	var filters TaskFilters
+	if err := c.ShouldBindQuery(&filters); err != nil {
+		h.respondWithError(c, http.StatusBadRequest, TaskError{
+			Code:    "INVALID_QUERY_PARAMS",
+			Message: "Invalid query parameters",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	if err := h.validator.Struct(filters); err != nil {
+		h.respondWithError(c, http.StatusBadRequest, TaskError{
+			Code:    "VALIDATION_ERROR",
+			Message: "Validation failed",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	tasks, total, err := h.repo.GetByUserID(c.Request.Context(), userID.(uuid.UUID), filters)
 	if err != nil {
-		return fmt.Errorf("failed to mark task as completed: %w", err)
+		h.logger.Error("Failed to fetch tasks", zap.Error(err))
+		h.respondWithError(c, http.StatusInternalServerError, ErrInternalServer)
+		return
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get affected rows: %w", err)
+	// Calculate pagination
+	if filters.Limit == 0 {
+		filters.Limit = 20
+	}
+	if filters.Page == 0 {
+		filters.Page = 1
+	}
+	totalPages := int((total + int64(filters.Limit) - 1) / int64(filters.Limit))
+
+	response := TaskListResponse{
+		Tasks: tasks,
+		Pagination: Pagination{
+			Page:       filters.Page,
+			Limit:      filters.Limit,
+			Total:      total,
+			TotalPages: totalPages,
+		},
 	}
 
-	if rowsAffected == 0 {
-		return NewNotFoundError("Task", id)
+	c.JSON(http.StatusOK, response)
+}
+
+func (h *TaskHandler) GetTask(c *gin.Context) {
+	task, _ := c.Get("task")
+	c.JSON(http.StatusOK, task.(*Task))
+}
+
+func (h *TaskHandler) CreateTask(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+
+	var req CreateTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.respondWithError(c, http.StatusBadRequest, TaskError{
+			Code:    "INVALID_JSON",
+			Message: "Invalid JSON format",
+			Details: err.Error(),
+		})
+		return
 	}
 
-	return nil
-}
-```
+	if err := h.validator.Struct(req); err != nil {
+		h.respondWithError(c, http.StatusBadRequest, TaskError{
+			Code:    "VALIDATION_ERROR",
+			Message: "Validation failed",
+			Details: err.Error(),
+		})
+		return
+	}
 
-## 4. Service Layer (`api/tasks/service.go`)
-
-```go
-package tasks
-
-import (
-	"context"
-	"math"
-	"time"
-)
-
-// TaskService handles business logic for tasks
-type TaskService struct {
-	repo TaskRepository
-}
-
-// NewTaskService creates a new task service
-func NewTaskService(repo TaskRepository) *TaskService {
-	return &TaskService{repo: repo}
-}
-
-// CreateTask creates a new task
-func (s *TaskService) CreateTask(ctx context.Context, userID int, req CreateTaskRequest) (*Task, error) {
 	// Set default priority if not provided
 	priority := req.Priority
 	if priority == "" {
@@ -422,11 +384,13 @@ func (s *TaskService) CreateTask(ctx context.Context, userID int, req CreateTask
 	}
 
 	task := &Task{
-		UserID:      userID,
+		UserID:      userID.(uuid.UUID),
 		Title:       req.Title,
 		Description: req.Description,
 		Priority:    priority,
+		Status:      "pending",
 		DueDate:     req.DueDate,
 	}
 
-	return s
+	if err := h.repo.Create(c.Request.Context(), task); err != nil {
+		h.logger.Error("Failed to create task
