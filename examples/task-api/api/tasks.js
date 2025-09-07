@@ -1,427 +1,400 @@
 /**
  * Task Management API Module
- * Provides RESTful endpoints for task CRUD operations with authentication and authorization
+ * FastAPI-style task management endpoints implemented with Express.js
+ * 
+ * @module api/tasks
+ * @requires express
+ * @requires joi
+ * @requires ../models/Task
+ * @requires ../middleware/auth
+ * @requires ../utils/database
+ * @requires ../utils/errors
  */
 
-import express from 'express';
-import { body, query, param, validationResult } from 'express-validator';
-import { Task } from '../models/task.js';
-import { authenticateUser, getCurrentUser } from '../core/auth.js';
-import { getDatabase } from '../core/database.js';
+const express = require('express');
+const Joi = require('joi');
+const Task = require('../models/Task');
+const { authenticateToken, requireAuth } = require('../middleware/auth');
+const { getDbConnection, handleDbError } = require('../utils/database');
+const { AppError, handleAsync, validateRequest } = require('../utils/errors');
 
 const router = express.Router();
 
+// Apply authentication middleware to all routes
+router.use(authenticateToken);
+router.use(requireAuth);
+
 /**
- * Middleware to handle validation errors
+ * Validation schemas
  */
-const handleValidationErrors = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      error: 'Validation failed',
-      details: errors.array().map(err => ({
-        field: err.path,
-        message: err.msg,
-        value: err.value
-      }))
-    });
-  }
-  next();
+const schemas = {
+  createTask: Joi.object({
+    title: Joi.string().trim().min(1).max(255).required()
+      .messages({
+        'string.empty': 'Title is required',
+        'string.max': 'Title must not exceed 255 characters'
+      }),
+    description: Joi.string().trim().min(1).max(2000).required()
+      .messages({
+        'string.empty': 'Description is required',
+        'string.max': 'Description must not exceed 2000 characters'
+      }),
+    priority: Joi.string().valid('low', 'medium', 'high').default('medium'),
+    due_date: Joi.date().iso().min('now').optional()
+      .messages({
+        'date.min': 'Due date must be in the future'
+      })
+  }),
+
+  updateTask: Joi.object({
+    title: Joi.string().trim().min(1).max(255).optional(),
+    description: Joi.string().trim().min(1).max(2000).optional(),
+    priority: Joi.string().valid('low', 'medium', 'high').optional(),
+    due_date: Joi.date().iso().allow(null).optional(),
+    status: Joi.string().valid('pending', 'in_progress', 'completed').optional(),
+    user_id: Joi.forbidden().messages({
+      'any.unknown': 'Cannot modify user_id field'
+    })
+  }).min(1).messages({
+    'object.min': 'At least one field must be provided for update'
+  }),
+
+  queryParams: Joi.object({
+    status: Joi.string().valid('pending', 'in_progress', 'completed').optional(),
+    priority: Joi.string().valid('low', 'medium', 'high').optional(),
+    due_before: Joi.date().iso().optional(),
+    due_after: Joi.date().iso().optional(),
+    page: Joi.number().integer().min(1).default(1),
+    limit: Joi.number().integer().min(1).max(100).default(20)
+  }),
+
+  taskId: Joi.object({
+    taskId: Joi.string().uuid().required().messages({
+      'string.guid': 'Invalid task ID format'
+    })
+  })
 };
 
 /**
- * Middleware to verify task ownership
+ * Helper function to verify task ownership
+ * @param {string} taskId - Task ID to verify
+ * @param {string} userId - User ID from authentication
+ * @returns {Promise<Object>} Task object if owned by user
+ * @throws {AppError} If task not found or not owned by user
  */
-const verifyTaskOwnership = async (req, res, next) => {
+const verifyTaskOwnership = async (taskId, userId) => {
   try {
-    const { taskId } = req.params;
-    const currentUser = getCurrentUser(req);
-    const db = getDatabase();
-    
-    const task = await Task.findById(db, taskId);
+    const task = await Task.findById(taskId);
     
     if (!task) {
-      return res.status(404).json({
-        error: 'Task not found',
-        message: 'The requested task does not exist'
-      });
+      throw new AppError('Task not found', 404);
     }
     
-    if (task.user_id !== currentUser.id) {
-      return res.status(403).json({
-        error: 'Access denied',
-        message: 'You do not have permission to access this task'
-      });
+    if (task.user_id !== userId) {
+      throw new AppError('Access denied: Task not owned by user', 403);
     }
     
-    req.task = task;
-    next();
+    if (task.deleted_at) {
+      throw new AppError('Task not found', 404);
+    }
+    
+    return task;
   } catch (error) {
-    console.error('Error verifying task ownership:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: 'Failed to verify task ownership'
-    });
+    if (error instanceof AppError) throw error;
+    throw handleDbError(error);
   }
+};
+
+/**
+ * Build database query filters from request parameters
+ * @param {Object} queryParams - Validated query parameters
+ * @param {string} userId - User ID from authentication
+ * @returns {Object} Database query filters and pagination
+ */
+const buildTaskFilters = (queryParams, userId) => {
+  const filters = {
+    user_id: userId,
+    deleted_at: null
+  };
+  
+  if (queryParams.status) {
+    filters.status = queryParams.status;
+  }
+  
+  if (queryParams.priority) {
+    filters.priority = queryParams.priority;
+  }
+  
+  const dateFilters = {};
+  if (queryParams.due_before) {
+    dateFilters.due_date = { ...dateFilters.due_date, $lte: queryParams.due_before };
+  }
+  
+  if (queryParams.due_after) {
+    dateFilters.due_date = { ...dateFilters.due_date, $gte: queryParams.due_after };
+  }
+  
+  return {
+    filters: { ...filters, ...dateFilters },
+    pagination: {
+      page: queryParams.page,
+      limit: queryParams.limit,
+      offset: (queryParams.page - 1) * queryParams.limit
+    }
+  };
 };
 
 /**
  * GET /api/tasks
- * List tasks with filtering and pagination
+ * List user tasks with filtering and pagination
  */
-router.get('/tasks',
-  authenticateUser,
-  [
-    query('status')
-      .optional()
-      .isIn(['pending', 'in_progress', 'completed'])
-      .withMessage('Status must be one of: pending, in_progress, completed'),
-    query('priority')
-      .optional()
-      .isIn(['low', 'medium', 'high', 'urgent'])
-      .withMessage('Priority must be one of: low, medium, high, urgent'),
-    query('due_before')
-      .optional()
-      .isISO8601()
-      .withMessage('due_before must be a valid ISO 8601 date'),
-    query('due_after')
-      .optional()
-      .isISO8601()
-      .withMessage('due_after must be a valid ISO 8601 date'),
-    query('page')
-      .optional()
-      .isInt({ min: 1 })
-      .withMessage('Page must be a positive integer'),
-    query('limit')
-      .optional()
-      .isInt({ min: 1, max: 100 })
-      .withMessage('Limit must be between 1 and 100')
-  ],
-  handleValidationErrors,
-  async (req, res) => {
+router.get('/', 
+  validateRequest({ query: schemas.queryParams }),
+  handleAsync(async (req, res) => {
+    const { filters, pagination } = buildTaskFilters(req.query, req.user.id);
+    
     try {
-      const currentUser = getCurrentUser(req);
-      const db = getDatabase();
-      
-      const {
-        status,
-        priority,
-        due_before: dueBefore,
-        due_after: dueAfter,
-        page = 1,
-        limit = 20
-      } = req.query;
-      
-      const filters = {
-        user_id: currentUser.id,
-        deleted_at: null // Only non-deleted tasks
-      };
-      
-      // Apply optional filters
-      if (status) filters.status = status;
-      if (priority) filters.priority = priority;
-      if (dueBefore) filters.due_date = { ...filters.due_date, $lte: new Date(dueBefore) };
-      if (dueAfter) filters.due_date = { ...filters.due_date, $gte: new Date(dueAfter) };
-      
-      const offset = (parseInt(page) - 1) * parseInt(limit);
-      
       const [tasks, totalCount] = await Promise.all([
-        Task.findMany(db, filters, {
-          limit: parseInt(limit),
-          offset,
-          orderBy: { created_at: 'desc' }
-        }),
-        Task.count(db, filters)
+        Task.find(filters)
+          .sort({ created_at: -1 })
+          .limit(pagination.limit)
+          .skip(pagination.offset),
+        Task.countDocuments(filters)
       ]);
       
-      const totalPages = Math.ceil(totalCount / parseInt(limit));
+      const totalPages = Math.ceil(totalCount / pagination.limit);
+      const hasNext = pagination.page < totalPages;
+      const hasPrev = pagination.page > 1;
       
-      res.json({
-        tasks,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total_count: totalCount,
-          total_pages: totalPages,
-          has_next: parseInt(page) < totalPages,
-          has_prev: parseInt(page) > 1
+      res.status(200).json({
+        success: true,
+        data: {
+          tasks: tasks.map(task => task.toJSON()),
+          pagination: {
+            current_page: pagination.page,
+            per_page: pagination.limit,
+            total_items: totalCount,
+            total_pages: totalPages,
+            has_next: hasNext,
+            has_previous: hasPrev
+          }
         }
       });
     } catch (error) {
-      console.error('Error fetching tasks:', error);
-      res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to retrieve tasks'
-      });
+      throw handleDbError(error);
     }
-  }
+  })
 );
 
 /**
  * GET /api/tasks/:taskId
- * Get a single task by ID
+ * Get single task with ownership verification
  */
-router.get('/tasks/:taskId',
-  authenticateUser,
-  [
-    param('taskId')
-      .isUUID()
-      .withMessage('Task ID must be a valid UUID')
-  ],
-  handleValidationErrors,
-  verifyTaskOwnership,
-  async (req, res) => {
-    try {
-      res.json({ task: req.task });
-    } catch (error) {
-      console.error('Error fetching task:', error);
-      res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to retrieve task'
-      });
-    }
-  }
+router.get('/:taskId',
+  validateRequest({ params: schemas.taskId }),
+  handleAsync(async (req, res) => {
+    const task = await verifyTaskOwnership(req.params.taskId, req.user.id);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        task: task.toJSON()
+      }
+    });
+  })
 );
 
 /**
  * POST /api/tasks
- * Create a new task
+ * Create new task with validation
  */
-router.post('/tasks',
-  authenticateUser,
-  [
-    body('title')
-      .trim()
-      .isLength({ min: 1, max: 200 })
-      .withMessage('Title is required and must be between 1 and 200 characters'),
-    body('description')
-      .trim()
-      .isLength({ min: 1, max: 2000 })
-      .withMessage('Description is required and must be between 1 and 2000 characters'),
-    body('priority')
-      .optional()
-      .isIn(['low', 'medium', 'high', 'urgent'])
-      .withMessage('Priority must be one of: low, medium, high, urgent'),
-    body('due_date')
-      .optional()
-      .isISO8601()
-      .withMessage('Due date must be a valid ISO 8601 date')
-      .custom((value) => {
-        if (value && new Date(value) <= new Date()) {
-          throw new Error('Due date must be in the future');
-        }
-        return true;
-      })
-  ],
-  handleValidationErrors,
-  async (req, res) => {
+router.post('/',
+  validateRequest({ body: schemas.createTask }),
+  handleAsync(async (req, res) => {
+    const taskData = {
+      ...req.body,
+      user_id: req.user.id,
+      status: 'pending',
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+    
     try {
-      const currentUser = getCurrentUser(req);
-      const db = getDatabase();
-      
-      const { title, description, priority = 'medium', due_date: dueDate } = req.body;
-      
-      const taskData = {
-        title,
-        description,
-        priority,
-        status: 'pending',
-        user_id: currentUser.id,
-        created_at: new Date(),
-        updated_at: new Date()
-      };
-      
-      if (dueDate) {
-        taskData.due_date = new Date(dueDate);
-      }
-      
-      const task = await Task.create(db, taskData);
+      const task = await Task.create(taskData);
       
       res.status(201).json({
+        success: true,
         message: 'Task created successfully',
-        task
+        data: {
+          task: task.toJSON()
+        }
       });
     } catch (error) {
-      console.error('Error creating task:', error);
-      res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to create task'
-      });
+      throw handleDbError(error);
     }
-  }
+  })
 );
 
 /**
  * PUT /api/tasks/:taskId
- * Update an existing task
+ * Update task with ownership verification
  */
-router.put('/tasks/:taskId',
-  authenticateUser,
-  [
-    param('taskId')
-      .isUUID()
-      .withMessage('Task ID must be a valid UUID'),
-    body('title')
-      .optional()
-      .trim()
-      .isLength({ min: 1, max: 200 })
-      .withMessage('Title must be between 1 and 200 characters'),
-    body('description')
-      .optional()
-      .trim()
-      .isLength({ min: 1, max: 2000 })
-      .withMessage('Description must be between 1 and 2000 characters'),
-    body('priority')
-      .optional()
-      .isIn(['low', 'medium', 'high', 'urgent'])
-      .withMessage('Priority must be one of: low, medium, high, urgent'),
-    body('status')
-      .optional()
-      .isIn(['pending', 'in_progress', 'completed'])
-      .withMessage('Status must be one of: pending, in_progress, completed'),
-    body('due_date')
-      .optional()
-      .isISO8601()
-      .withMessage('Due date must be a valid ISO 8601 date'),
-    body('user_id')
-      .not()
-      .exists()
-      .withMessage('User ID cannot be modified')
-  ],
-  handleValidationErrors,
-  verifyTaskOwnership,
-  async (req, res) => {
+router.put('/:taskId',
+  validateRequest({ 
+    params: schemas.taskId,
+    body: schemas.updateTask 
+  }),
+  handleAsync(async (req, res) => {
+    await verifyTaskOwnership(req.params.taskId, req.user.id);
+    
+    const updateData = {
+      ...req.body,
+      updated_at: new Date()
+    };
+    
     try {
-      const db = getDatabase();
-      const { taskId } = req.params;
+      const updatedTask = await Task.findByIdAndUpdate(
+        req.params.taskId,
+        updateData,
+        { 
+          new: true,
+          runValidators: true
+        }
+      );
       
-      // Extract only allowed fields for update
-      const allowedFields = ['title', 'description', 'priority', 'status', 'due_date'];
-      const updateData = {};
-      
-      allowedFields.forEach(field => {
-        if (req.body[field] !== undefined) {
-          updateData[field] = field === 'due_date' ? new Date(req.body[field]) : req.body[field];
+      res.status(200).json({
+        success: true,
+        message: 'Task updated successfully',
+        data: {
+          task: updatedTask.toJSON()
         }
       });
-      
-      // Add completion timestamp if status is being set to completed
-      if (updateData.status === 'completed' && req.task.status !== 'completed') {
-        updateData.completed_at = new Date();
-      }
-      
-      updateData.updated_at = new Date();
-      
-      const updatedTask = await Task.update(db, taskId, updateData);
-      
-      res.json({
-        message: 'Task updated successfully',
-        task: updatedTask
-      });
     } catch (error) {
-      console.error('Error updating task:', error);
-      res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to update task'
-      });
+      throw handleDbError(error);
     }
-  }
+  })
 );
 
 /**
  * DELETE /api/tasks/:taskId
- * Soft delete a task
+ * Soft delete task with ownership verification
  */
-router.delete('/tasks/:taskId',
-  authenticateUser,
-  [
-    param('taskId')
-      .isUUID()
-      .withMessage('Task ID must be a valid UUID')
-  ],
-  handleValidationErrors,
-  verifyTaskOwnership,
-  async (req, res) => {
+router.delete('/:taskId',
+  validateRequest({ params: schemas.taskId }),
+  handleAsync(async (req, res) => {
+    await verifyTaskOwnership(req.params.taskId, req.user.id);
+    
     try {
-      const db = getDatabase();
-      const { taskId } = req.params;
-      
-      await Task.softDelete(db, taskId, {
-        deleted_at: new Date(),
-        updated_at: new Date()
-      });
+      await Task.findByIdAndUpdate(
+        req.params.taskId,
+        { 
+          deleted_at: new Date(),
+          updated_at: new Date()
+        }
+      );
       
       res.status(204).send();
     } catch (error) {
-      console.error('Error deleting task:', error);
-      res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to delete task'
-      });
+      throw handleDbError(error);
     }
-  }
+  })
 );
 
 /**
  * POST /api/tasks/:taskId/complete
- * Mark a task as completed
+ * Mark task as completed with timestamp
  */
-router.post('/tasks/:taskId/complete',
-  authenticateUser,
-  [
-    param('taskId')
-      .isUUID()
-      .withMessage('Task ID must be a valid UUID')
-  ],
-  handleValidationErrors,
-  verifyTaskOwnership,
-  async (req, res) => {
-    try {
-      const db = getDatabase();
-      const { taskId } = req.params;
-      
-      // Check if task is already completed
-      if (req.task.status === 'completed') {
-        return res.status(400).json({
-          error: 'Task already completed',
-          message: 'This task has already been marked as completed'
-        });
-      }
-      
-      const completedTask = await Task.update(db, taskId, {
-        status: 'completed',
-        completed_at: new Date(),
-        updated_at: new Date()
-      });
-      
-      res.json({
-        message: 'Task marked as completed successfully',
-        task: completedTask
-      });
-    } catch (error) {
-      console.error('Error completing task:', error);
-      res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to complete task'
+router.post('/:taskId/complete',
+  validateRequest({ params: schemas.taskId }),
+  handleAsync(async (req, res) => {
+    const task = await verifyTaskOwnership(req.params.taskId, req.user.id);
+    
+    if (task.status === 'completed') {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: 'Task is already completed',
+          code: 'TASK_ALREADY_COMPLETED'
+        }
       });
     }
-  }
+    
+    try {
+      const completedTask = await Task.findByIdAndUpdate(
+        req.params.taskId,
+        {
+          status: 'completed',
+          completed_at: new Date(),
+          updated_at: new Date()
+        },
+        { 
+          new: true,
+          runValidators: true
+        }
+      );
+      
+      res.status(200).json({
+        success: true,
+        message: 'Task marked as completed',
+        data: {
+          task: completedTask.toJSON()
+        }
+      });
+    } catch (error) {
+      throw handleDbError(error);
+    }
+  })
 );
 
 /**
- * Global error handler for unhandled promise rejections
+ * Error handling middleware for this router
  */
 router.use((error, req, res, next) => {
-  console.error('Unhandled error in tasks API:', error);
-  
-  if (res.headersSent) {
-    return next(error);
+  // Handle Joi validation errors
+  if (error.isJoi) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        message: 'Validation failed',
+        details: error.details.map(detail => ({
+          field: detail.path.join('.'),
+          message: detail.message
+        }))
+      }
+    });
   }
   
+  // Handle custom AppError instances
+  if (error instanceof AppError) {
+    return res.status(error.statusCode).json({
+      success: false,
+      error: {
+        message: error.message,
+        code: error.code || 'APPLICATION_ERROR'
+      }
+    });
+  }
+  
+  // Handle database connection errors
+  if (error.name === 'MongoError' || error.name === 'MongooseError') {
+    return res.status(500).json({
+      success: false,
+      error: {
+        message: 'Database operation failed',
+        code: 'DATABASE_ERROR'
+      }
+    });
+  }
+  
+  // Handle unexpected errors
+  console.error('Unexpected error in tasks API:', error);
   res.status(500).json({
-    error: 'Internal server error',
-    message: 'An unexpected error occurred'
+    success: false,
+    error: {
+      message: 'Internal server error',
+      code: 'INTERNAL_ERROR'
+    }
   });
 });
 
-export default router;
+module.exports = router;

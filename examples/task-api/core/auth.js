@@ -1,164 +1,134 @@
 /**
- * Core Authentication and Authorization Module
- * Provides JWT token management, password hashing, and user authentication
- * 
+ * Authentication and Authorization Module
+ * Provides JWT token management and password security utilities
  * @module core.auth
- * @version 1.0.0
- * @author Enterprise Development Team
  */
 
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { User } from '../models/user.js';
+import dotenv from 'dotenv';
 
-// Constants
-const SALT_ROUNDS = 12;
-const TOKEN_EXPIRATION = 86400; // 24 hours in seconds
-const JWT_ALGORITHM = 'HS256';
-const BEARER_PREFIX = 'Bearer ';
+// Load environment variables
+dotenv.config();
 
-/**
- * Custom error classes for better error handling and debugging
- */
-class AuthenticationError extends Error {
-  constructor(message, code = 'AUTH_ERROR') {
-    super(message);
-    this.name = 'AuthenticationError';
-    this.code = code;
-  }
+// Configuration constants
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = '24h';
+const BCRYPT_SALT_ROUNDS = 12;
+const TOKEN_ALGORITHM = 'HS256';
+
+// Validate required environment variables
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable is required');
 }
 
-class AuthorizationError extends Error {
-  constructor(message, code = 'AUTHZ_ERROR') {
-    super(message);
-    this.name = 'AuthorizationError';
-    this.code = code;
-  }
-}
-
-class ValidationError extends Error {
-  constructor(message, code = 'VALIDATION_ERROR') {
-    super(message);
-    this.name = 'ValidationError';
-    this.code = code;
-  }
+if (JWT_SECRET.length < 32) {
+  console.warn('Warning: JWT_SECRET should be at least 32 characters long for security');
 }
 
 /**
- * Validates and retrieves JWT secret from environment variables
+ * Logs security events without exposing sensitive data
  * @private
- * @returns {string} JWT secret key
- * @throws {Error} If JWT_SECRET is not configured
+ * @param {string} event - Event type
+ * @param {string} message - Log message
+ * @param {Object} metadata - Additional metadata (sensitive data will be filtered)
  */
-function getJwtSecret() {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    throw new Error('JWT_SECRET environment variable is not configured');
-  }
-  return secret;
-}
+const logSecurityEvent = (event, message, metadata = {}) => {
+  const sanitizedMetadata = { ...metadata };
+  // Remove sensitive fields from logs
+  delete sanitizedMetadata.password;
+  delete sanitizedMetadata.token;
+  delete sanitizedMetadata.hash;
+  
+  console.log(`[AUTH:${event}] ${message}`, sanitizedMetadata);
+};
 
 /**
- * Validates input parameters for null, undefined, or incorrect types
+ * Validates input parameters
  * @private
- * @param {any} value - Value to validate
- * @param {string} paramName - Parameter name for error messages
- * @param {string} expectedType - Expected type ('string', 'object', etc.)
- * @throws {ValidationError} If validation fails
+ * @param {*} value - Value to validate
+ * @param {string} name - Parameter name for error messages
+ * @param {string} type - Expected type
+ * @throws {Error} If validation fails
  */
-function validateInput(value, paramName, expectedType = 'string') {
+const validateInput = (value, name, type = 'string') => {
   if (value === null || value === undefined) {
-    throw new ValidationError(`${paramName} cannot be null or undefined`);
+    throw new Error(`${name} is required`);
   }
   
-  if (expectedType === 'string' && (typeof value !== 'string' || value.trim() === '')) {
-    throw new ValidationError(`${paramName} must be a non-empty string`);
+  if (type === 'string' && (typeof value !== 'string' || value.trim().length === 0)) {
+    throw new Error(`${name} must be a non-empty string`);
   }
   
-  if (expectedType === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
-    throw new ValidationError(`${paramName} must be a valid object`);
+  if (type === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
+    throw new Error(`${name} must be an object`);
   }
-}
-
-// ============================================================================
-// JWT TOKEN MANAGEMENT
-// ============================================================================
+};
 
 /**
- * Creates a JWT access token with the provided data payload
- * 
- * @async
- * @function createAccessToken
- * @param {Object} data - Payload data to encode in the token
+ * Creates a JWT access token with 24-hour expiration
+ * @param {Object} data - User data to encode in the token
  * @param {string|number} data.userId - User identifier
- * @param {string} [data.email] - User email address
- * @param {string} [data.role] - User role/permissions
- * @returns {Promise<Object>} Response object with token or error
- * @throws {ValidationError} If data parameter is invalid
- * @throws {Error} If JWT signing fails
+ * @param {string} [data.email] - User email
+ * @param {string} [data.role] - User role
+ * @returns {Promise<Object>} Success object with token or error object
  * 
  * @example
- * const result = await createAccessToken({ 
- *   userId: '12345', 
- *   email: 'user@example.com',
- *   role: 'admin' 
- * });
+ * const result = await createAccessToken({ userId: 123, email: 'user@example.com', role: 'user' });
  * if (result.success) {
  *   console.log('Token:', result.data.token);
  * }
  */
-export async function createAccessToken(data) {
+export const createAccessToken = async (data) => {
   try {
     validateInput(data, 'data', 'object');
-    
-    if (!data.userId) {
-      throw new ValidationError('data.userId is required for token creation');
-    }
+    validateInput(data.userId, 'data.userId');
 
-    const secret = getJwtSecret();
-    
     // Create payload with standard JWT claims
     const payload = {
-      ...data,
-      iat: Math.floor(Date.now() / 1000), // Issued at
-      exp: Math.floor(Date.now() / 1000) + TOKEN_EXPIRATION // Expiration
+      userId: data.userId,
+      email: data.email || null,
+      role: data.role || 'user',
+      iat: Math.floor(Date.now() / 1000),
     };
 
-    const token = jwt.sign(payload, secret, {
-      algorithm: JWT_ALGORITHM,
-      expiresIn: TOKEN_EXPIRATION
+    const token = jwt.sign(payload, JWT_SECRET, {
+      expiresIn: JWT_EXPIRES_IN,
+      algorithm: TOKEN_ALGORITHM,
+      issuer: 'core.auth',
+      audience: 'app-users'
+    });
+
+    logSecurityEvent('TOKEN_CREATED', 'Access token created successfully', {
+      userId: data.userId,
+      role: data.role
     });
 
     return {
       success: true,
       data: {
         token,
-        expiresIn: TOKEN_EXPIRATION,
+        expiresIn: JWT_EXPIRES_IN,
         tokenType: 'Bearer'
       }
     };
 
   } catch (error) {
-    // Sanitize error message for client exposure
-    const sanitizedMessage = error instanceof ValidationError 
-      ? error.message 
-      : 'Failed to create access token';
-    
+    logSecurityEvent('TOKEN_CREATE_ERROR', 'Failed to create access token', {
+      error: error.message
+    });
+
     return {
       success: false,
-      error: sanitizedMessage
+      error: error.message || 'Failed to create access token'
     };
   }
-}
+};
 
 /**
  * Verifies and decodes a JWT token
- * 
- * @async
- * @function verifyToken
  * @param {string} token - JWT token to verify
- * @returns {Promise<Object>} Response object with decoded payload or error
- * @throws {ValidationError} If token parameter is invalid
+ * @returns {Promise<Object>} Success object with decoded data or error object
  * 
  * @example
  * const result = await verifyToken('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...');
@@ -166,56 +136,66 @@ export async function createAccessToken(data) {
  *   console.log('User ID:', result.data.userId);
  * }
  */
-export async function verifyToken(token) {
+export const verifyToken = async (token) => {
   try {
     validateInput(token, 'token');
-    
-    const secret = getJwtSecret();
-    
-    // Verify token with explicit algorithm specification for security
-    const decoded = jwt.verify(token, secret, {
-      algorithms: [JWT_ALGORITHM]
+
+    // Remove 'Bearer ' prefix if present
+    const cleanToken = token.replace(/^Bearer\s+/, '');
+
+    const decoded = jwt.verify(cleanToken, JWT_SECRET, {
+      algorithms: [TOKEN_ALGORITHM],
+      issuer: 'core.auth',
+      audience: 'app-users'
+    });
+
+    logSecurityEvent('TOKEN_VERIFIED', 'Token verified successfully', {
+      userId: decoded.userId
     });
 
     return {
       success: true,
-      data: decoded
+      data: {
+        userId: decoded.userId,
+        email: decoded.email,
+        role: decoded.role,
+        iat: decoded.iat,
+        exp: decoded.exp
+      }
     };
 
   } catch (error) {
-    let errorMessage = 'Token verification failed';
-    
-    // Provide specific error messages for different JWT errors
+    let errorMessage = 'Invalid token';
+    let logMessage = 'Token verification failed';
+
+    // Handle specific JWT errors
     if (error.name === 'TokenExpiredError') {
       errorMessage = 'Token has expired';
+      logMessage = 'Token expired';
     } else if (error.name === 'JsonWebTokenError') {
       errorMessage = 'Invalid token format';
+      logMessage = 'Invalid token format';
     } else if (error.name === 'NotBeforeError') {
       errorMessage = 'Token not active yet';
-    } else if (error instanceof ValidationError) {
-      errorMessage = error.message;
+      logMessage = 'Token not active';
     }
+
+    logSecurityEvent('TOKEN_VERIFY_ERROR', logMessage, {
+      error: error.name,
+      hasToken: !!token
+    });
 
     return {
       success: false,
       error: errorMessage
     };
   }
-}
-
-// ============================================================================
-// PASSWORD SECURITY
-// ============================================================================
+};
 
 /**
- * Generates a bcrypt hash for the provided password
- * Uses timing-safe hashing with configurable salt rounds
- * 
- * @async
- * @function getPasswordHash
+ * Hashes a password using bcrypt with 12 salt rounds
  * @param {string} password - Plain text password to hash
- * @returns {Promise<Object>} Response object with hash or error
- * @throws {ValidationError} If password parameter is invalid
+ * @returns {Promise<Object>} Success object with hash or error object
  * 
  * @example
  * const result = await getPasswordHash('mySecurePassword123');
@@ -223,297 +203,209 @@ export async function verifyToken(token) {
  *   console.log('Hash:', result.data.hash);
  * }
  */
-export async function getPasswordHash(password) {
+export const getPasswordHash = async (password) => {
   try {
     validateInput(password, 'password');
-    
-    if (password.length < 8) {
-      throw new ValidationError('Password must be at least 8 characters long');
+
+    if (password.length < 6) {
+      throw new Error('Password must be at least 6 characters long');
     }
 
-    // Use async bcrypt.hash for better performance in Node.js
-    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    if (password.length > 128) {
+      throw new Error('Password must be less than 128 characters long');
+    }
+
+    const hash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+
+    logSecurityEvent('PASSWORD_HASHED', 'Password hashed successfully');
 
     return {
       success: true,
-      data: { hash }
+      data: {
+        hash,
+        saltRounds: BCRYPT_SALT_ROUNDS
+      }
     };
 
   } catch (error) {
-    const sanitizedMessage = error instanceof ValidationError 
-      ? error.message 
-      : 'Failed to hash password';
-    
+    logSecurityEvent('PASSWORD_HASH_ERROR', 'Failed to hash password', {
+      error: error.message
+    });
+
     return {
       success: false,
-      error: sanitizedMessage
+      error: error.message || 'Failed to hash password'
     };
   }
-}
+};
 
 /**
- * Verifies a plain text password against a bcrypt hash
- * Uses timing-safe comparison to prevent timing attacks
- * 
- * @async
- * @function verifyPassword
+ * Verifies a plain password against a bcrypt hash
  * @param {string} plainPassword - Plain text password to verify
  * @param {string} hashedPassword - Bcrypt hash to compare against
- * @returns {Promise<Object>} Response object with verification result
- * @throws {ValidationError} If parameters are invalid
+ * @returns {Promise<Object>} Success object with match result or error object
  * 
  * @example
- * const result = await verifyPassword('userInput', storedHash);
- * if (result.success && result.data.isValid) {
+ * const result = await verifyPassword('myPassword', '$2b$12$...');
+ * if (result.success && result.data.isMatch) {
  *   console.log('Password is correct');
  * }
  */
-export async function verifyPassword(plainPassword, hashedPassword) {
+export const verifyPassword = async (plainPassword, hashedPassword) => {
   try {
     validateInput(plainPassword, 'plainPassword');
     validateInput(hashedPassword, 'hashedPassword');
 
-    // bcrypt.compare is inherently timing-safe
-    const isValid = await bcrypt.compare(plainPassword, hashedPassword);
+    // Validate hash format (bcrypt hashes start with $2a$, $2b$, or $2y$)
+    if (!/^\$2[aby]\$\d{2}\$.{53}$/.test(hashedPassword)) {
+      throw new Error('Invalid hash format');
+    }
+
+    const isMatch = await bcrypt.compare(plainPassword, hashedPassword);
+
+    logSecurityEvent('PASSWORD_VERIFIED', 'Password verification completed', {
+      isMatch
+    });
 
     return {
       success: true,
-      data: { isValid }
+      data: {
+        isMatch
+      }
     };
 
   } catch (error) {
-    const sanitizedMessage = error instanceof ValidationError 
-      ? error.message 
-      : 'Password verification failed';
-    
+    logSecurityEvent('PASSWORD_VERIFY_ERROR', 'Password verification failed', {
+      error: error.message
+    });
+
     return {
       success: false,
-      error: sanitizedMessage
+      error: error.message || 'Failed to verify password'
     };
   }
-}
-
-// ============================================================================
-// USER MANAGEMENT
-// ============================================================================
+};
 
 /**
- * Retrieves current user information from a JWT token
- * Validates token and fetches user data from database
- * 
- * @async
- * @function getCurrentUser
- * @param {string} token - JWT token containing user information
- * @returns {Promise<Object>} Response object with user data or error
- * @throws {ValidationError} If token parameter is invalid
+ * Extracts current user data from a valid JWT token
+ * @param {string} token - JWT token containing user data
+ * @returns {Promise<Object>} Success object with user data or error object
  * 
  * @example
- * const result = await getCurrentUser(userToken);
+ * const result = await getCurrentUser('Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...');
  * if (result.success) {
  *   console.log('Current user:', result.data.user);
  * }
  */
-export async function getCurrentUser(token) {
+export const getCurrentUser = async (token) => {
   try {
     validateInput(token, 'token');
 
-    // First verify the token
-    const tokenResult = await verifyToken(token);
-    if (!tokenResult.success) {
-      throw new AuthenticationError(tokenResult.error);
+    const verificationResult = await verifyToken(token);
+    
+    if (!verificationResult.success) {
+      return verificationResult;
     }
 
-    const { userId } = tokenResult.data;
-    if (!userId) {
-      throw new AuthenticationError('Token does not contain valid user information');
-    }
+    const userData = verificationResult.data;
+    
+    // Calculate token expiration info
+    const now = Math.floor(Date.now() / 1000);
+    const timeUntilExpiry = userData.exp - now;
+    const expiresAt = new Date(userData.exp * 1000);
 
-    // Fetch user from database
-    // Note: Error handling for database operations should be implemented
-    // based on your specific User model implementation
-    const user = await User.findById(userId);
-    if (!user) {
-      throw new AuthenticationError('User not found');
-    }
-
-    // Remove sensitive information before returning
-    const { password, ...safeUserData } = user.toObject ? user.toObject() : user;
+    logSecurityEvent('USER_DATA_RETRIEVED', 'User data retrieved from token', {
+      userId: userData.userId
+    });
 
     return {
       success: true,
-      data: { user: safeUserData }
+      data: {
+        user: {
+          userId: userData.userId,
+          email: userData.email,
+          role: userData.role
+        },
+        tokenInfo: {
+          issuedAt: new Date(userData.iat * 1000),
+          expiresAt,
+          timeUntilExpiry,
+          isExpiringSoon: timeUntilExpiry < 3600 // Less than 1 hour
+        }
+      }
     };
 
   } catch (error) {
-    let errorMessage = 'Failed to retrieve current user';
-    
-    if (error instanceof AuthenticationError || error instanceof ValidationError) {
-      errorMessage = error.message;
-    }
+    logSecurityEvent('GET_USER_ERROR', 'Failed to get current user', {
+      error: error.message
+    });
 
     return {
       success: false,
-      error: errorMessage
+      error: error.message || 'Failed to get current user'
     };
   }
-}
-
-// ============================================================================
-// EXPRESS.JS MIDDLEWARE
-// ============================================================================
+};
 
 /**
- * Express.js middleware for JWT token authentication
- * Validates Bearer tokens and attaches user information to request object
- * 
- * Rate limiting considerations:
- * - Implement rate limiting on authentication endpoints
- * - Consider using Redis for distributed rate limiting
- * - Monitor failed authentication attempts
- * 
- * @function authenticateToken
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
- * 
- * @example
- * // Usage in Express routes
- * app.get('/protected', authenticateToken, (req, res) => {
- *   res.json({ user: req.user });
- * });
+ * Utility function to check if a token is expiring soon (within 1 hour)
+ * @param {string} token - JWT token to check
+ * @returns {Promise<Object>} Success object with expiration info or error object
  */
-export function authenticateToken(req, res, next) {
+export const isTokenExpiringSoon = async (token) => {
   try {
-    const authHeader = req.headers['authorization'];
+    const userResult = await getCurrentUser(token);
     
-    if (!authHeader) {
-      return res.status(401).json({
-        success: false,
-        error: 'Access token is required'
-      });
+    if (!userResult.success) {
+      return userResult;
     }
 
-    if (!authHeader.startsWith(BEARER_PREFIX)) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid token format. Use Bearer <token>'
-      });
-    }
-
-    const token = authHeader.slice(BEARER_PREFIX.length);
-    
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        error: 'Access token is required'
-      });
-    }
-
-    // Verify token asynchronously
-    verifyToken(token)
-      .then(result => {
-        if (!result.success) {
-          return res.status(403).json({
-            success: false,
-            error: result.error
-          });
-        }
-
-        // Attach user information to request object
-        req.user = result.data;
-        req.token = token;
-        
-        next();
-      })
-      .catch(error => {
-        // Log error for debugging (ensure no sensitive data is logged)
-        console.error('Token verification error:', error.message);
-        
-        return res.status(403).json({
-          success: false,
-          error: 'Token verification failed'
-        });
-      });
+    return {
+      success: true,
+      data: {
+        isExpiringSoon: userResult.data.tokenInfo.isExpiringSoon,
+        timeUntilExpiry: userResult.data.tokenInfo.timeUntilExpiry,
+        expiresAt: userResult.data.tokenInfo.expiresAt
+      }
+    };
 
   } catch (error) {
-    console.error('Authentication middleware error:', error.message);
-    
-    return res.status(500).json({
+    return {
       success: false,
-      error: 'Internal authentication error'
-    });
+      error: error.message || 'Failed to check token expiration'
+    };
   }
-}
+};
 
-// ============================================================================
-// ADDITIONAL UTILITY FUNCTIONS
-// ============================================================================
+// Export configuration for testing purposes
+export const config = {
+  JWT_EXPIRES_IN,
+  BCRYPT_SALT_ROUNDS,
+  TOKEN_ALGORITHM
+};
 
 /**
- * Extracts token from various request sources (header, query, body)
- * Useful for flexible token handling in different scenarios
+ * USAGE EXAMPLES:
  * 
- * @function extractToken
- * @param {Object} req - Express request object
- * @returns {string|null} Extracted token or null if not found
+ * // Create a new access token
+ * const tokenResult = await createAccessToken({
+ *   userId: 12345,
+ *   email: 'user@example.com',
+ *   role: 'admin'
+ * });
  * 
- * @example
- * const token = extractToken(req);
- * if (token) {
- *   // Process token
- * }
+ * // Verify an existing token
+ * const verifyResult = await verifyToken('Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...');
+ * 
+ * // Hash a password
+ * const hashResult = await getPasswordHash('userPassword123');
+ * 
+ * // Verify a password
+ * const passwordResult = await verifyPassword('userPassword123', hashResult.data.hash);
+ * 
+ * // Get current user from token
+ * const currentUser = await getCurrentUser('Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...');
+ * 
+ * // Check if token is expiring soon
+ * const expirationCheck = await isTokenExpiringSoon('Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...');
  */
-export function extractToken(req) {
-  // Check Authorization header first (most secure)
-  const authHeader = req.headers['authorization'];
-  if (authHeader && authHeader.startsWith(BEARER_PREFIX)) {
-    return authHeader.slice(BEARER_PREFIX.length);
-  }
-
-  // Check query parameter (less secure, use with caution)
-  if (req.query && req.query.token) {
-    return req.query.token;
-  }
-
-  // Check request body (for POST requests)
-  if (req.body && req.body.token) {
-    return req.body.token;
-  }
-
-  return null;
-}
-
-/**
- * Creates a middleware for role-based authorization
- * Use after authenticateToken middleware
- * 
- * @function requireRole
- * @param {...string} allowedRoles - Roles that are allowed to access the resource
- * @returns {Function} Express middleware function
- * 
- * @example
- * app.delete('/admin/users/:id', 
- *   authenticateToken, 
- *   requireRole('admin', 'superuser'), 
- *   deleteUserHandler
- * );
- */
-export function requireRole(...allowedRoles) {
-  return (req, res, next) => {
-    try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          error: 'Authentication required'
-        });
-      }
-
-      const userRole = req.user.role;
-      if (!userRole || !allowedRoles.includes(userRole)) {
-        return res.status(403).json({
-          success: false,
-          error: 'Insufficient permissions'
-        });
-      }
-
-      next();

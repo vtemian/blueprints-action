@@ -1,300 +1,230 @@
-Here's a complete Node.js application entry point that mirrors FastAPI functionality:
-
-## main.js
-```javascript
-#!/usr/bin/env node
-
 /**
- * Main entry point for Node.js/Express application
- * Equivalent to FastAPI's uvicorn server setup
+ * Main entry point for the Node.js/Express server application
+ * Handles server startup, configuration, and graceful shutdown
  */
 
+import app from './app.js';
 import { createServer } from 'http';
-import process from 'process';
-import { app } from './app.js';
 
-// Configuration with environment variable fallbacks
+// Configuration
 const PORT = process.env.PORT || 8000;
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = '0.0.0.0';
 const NODE_ENV = process.env.NODE_ENV || 'development';
+const isDevelopment = NODE_ENV === 'development';
+
+// Global server instance for graceful shutdown
+let server = null;
 
 /**
- * Create HTTP server instance
+ * Enhanced logging for development mode
+ * @param {string} message - Log message
+ * @param {string} level - Log level (info, error, warn)
  */
-const server = createServer(app);
+function log(message, level = 'info') {
+    const timestamp = new Date().toISOString();
+    const prefix = isDevelopment ? `[${timestamp}] [${level.toUpperCase()}]` : `[${level.toUpperCase()}]`;
+    console.log(`${prefix} ${message}`);
+}
 
 /**
- * Enhanced error handling for server startup
+ * Handle server startup errors with specific error codes
+ * @param {Error} error - Server startup error
  */
-const handleServerError = (error) => {
-  if (error.syscall !== 'listen') {
-    throw error;
-  }
-
-  const bind = typeof PORT === 'string' ? `Pipe ${PORT}` : `Port ${PORT}`;
-
-  switch (error.code) {
-    case 'EACCES':
-      console.error(`❌ ${bind} requires elevated privileges`);
-      process.exit(1);
-      break;
-    case 'EADDRINUSE':
-      console.error(`❌ ${bind} is already in use`);
-      process.exit(1);
-      break;
-    default:
-      console.error(`❌ Server error:`, error.message);
-      throw error;
-  }
-};
-
-/**
- * Server listening event handler
- */
-const handleServerListening = () => {
-  const addr = server.address();
-  const bind = typeof addr === 'string' ? `pipe ${addr}` : `port ${addr.port}`;
-  
-  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
-  console.log(`📝 Environment: ${NODE_ENV}`);
-  console.log(`🎯 Listening on ${bind}`);
-  
-  if (NODE_ENV === 'development') {
-    console.log(`🔄 Development mode: Hot reload enabled`);
-    console.log(`📚 API docs available at http://${HOST}:${PORT}/docs`);
-  }
-};
+function handleServerError(error) {
+    if (error.code === 'EADDRINUSE') {
+        log(`Port ${PORT} is already in use. Please choose a different port or stop the conflicting process.`, 'error');
+        process.exit(1);
+    } else if (error.code === 'EACCES') {
+        log(`Permission denied to bind to port ${PORT}. Try using a port number above 1024 or run with elevated privileges.`, 'error');
+        process.exit(2);
+    } else if (error.code === 'ENOTFOUND') {
+        log(`Host ${HOST} not found. Check your network configuration.`, 'error');
+        process.exit(3);
+    } else {
+        log(`Failed to start server: ${error.message}`, 'error');
+        if (isDevelopment) {
+            console.error(error.stack);
+        }
+        process.exit(4);
+    }
+}
 
 /**
  * Graceful shutdown handler
+ * @param {string} signal - Process signal received
  */
-const gracefulShutdown = (signal) => {
-  console.log(`\n📡 Received ${signal}. Starting graceful shutdown...`);
-  
-  server.close(async (err) => {
-    if (err) {
-      console.error('❌ Error during server shutdown:', err);
-      process.exit(1);
+async function gracefulShutdown(signal) {
+    log(`Received ${signal}. Starting graceful shutdown...`, 'info');
+    
+    if (server) {
+        // Set a timeout for forceful shutdown
+        const shutdownTimeout = setTimeout(() => {
+            log('Forceful shutdown due to timeout', 'warn');
+            process.exit(1);
+        }, 10000); // 10 seconds timeout
+        
+        try {
+            // Close server and stop accepting new connections
+            await new Promise((resolve, reject) => {
+                server.close((err) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve();
+                    }
+                });
+            });
+            
+            clearTimeout(shutdownTimeout);
+            log('Server closed successfully', 'info');
+            
+            // Perform any additional cleanup here
+            // e.g., close database connections, clear caches, etc.
+            
+            log('Graceful shutdown completed', 'info');
+            process.exit(0);
+            
+        } catch (error) {
+            clearTimeout(shutdownTimeout);
+            log(`Error during graceful shutdown: ${error.message}`, 'error');
+            process.exit(1);
+        }
+    } else {
+        log('No active server to shutdown', 'info');
+        process.exit(0);
     }
-    
-    console.log('✅ HTTP server closed');
-    
-    // Add any cleanup operations here (database connections, etc.)
+}
+
+/**
+ * Start the Express server with proper error handling and logging
+ */
+async function startServer() {
     try {
-      // Example: await database.close();
-      // Example: await redis.disconnect();
-      console.log('✅ All connections closed');
-    } catch (cleanupError) {
-      console.error('❌ Error during cleanup:', cleanupError);
-      process.exit(1);
+        // Create HTTP server
+        server = createServer(app);
+        
+        // Handle server errors
+        server.on('error', handleServerError);
+        
+        // Handle client errors
+        server.on('clientError', (err, socket) => {
+            if (isDevelopment) {
+                log(`Client error: ${err.message}`, 'warn');
+            }
+            socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+        });
+        
+        // Start listening with timeout
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('Server startup timeout'));
+            }, 30000); // 30 seconds timeout
+            
+            server.listen(PORT, HOST, () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+            
+            server.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
+        
+        // Success logging
+        log(`🚀 Server successfully started!`, 'info');
+        log(`📍 Server running at http://${HOST}:${PORT}`, 'info');
+        log(`🌍 Environment: ${NODE_ENV}`, 'info');
+        
+        if (isDevelopment) {
+            log(`🔧 Development mode: Enhanced logging enabled`, 'info');
+            log(`📊 Process ID: ${process.pid}`, 'info');
+            log(`💾 Node.js version: ${process.version}`, 'info');
+        }
+        
+        // Log available routes in development
+        if (isDevelopment && app._router) {
+            log('📋 Available routes:', 'info');
+            app._router.stack.forEach((middleware) => {
+                if (middleware.route) {
+                    const methods = Object.keys(middleware.route.methods).join(', ').toUpperCase();
+                    log(`   ${methods} ${middleware.route.path}`, 'info');
+                }
+            });
+        }
+        
+    } catch (error) {
+        log(`❌ Failed to start server: ${error.message}`, 'error');
+        
+        if (isDevelopment) {
+            console.error('Stack trace:', error.stack);
+        }
+        
+        handleServerError(error);
     }
+}
+
+/**
+ * Setup process signal handlers for graceful shutdown
+ */
+function setupSignalHandlers() {
+    // Handle graceful shutdown signals
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
     
-    console.log('👋 Graceful shutdown completed');
-    process.exit(0);
-  });
-  
-  // Force shutdown after 10 seconds
-  setTimeout(() => {
-    console.error('❌ Forced shutdown due to timeout');
-    process.exit(1);
-  }, 10000);
-};
-
-/**
- * Global error handlers
- */
-process.on('uncaughtException', (error) => {
-  console.error('💥 Uncaught Exception:', error);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-});
-
-/**
- * Graceful shutdown signal handlers
- */
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-/**
- * Start server function
- */
-const startServer = async () => {
-  try {
-    // Validate port
-    const portNum = parseInt(PORT, 10);
-    if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
-      throw new Error(`Invalid port number: ${PORT}`);
-    }
-
-    // Set up server event listeners
-    server.on('error', handleServerError);
-    server.on('listening', handleServerListening);
-
-    // Start listening
-    server.listen(portNum, HOST);
-
-  } catch (error) {
-    console.error('❌ Failed to start server:', error.message);
-    process.exit(1);
-  }
-};
-
-/**
- * Main execution - only run if this file is executed directly
- */
-if (import.meta.url === `file://${process.argv[1]}`) {
-  console.log('🌟 Starting Node.js application...');
-  startServer();
-}
-
-// Export server for testing purposes
-export { server, startServer };
-```
-
-## package.json (scripts section)
-```json
-{
-  "name": "nodejs-fastapi-equivalent",
-  "version": "1.0.0",
-  "type": "module",
-  "engines": {
-    "node": ">=16.0.0"
-  },
-  "scripts": {
-    "start": "node main.js",
-    "dev": "NODE_ENV=development nodemon main.js",
-    "prod": "NODE_ENV=production node main.js",
-    "test": "NODE_ENV=test jest",
-    "lint": "eslint *.js",
-    "docker:start": "HOST=0.0.0.0 PORT=8000 node main.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1",
-    "jest": "^29.7.0",
-    "eslint": "^8.50.0"
-  }
-}
-```
-
-## Example app.js (companion file)
-```javascript
-/**
- * Express application setup
- * Equivalent to FastAPI app instance
- */
-
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import compression from 'compression';
-
-const app = express();
-
-// Security middleware
-app.use(helmet());
-app.use(cors());
-app.use(compression());
-
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// Health check endpoint (equivalent to FastAPI automatic /health)
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
-});
-
-// API documentation endpoint (development only)
-if (process.env.NODE_ENV === 'development') {
-  app.get('/docs', (req, res) => {
-    res.json({
-      message: 'API Documentation',
-      endpoints: {
-        'GET /health': 'Health check endpoint',
-        'GET /docs': 'This documentation'
-      }
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+        log(`Uncaught Exception: ${error.message}`, 'error');
+        if (isDevelopment) {
+            console.error('Stack trace:', error.stack);
+        }
+        gracefulShutdown('UNCAUGHT_EXCEPTION');
     });
-  });
+    
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (reason, promise) => {
+        log(`Unhandled Rejection at: ${promise}, reason: ${reason}`, 'error');
+        if (isDevelopment) {
+            console.error('Full error:', reason);
+        }
+        gracefulShutdown('UNHANDLED_REJECTION');
+    });
 }
 
-// Example API routes
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Welcome to Node.js FastAPI equivalent!',
-    version: '1.0.0'
-  });
+/**
+ * Main application entry point
+ */
+async function main() {
+    try {
+        log('🔄 Starting application...', 'info');
+        
+        // Setup signal handlers first
+        setupSignalHandlers();
+        
+        // Validate environment
+        if (isDevelopment) {
+            log('⚠️  Running in development mode', 'warn');
+        }
+        
+        // Start the server
+        await startServer();
+        
+    } catch (error) {
+        log(`💥 Application startup failed: ${error.message}`, 'error');
+        
+        if (isDevelopment) {
+            console.error('Startup error stack:', error.stack);
+        }
+        
+        process.exit(5);
+    }
+}
+
+// Start the application
+main().catch((error) => {
+    console.error('Fatal error in main():', error);
+    process.exit(6);
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Not Found',
-    message: `Route ${req.originalUrl} not found`
-  });
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('💥 Application Error:', err);
-  
-  res.status(err.status || 500).json({
-    error: process.env.NODE_ENV === 'development' ? err.message : 'Internal Server Error',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  });
-});
-
-export { app };
-```
-
-## Docker support (.dockerignore)
-```
-node_modules
-npm-debug.log
-.git
-.gitignore
-README.md
-.env
-coverage
-.nyc_output
-```
-
-## Key Features:
-
-1. **🚀 FastAPI Equivalent**: Mirrors uvicorn server functionality
-2. **🔧 Environment Configuration**: PORT, HOST, NODE_ENV support
-3. **🛡️ Production Ready**: Error handling, graceful shutdown, security
-4. **🔄 Development Features**: Hot reload support with nodemon
-5. **📊 Health Checks**: Built-in health endpoint
-6. **🐳 Container Ready**: 0.0.0.0 host binding for Docker
-7. **⚡ Modern Syntax**: ES6+ modules, async/await
-8. **🧪 Test Ready**: Conditional execution for testing
-
-## Usage:
-
-```bash
-# Development
-npm run dev
-
-# Production
-npm run prod
-
-# Docker
-npm run docker:start
-
-# Direct execution
-chmod +x main.js
-./main.js
-```
-
-This setup provides a robust, production-ready Node.js application entry point that closely mirrors FastAPI's functionality and development experience.
+// Export for testing purposes
+export { server, startServer, gracefulShutdown };

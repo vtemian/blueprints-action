@@ -1,167 +1,142 @@
 /**
  * User Management and Authentication API Module
- * Framework: Express.js with JWT authentication
- * Security: bcrypt password hashing, input validation, sanitization
+ * Provides comprehensive user registration, authentication, and profile management
+ * 
+ * @author Senior JavaScript Developer
+ * @version 1.0.0
  */
 
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
-
-// Assume external database module - replace with your actual DB implementation
-const db = require('../database/users'); // { findByEmail, create, update, findById }
+const mongoose = require('mongoose');
+const rateLimit = require('express-rate-limit');
 
 const router = express.Router();
 
-// Environment variables with fallbacks (use proper env config in production)
+// Environment variables - should be loaded from .env file
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
-const BCRYPT_SALT_ROUNDS = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/userauth';
+const BCRYPT_SALT_ROUNDS = 12;
 
-// ==================== VALIDATION SCHEMAS ====================
+/**
+ * Database Connection Setup
+ * MongoDB connection with proper error handling
+ */
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('MongoDB connected successfully'))
+.catch(err => console.error('MongoDB connection error:', err));
 
-const registerSchema = Joi.object({
-  email: Joi.string()
-    .email({ minDomainSegments: 2, tlds: { allow: ['com', 'net', 'org', 'edu', 'gov', 'mil'] } })
-    .required()
-    .lowercase()
-    .trim()
-    .messages({
-      'string.email': 'Please provide a valid email address',
-      'any.required': 'Email is required'
-    }),
-  password: Joi.string()
-    .min(8)
-    .pattern(new RegExp('^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]'))
-    .required()
-    .messages({
-      'string.min': 'Password must be at least 8 characters long',
-      'string.pattern.base': 'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character',
-      'any.required': 'Password is required'
-    }),
-  name: Joi.string()
-    .min(2)
-    .max(50)
-    .pattern(new RegExp('^[a-zA-Z\\s]+$'))
-    .required()
-    .trim()
-    .messages({
-      'string.min': 'Name must be at least 2 characters long',
-      'string.max': 'Name cannot exceed 50 characters',
-      'string.pattern.base': 'Name can only contain letters and spaces',
-      'any.required': 'Name is required'
-    })
+/**
+ * User Schema Definition
+ * Defines the structure for user documents in MongoDB
+ * 
+ * Fields:
+ * - email: unique identifier, required
+ * - password: bcrypt hashed password, required
+ * - name: user's display name, required
+ * - createdAt: account creation timestamp
+ * - updatedAt: last profile update timestamp
+ * - lastLogin: last successful login timestamp
+ */
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    trim: true,
+    index: true
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 8
+  },
+  name: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 100
+  },
+  lastLogin: {
+    type: Date,
+    default: null
+  }
+}, {
+  timestamps: true,
+  toJSON: {
+    transform: function(doc, ret) {
+      delete ret.password;
+      delete ret.__v;
+      return ret;
+    }
+  }
 });
 
-const loginSchema = Joi.object({
-  email: Joi.string()
-    .email()
-    .required()
-    .lowercase()
-    .trim()
-    .messages({
-      'string.email': 'Please provide a valid email address',
-      'any.required': 'Email is required'
-    }),
-  password: Joi.string()
-    .required()
-    .messages({
-      'any.required': 'Password is required'
-    })
+const User = mongoose.model('User', userSchema);
+
+/**
+ * Rate Limiting Configuration
+ * Implement rate limiting to prevent brute force attacks
+ * Recommended: 5 requests per 15 minutes for auth endpoints
+ */
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // limit each IP to 5 requests per windowMs
+  message: {
+    error: 'TOO_MANY_REQUESTS',
+    message: 'Too many authentication attempts, please try again later',
+    statusCode: 429
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
-const updateProfileSchema = Joi.object({
-  name: Joi.string()
-    .min(2)
-    .max(50)
-    .pattern(new RegExp('^[a-zA-Z\\s]+$'))
-    .trim()
-    .messages({
-      'string.min': 'Name must be at least 2 characters long',
-      'string.max': 'Name cannot exceed 50 characters',
-      'string.pattern.base': 'Name can only contain letters and spaces'
-    }),
-  email: Joi.string()
-    .email()
-    .lowercase()
-    .trim()
-    .messages({
-      'string.email': 'Please provide a valid email address'
-    }),
-  current_password: Joi.when('email', {
-    is: Joi.exist(),
-    then: Joi.string().required().messages({
-      'any.required': 'Current password is required when changing email'
-    }),
-    otherwise: Joi.string().optional()
+/**
+ * Input Validation Schemas
+ * Joi schemas for validating request payloads
+ */
+const validationSchemas = {
+  register: Joi.object({
+    email: Joi.string().email().required().max(255),
+    password: Joi.string().min(8).required().max(128),
+    name: Joi.string().required().min(1).max(100).trim()
+  }),
+
+  login: Joi.object({
+    email: Joi.string().email().required().max(255),
+    password: Joi.string().required().max(128)
+  }),
+
+  updateProfile: Joi.object({
+    name: Joi.string().min(1).max(100).trim(),
+    email: Joi.string().email().max(255),
+    current_password: Joi.string().when('email', {
+      is: Joi.exist(),
+      then: Joi.required(),
+      otherwise: Joi.optional()
+    })
+  }).min(1),
+
+  changePassword: Joi.object({
+    current_password: Joi.string().required().max(128),
+    new_password: Joi.string().min(8).required().max(128)
   })
-}).min(1).messages({
-  'object.min': 'At least one field (name or email) must be provided for update'
-});
-
-const changePasswordSchema = Joi.object({
-  current_password: Joi.string()
-    .required()
-    .messages({
-      'any.required': 'Current password is required'
-    }),
-  new_password: Joi.string()
-    .min(8)
-    .pattern(new RegExp('^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]'))
-    .required()
-    .messages({
-      'string.min': 'New password must be at least 8 characters long',
-      'string.pattern.base': 'New password must contain at least one uppercase letter, one lowercase letter, one number, and one special character',
-      'any.required': 'New password is required'
-    })
-});
-
-// ==================== UTILITY FUNCTIONS ====================
-
-/**
- * Generate JWT token for authenticated user
- * @param {Object} user - User object
- * @returns {string} JWT token
- */
-const generateToken = (user) => {
-  const payload = {
-    userId: user.id,
-    email: user.email,
-    iat: Math.floor(Date.now() / 1000)
-  };
-  
-  return jwt.sign(payload, JWT_SECRET, { 
-    expiresIn: JWT_EXPIRES_IN,
-    issuer: 'api.users',
-    audience: 'user-management'
-  });
 };
-
-/**
- * Sanitize user object by removing sensitive fields
- * @param {Object} user - User object from database
- * @returns {Object} Sanitized user object
- */
-const sanitizeUser = (user) => {
-  const { password, password_hash, ...sanitizedUser } = user;
-  return sanitizedUser;
-};
-
-/**
- * Request logging middleware
- */
-const requestLogger = (req, res, next) => {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
-  next();
-};
-
-// ==================== AUTHENTICATION MIDDLEWARE ====================
 
 /**
  * JWT Authentication Middleware
- * Verifies JWT token and attaches user info to request object
+ * Validates JWT tokens and attaches user information to request object
+ * 
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware function
  */
 const authenticateToken = async (req, res, next) => {
   try {
@@ -170,311 +145,362 @@ const authenticateToken = async (req, res, next) => {
 
     if (!token) {
       return res.status(401).json({
-        success: false,
-        message: 'Access token is required',
-        error: 'MISSING_TOKEN'
+        error: 'ACCESS_TOKEN_REQUIRED',
+        message: 'Access token is required for this operation',
+        statusCode: 401
       });
     }
 
-    // Verify JWT token
-    const decoded = jwt.verify(token, JWT_SECRET, {
-      issuer: 'api.users',
-      audience: 'user-management'
-    });
-
-    // Fetch current user data from database
-    const user = await db.findById(decoded.userId);
+    const decoded = jwt.verify(token, JWT_SECRET);
     
+    // Verify user still exists in database
+    const user = await User.findById(decoded.userId);
     if (!user) {
       return res.status(401).json({
-        success: false,
-        message: 'Invalid token - user not found',
-        error: 'INVALID_TOKEN'
+        error: 'INVALID_TOKEN',
+        message: 'Token is invalid or user no longer exists',
+        statusCode: 401
       });
     }
 
-    // Attach sanitized user info to request
-    req.user = sanitizeUser(user);
+    req.user = {
+      userId: decoded.userId,
+      email: decoded.email
+    };
+    
     next();
-
   } catch (error) {
-    console.error(`[AUTH ERROR] ${error.message}`);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        error: 'INVALID_TOKEN',
+        message: 'Invalid access token provided',
+        statusCode: 401
+      });
+    }
     
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
-        success: false,
-        message: 'Token has expired',
-        error: 'TOKEN_EXPIRED'
-      });
-    }
-    
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token',
-        error: 'INVALID_TOKEN'
+        error: 'TOKEN_EXPIRED',
+        message: 'Access token has expired',
+        statusCode: 401
       });
     }
 
+    console.error('Authentication middleware error:', error);
     return res.status(500).json({
-      success: false,
-      message: 'Authentication error',
-      error: 'AUTH_ERROR'
+      error: 'AUTHENTICATION_ERROR',
+      message: 'An error occurred during authentication',
+      statusCode: 500
     });
   }
 };
 
-// Apply request logging to all routes
-router.use(requestLogger);
+/**
+ * Utility function to generate JWT tokens
+ * 
+ * @param {Object} payload - Token payload containing user information
+ * @returns {string} Generated JWT token
+ */
+const generateToken = (payload) => {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+};
 
-// Rate limiting placeholder - implement with express-rate-limit in production
-// router.use('/login', rateLimitMiddleware({ windowMs: 15 * 60 * 1000, max: 5 }));
-// router.use('/register', rateLimitMiddleware({ windowMs: 15 * 60 * 1000, max: 3 }));
-
-// ==================== ROUTE HANDLERS ====================
+/**
+ * Utility function to validate request payload
+ * 
+ * @param {Object} schema - Joi validation schema
+ * @param {Object} data - Data to validate
+ * @returns {Object} Validation result
+ */
+const validateInput = (schema, data) => {
+  return schema.validate(data, { abortEarly: false });
+};
 
 /**
  * POST /api/users/register
  * Register a new user account
+ * 
+ * @route POST /api/users/register
+ * @param {string} email - User's email address (required, unique)
+ * @param {string} password - User's password (required, min 8 characters)
+ * @param {string} name - User's display name (required)
+ * @returns {Object} JWT token and user information
  */
-router.post('/register', async (req, res) => {
+router.post('/register', authLimiter, async (req, res) => {
   try {
-    // Validate request body
-    const { error, value } = registerSchema.validate(req.body, { abortEarly: false });
-    
+    // Validate input data
+    const { error, value } = validateInput(validationSchemas.register, req.body);
     if (error) {
-      const validationErrors = error.details.map(detail => ({
-        field: detail.path[0],
-        message: detail.message
-      }));
-      
       return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: validationErrors
+        error: 'VALIDATION_ERROR',
+        message: error.details.map(detail => detail.message).join(', '),
+        statusCode: 400
       });
     }
 
     const { email, password, name } = value;
 
     // Check if user already exists
-    const existingUser = await db.findByEmail(email);
-    
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(409).json({
-        success: false,
-        message: 'An account with this email already exists',
-        error: 'EMAIL_EXISTS'
+        error: 'EMAIL_ALREADY_EXISTS',
+        message: 'An account with this email address already exists',
+        statusCode: 409
       });
     }
 
-    // Hash password with bcrypt
-    const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 
-    // Create user in database
-    const userData = {
+    // Create new user
+    const newUser = new User({
       email,
-      password_hash: passwordHash,
-      name,
-      created_at: new Date(),
-      last_login: null,
-      is_active: true
-    };
-
-    const newUser = await db.create(userData);
-    
-    // Generate JWT token
-    const token = generateToken(newUser);
-    
-    // Return success response
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully',
-      data: {
-        user: sanitizeUser(newUser),
-        token,
-        expires_in: JWT_EXPIRES_IN
-      }
+      password: hashedPassword,
+      name
     });
 
-    console.log(`[REGISTER SUCCESS] New user registered: ${email}`);
+    const savedUser = await newUser.save();
+
+    // Generate JWT token
+    const token = generateToken({
+      userId: savedUser._id,
+      email: savedUser.email
+    });
+
+    // Return success response
+    res.status(201).json({
+      message: 'User registered successfully',
+      token,
+      user: savedUser.toJSON()
+    });
 
   } catch (error) {
-    console.error(`[REGISTER ERROR] ${error.message}`, error.stack);
+    console.error('Registration error:', error);
     
+    // Handle MongoDB duplicate key error
+    if (error.code === 11000) {
+      return res.status(409).json({
+        error: 'EMAIL_ALREADY_EXISTS',
+        message: 'An account with this email address already exists',
+        statusCode: 409
+      });
+    }
+
     res.status(500).json({
-      success: false,
-      message: 'Registration failed due to server error',
-      error: 'INTERNAL_ERROR'
+      error: 'REGISTRATION_FAILED',
+      message: 'An error occurred during user registration',
+      statusCode: 500
     });
   }
 });
 
 /**
  * POST /api/users/login
- * Authenticate user and return JWT token
+ * Authenticate user and generate access token
+ * 
+ * @route POST /api/users/login
+ * @param {string} email - User's email address (required)
+ * @param {string} password - User's password (required)
+ * @returns {Object} JWT token and user information
  */
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
   try {
-    // Validate request body
-    const { error, value } = loginSchema.validate(req.body, { abortEarly: false });
-    
+    // Validate input data
+    const { error, value } = validateInput(validationSchemas.login, req.body);
     if (error) {
-      const validationErrors = error.details.map(detail => ({
-        field: detail.path[0],
-        message: detail.message
-      }));
-      
       return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: validationErrors
+        error: 'VALIDATION_ERROR',
+        message: error.details.map(detail => detail.message).join(', '),
+        statusCode: 400
       });
     }
 
     const { email, password } = value;
 
     // Find user by email
-    const user = await db.findByEmail(email);
-    
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(401).json({
-        success: false,
+        error: 'INVALID_CREDENTIALS',
         message: 'Invalid email or password',
-        error: 'INVALID_CREDENTIALS'
-      });
-    }
-
-    // Check if user account is active
-    if (!user.is_active) {
-      return res.status(401).json({
-        success: false,
-        message: 'Account is deactivated. Please contact support.',
-        error: 'ACCOUNT_DEACTIVATED'
+        statusCode: 401
       });
     }
 
     // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-    
+    const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       return res.status(401).json({
-        success: false,
+        error: 'INVALID_CREDENTIALS',
         message: 'Invalid email or password',
-        error: 'INVALID_CREDENTIALS'
+        statusCode: 401
       });
     }
 
     // Update last login timestamp
-    await db.update(user.id, { last_login: new Date() });
-    
+    user.lastLogin = new Date();
+    await user.save();
+
     // Generate JWT token
-    const token = generateToken(user);
-    
-    // Return success response
-    res.status(200).json({
-      success: true,
-      message: 'Login successful',
-      data: {
-        user: sanitizeUser({ ...user, last_login: new Date() }),
-        token,
-        expires_in: JWT_EXPIRES_IN
-      }
+    const token = generateToken({
+      userId: user._id,
+      email: user.email
     });
 
-    console.log(`[LOGIN SUCCESS] User logged in: ${email}`);
+    // Return success response
+    res.status(200).json({
+      message: 'Login successful',
+      token,
+      user: user.toJSON()
+    });
 
   } catch (error) {
-    console.error(`[LOGIN ERROR] ${error.message}`, error.stack);
-    
+    console.error('Login error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Login failed due to server error',
-      error: 'INTERNAL_ERROR'
+      error: 'LOGIN_FAILED',
+      message: 'An error occurred during login',
+      statusCode: 500
     });
   }
 });
 
 /**
  * GET /api/users/me
- * Get current user profile (requires authentication)
+ * Get current user profile information
+ * 
+ * @route GET /api/users/me
+ * @middleware authenticateToken
+ * @returns {Object} Current user information
  */
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    // User info is already attached by authenticateToken middleware
+    const user = await User.findById(req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        error: 'USER_NOT_FOUND',
+        message: 'User account not found',
+        statusCode: 404
+      });
+    }
+
     res.status(200).json({
-      success: true,
-      message: 'Profile retrieved successfully',
-      data: {
-        user: req.user
-      }
+      user: user.toJSON()
     });
 
   } catch (error) {
-    console.error(`[GET PROFILE ERROR] ${error.message}`, error.stack);
-    
+    console.error('Get profile error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve profile',
-      error: 'INTERNAL_ERROR'
+      error: 'PROFILE_FETCH_FAILED',
+      message: 'An error occurred while fetching user profile',
+      statusCode: 500
     });
   }
 });
 
 /**
  * PUT /api/users/me
- * Update current user profile (requires authentication)
+ * Update current user profile information
+ * 
+ * @route PUT /api/users/me
+ * @middleware authenticateToken
+ * @param {string} [name] - Updated user name
+ * @param {string} [email] - Updated email address
+ * @param {string} [current_password] - Required when updating email
+ * @returns {Object} Updated user information
  */
 router.put('/me', authenticateToken, async (req, res) => {
   try {
-    // Validate request body
-    const { error, value } = updateProfileSchema.validate(req.body, { abortEarly: false });
-    
+    // Validate input data
+    const { error, value } = validateInput(validationSchemas.updateProfile, req.body);
     if (error) {
-      const validationErrors = error.details.map(detail => ({
-        field: detail.path[0],
-        message: detail.message
-      }));
-      
       return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: validationErrors
+        error: 'VALIDATION_ERROR',
+        message: error.details.map(detail => detail.message).join(', '),
+        statusCode: 400
       });
     }
 
     const { name, email, current_password } = value;
-    const userId = req.user.id;
 
-    // If email is being changed, verify current password
-    if (email && email !== req.user.email) {
+    // Find current user
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({
+        error: 'USER_NOT_FOUND',
+        message: 'User account not found',
+        statusCode: 404
+      });
+    }
+
+    // If email is being updated, verify current password
+    if (email && email !== user.email) {
       if (!current_password) {
         return res.status(400).json({
-          success: false,
-          message: 'Current password is required when changing email',
-          error: 'PASSWORD_REQUIRED'
+          error: 'PASSWORD_REQUIRED',
+          message: 'Current password is required to change email address',
+          statusCode: 400
         });
       }
 
-      // Get current user with password hash
-      const currentUser = await db.findById(userId);
-      const isPasswordValid = await bcrypt.compare(current_password, currentUser.password_hash);
-      
+      const isPasswordValid = await bcrypt.compare(current_password, user.password);
       if (!isPasswordValid) {
         return res.status(401).json({
-          success: false,
+          error: 'INVALID_PASSWORD',
           message: 'Current password is incorrect',
-          error: 'INVALID_PASSWORD'
+          statusCode: 401
         });
       }
 
       // Check if new email is already taken
-      const existingUser = await db.findByEmail(email);
-      if (existingUser && existingUser.id !== userId) {
+      const existingUser = await User.findOne({ email, _id: { $ne: user._id } });
+      if (existingUser) {
         return res.status(409).json({
-          success: false,
-          message: 'Email is already in use by another account',
-          error: 'EMAIL_EXISTS'
+          error: 'EMAIL_ALREADY_EXISTS',
+          message: 'This email address is already in use',
+          statusCode: 409
         });
       }
+
+      user.email = email;
     }
+
+    // Update name if provided
+    if (name) {
+      user.name = name;
+    }
+
+    // Save updated user
+    const updatedUser = await user.save();
+
+    res.status(200).json({
+      message: 'Profile updated successfully',
+      user: updatedUser.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Profile update error:', error);
+    
+    // Handle MongoDB duplicate key error
+    if (error.code === 11000) {
+      return res.status(409).json({
+        error: 'EMAIL_ALREADY_EXISTS',
+        message: 'This email address is already in use',
+        statusCode: 409
+      });
+    }
+
+    res.status(500).json({
+      error: 'PROFILE_UPDATE_FAILED',
+      message: 'An error occurred while updating profile',
+      statusCode: 500
+    });
+  }
+});
+
+/**
+ * POST /api/users/change-password
+ * Change user password
+ * 
+ * @route POST /api/users/change-password
