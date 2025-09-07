@@ -1,477 +1,385 @@
 """
-Todo Storage and Core Operations Module
+Todo storage and core operations module.
 
-This module provides comprehensive todo management functionality with persistent
-JSON file storage, robust error handling, and data validation.
-
-Author: Assistant
-Date: 2024
+This module provides functionality for managing todos with persistent JSON storage.
+Todos are stored in ~/.todos.json with automatic backup and recovery capabilities.
 """
 
 import json
 import os
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Union
-from utils import *  # Assuming local utils module exists
+from typing import List, Dict, Optional, Any, Union
+from utils import *
+
+# Module-level constants
+TODOS_FILE = os.path.expanduser("~/.todos.json")
+BACKUP_SUFFIX = ".backup"
+VALID_PRIORITIES = ["low", "medium", "high"]
 
 
-# Constants
-TODO_FILE = os.path.expanduser("~/.todos.json")
-BACKUP_FILE = TODO_FILE + ".backup"
-VALID_PRIORITIES = {"low", "medium", "high"}
-
-
-def load_todos() -> List[Dict[str, Any]]:
+def _ensure_todos_file() -> None:
     """
-    Load todos from the JSON file with comprehensive error handling.
-    
-    Creates an empty todos file if it doesn't exist. If the JSON is corrupted,
-    backs up the corrupted file and creates a new empty one.
-    
-    Returns:
-        List[Dict[str, Any]]: List of todo dictionaries, empty list if file 
-                             doesn't exist or on any error
+    Ensure the todos file exists. Create empty file if missing.
     
     Raises:
-        None: All exceptions are handled gracefully
+        PermissionError: If unable to create or access the file
+        OSError: If file system operation fails
     """
+    if not os.path.exists(TODOS_FILE):
+        try:
+            with open(TODOS_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f, indent=2)
+        except (PermissionError, OSError) as e:
+            raise PermissionError(f"Cannot create todos file at {TODOS_FILE}: {e}")
+
+
+def _backup_corrupted_file() -> None:
+    """
+    Create backup of corrupted todos file before recreating.
+    
+    Raises:
+        OSError: If backup operation fails
+    """
+    backup_path = TODOS_FILE + BACKUP_SUFFIX
     try:
-        # Check if file exists
-        if not os.path.exists(TODO_FILE):
-            print(f"Todo file not found at {TODO_FILE}. Creating new empty file.")
-            save_todos([])
-            return []
-        
-        # Attempt to read and parse the JSON file
-        with open(TODO_FILE, 'r', encoding='utf-8') as file:
-            todos = json.load(file)
-            
-        # Validate that todos is a list
-        if not isinstance(todos, list):
-            print(f"Warning: Todo file contains invalid data type. Expected list, got {type(todos).__name__}")
-            _backup_and_recreate()
-            return []
-            
-        # Validate each todo structure
-        validated_todos = []
-        for i, todo in enumerate(todos):
-            if _validate_todo_structure(todo):
-                validated_todos.append(todo)
-            else:
-                print(f"Warning: Invalid todo structure at index {i}, skipping: {todo}")
-        
-        return validated_todos
-        
-    except json.JSONDecodeError as e:
-        print(f"Error: Corrupted JSON in todo file: {e}")
-        _backup_and_recreate()
-        return []
-        
-    except PermissionError:
-        print(f"Error: Permission denied accessing {TODO_FILE}")
-        return []
-        
-    except FileNotFoundError:
-        print(f"Todo file not found at {TODO_FILE}. Creating new empty file.")
-        save_todos([])
-        return []
-        
-    except Exception as e:
-        print(f"Unexpected error loading todos: {e}")
-        return []
+        if os.path.exists(TODOS_FILE):
+            # Create backup with timestamp to avoid overwriting
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"{TODOS_FILE}.{timestamp}{BACKUP_SUFFIX}"
+            os.rename(TODOS_FILE, backup_path)
+            print(f"Corrupted todos file backed up to: {backup_path}")
+    except OSError as e:
+        print(f"Warning: Could not backup corrupted file: {e}")
 
 
-def save_todos(todos: List[Dict[str, Any]]) -> bool:
+def _validate_priority(priority: str) -> bool:
     """
-    Save todos list to JSON file with proper formatting and error handling.
+    Validate priority value.
     
     Args:
-        todos (List[Dict[str, Any]]): List of todo dictionaries to save
+        priority: Priority string to validate
         
     Returns:
-        bool: True if save was successful, False otherwise
+        bool: True if valid priority, False otherwise
+    """
+    return priority in VALID_PRIORITIES
+
+
+def _validate_todo_id(todo_id: Any) -> bool:
+    """
+    Validate todo ID is a positive integer.
+    
+    Args:
+        todo_id: ID value to validate
+        
+    Returns:
+        bool: True if valid ID, False otherwise
+    """
+    try:
+        return isinstance(todo_id, int) and todo_id > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _get_next_id(todos: List[Dict]) -> int:
+    """
+    Generate next available ID for new todo.
+    
+    Args:
+        todos: List of existing todos
+        
+    Returns:
+        int: Next available ID
+    """
+    if not todos:
+        return 1
+    
+    max_id = 0
+    for todo in todos:
+        if isinstance(todo.get('id'), int) and todo['id'] > max_id:
+            max_id = todo['id']
+    
+    return max_id + 1
+
+
+def load_todos() -> List[Dict]:
+    """
+    Load todos from JSON file.
+    
+    Returns:
+        List[Dict]: List of todo dictionaries
         
     Raises:
-        None: All exceptions are handled gracefully
+        PermissionError: If file cannot be accessed
+        OSError: If file system operation fails
     """
-    if not isinstance(todos, list):
-        print(f"Error: Expected list of todos, got {type(todos).__name__}")
-        return False
+    _ensure_todos_file()
     
     try:
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
-        
-        # Write to file with proper JSON formatting
-        with open(TODO_FILE, 'w', encoding='utf-8') as file:
-            json.dump(todos, file, indent=2, ensure_ascii=False)
+        with open(TODOS_FILE, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if not content:
+                return []
             
-        return True
+            todos = json.loads(content)
+            
+            # Validate loaded data structure
+            if not isinstance(todos, list):
+                raise ValueError("Invalid todos file format: expected list")
+            
+            return todos
+            
+    except json.JSONDecodeError as e:
+        print(f"Error: Corrupted todos file detected: {e}")
+        _backup_corrupted_file()
+        _ensure_todos_file()
+        return []
         
-    except PermissionError:
-        print(f"Error: Permission denied writing to {TODO_FILE}")
-        return False
+    except PermissionError as e:
+        raise PermissionError(f"Permission denied accessing todos file: {e}")
         
     except OSError as e:
-        print(f"Error: Could not write to {TODO_FILE}: {e}")
-        return False
-        
-    except Exception as e:
-        print(f"Unexpected error saving todos: {e}")
-        return False
+        raise OSError(f"Error reading todos file: {e}")
 
 
-def add_todo(text: str, priority: str = "medium") -> Optional[Dict[str, Any]]:
+def save_todos(todos: List[Dict]) -> None:
     """
-    Create and add a new todo with validation.
+    Save todos list to JSON file.
     
     Args:
-        text (str): Task description (must be non-empty)
-        priority (str): Priority level ("low", "medium", or "high")
-        
-    Returns:
-        Optional[Dict[str, Any]]: The newly created todo dict, or None if failed
+        todos: List of todo dictionaries to save
         
     Raises:
-        None: All exceptions are handled gracefully
+        PermissionError: If file cannot be written
+        OSError: If file system operation fails
+        TypeError: If todos data is not serializable
     """
-    # Input validation
+    if not isinstance(todos, list):
+        raise TypeError("Todos must be a list")
+    
+    try:
+        # Write to temporary file first for atomic operation
+        temp_file = TODOS_FILE + ".tmp"
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(todos, f, indent=2, ensure_ascii=False)
+        
+        # Atomic rename
+        os.replace(temp_file, TODOS_FILE)
+        
+    except PermissionError as e:
+        raise PermissionError(f"Permission denied writing todos file: {e}")
+        
+    except OSError as e:
+        raise OSError(f"Error writing todos file: {e}")
+        
+    except (TypeError, ValueError) as e:
+        raise TypeError(f"Cannot serialize todos data: {e}")
+
+
+def add_todo(text: str, priority: str = "medium") -> Dict:
+    """
+    Add new todo item.
+    
+    Args:
+        text: Todo description text
+        priority: Priority level ("low", "medium", "high")
+        
+    Returns:
+        Dict: The created todo dictionary
+        
+    Raises:
+        ValueError: If text is empty or priority is invalid
+        PermissionError: If file cannot be accessed
+        OSError: If file system operation fails
+    """
     if not isinstance(text, str) or not text.strip():
-        print("Error: Todo text must be a non-empty string")
-        return None
-        
-    if not isinstance(priority, str) or priority not in VALID_PRIORITIES:
-        print(f"Error: Priority must be one of {VALID_PRIORITIES}")
-        return None
+        raise ValueError("Todo text cannot be empty")
     
-    try:
-        # Load existing todos
-        todos = load_todos()
-        
-        # Generate new ID (thread-safe by finding max existing ID)
-        new_id = max((todo.get('id', 0) for todo in todos), default=0) + 1
-        
-        # Create new todo
-        new_todo = {
-            'id': new_id,
-            'text': text.strip(),
-            'done': False,
-            'created': datetime.now().isoformat(),
-            'priority': priority
-        }
-        
-        # Add to list and save
-        todos.append(new_todo)
-        
-        if save_todos(todos):
-            print(f"Todo added successfully with ID {new_id}")
-            return new_todo
-        else:
-            print("Error: Failed to save new todo")
-            return None
-            
-    except Exception as e:
-        print(f"Unexpected error adding todo: {e}")
-        return None
+    if not _validate_priority(priority):
+        raise ValueError(f"Invalid priority '{priority}'. Must be one of: {VALID_PRIORITIES}")
+    
+    todos = load_todos()
+    
+    new_todo = {
+        "id": _get_next_id(todos),
+        "text": text.strip(),
+        "done": False,
+        "created": datetime.now().isoformat(),
+        "priority": priority
+    }
+    
+    todos.append(new_todo)
+    save_todos(todos)
+    
+    return new_todo
 
 
-def get_todo(todo_id: Union[int, str]) -> Optional[Dict[str, Any]]:
+def get_todo(todo_id: Union[int, str]) -> Optional[Dict]:
     """
-    Find and return a todo by its ID.
+    Retrieve todo by ID.
     
     Args:
-        todo_id (Union[int, str]): The ID of the todo to find
+        todo_id: ID of todo to retrieve
         
     Returns:
-        Optional[Dict[str, Any]]: The todo dict if found, None otherwise
+        Optional[Dict]: Todo dictionary if found, None otherwise
         
     Raises:
-        None: All exceptions are handled gracefully
+        ValueError: If todo_id is not a valid integer
+        PermissionError: If file cannot be accessed
+        OSError: If file system operation fails
     """
-    # Input validation
     try:
         todo_id = int(todo_id)
-        if todo_id <= 0:
-            print("Error: Todo ID must be a positive integer")
-            return None
-    except (ValueError, TypeError):
-        print("Error: Todo ID must be a valid integer")
+    except (TypeError, ValueError):
+        raise ValueError("Todo ID must be a valid integer")
+    
+    if not _validate_todo_id(todo_id):
         return None
     
-    try:
-        todos = load_todos()
-        
-        for todo in todos:
-            if todo.get('id') == todo_id:
-                return todo
-                
-        return None
-        
-    except Exception as e:
-        print(f"Unexpected error getting todo: {e}")
-        return None
+    todos = load_todos()
+    
+    for todo in todos:
+        if todo.get('id') == todo_id:
+            return todo.copy()  # Return copy to prevent external modification
+    
+    return None
 
 
-def update_todo(todo_id: Union[int, str], changes: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def update_todo(todo_id: Union[int, str], changes: Dict[str, Any]) -> Optional[Dict]:
     """
-    Update a todo's fields from a changes dictionary.
+    Update existing todo with provided changes.
     
     Args:
-        todo_id (Union[int, str]): The ID of the todo to update
-        changes (Dict[str, Any]): Dictionary of fields to update
+        todo_id: ID of todo to update
+        changes: Dictionary of fields to update
         
     Returns:
-        Optional[Dict[str, Any]]: The updated todo dict, or None if failed
+        Optional[Dict]: Updated todo dictionary if found, None otherwise
         
     Raises:
-        None: All exceptions are handled gracefully
+        ValueError: If todo_id is invalid or changes contain invalid data
+        PermissionError: If file cannot be accessed
+        OSError: If file system operation fails
     """
-    # Input validation
     try:
         todo_id = int(todo_id)
-        if todo_id <= 0:
-            print("Error: Todo ID must be a positive integer")
-            return None
-    except (ValueError, TypeError):
-        print("Error: Todo ID must be a valid integer")
+    except (TypeError, ValueError):
+        raise ValueError("Todo ID must be a valid integer")
+    
+    if not _validate_todo_id(todo_id):
         return None
     
     if not isinstance(changes, dict):
-        print("Error: Changes must be a dictionary")
-        return None
+        raise ValueError("Changes must be a dictionary")
     
-    if not changes:
-        print("Warning: No changes provided")
-        return get_todo(todo_id)
+    # Validate changes
+    if 'priority' in changes and not _validate_priority(changes['priority']):
+        raise ValueError(f"Invalid priority '{changes['priority']}'. Must be one of: {VALID_PRIORITIES}")
     
-    try:
-        todos = load_todos()
-        
-        # Find the todo to update
-        todo_index = None
-        for i, todo in enumerate(todos):
-            if todo.get('id') == todo_id:
-                todo_index = i
-                break
-        
-        if todo_index is None:
-            print(f"Error: Todo with ID {todo_id} not found")
-            return None
-        
-        # Validate and apply changes
-        todo = todos[todo_index].copy()
-        
-        for field, value in changes.items():
-            if field == 'id':
-                print("Warning: Cannot change todo ID")
-                continue
-            elif field == 'text':
-                if not isinstance(value, str) or not value.strip():
-                    print("Error: Text must be a non-empty string")
-                    return None
-                todo[field] = value.strip()
-            elif field == 'done':
-                if not isinstance(value, bool):
-                    print("Error: Done status must be a boolean")
-                    return None
-                todo[field] = value
-            elif field == 'priority':
-                if not isinstance(value, str) or value not in VALID_PRIORITIES:
-                    print(f"Error: Priority must be one of {VALID_PRIORITIES}")
-                    return None
-                todo[field] = value
-            elif field == 'created':
-                print("Warning: Cannot change creation date")
-                continue
-            else:
-                print(f"Warning: Unknown field '{field}' ignored")
-        
-        # Update the todo in the list
-        todos[todo_index] = todo
-        
-        if save_todos(todos):
-            print(f"Todo {todo_id} updated successfully")
-            return todo
-        else:
-            print("Error: Failed to save updated todo")
-            return None
+    if 'text' in changes and (not isinstance(changes['text'], str) or not changes['text'].strip()):
+        raise ValueError("Todo text cannot be empty")
+    
+    if 'done' in changes and not isinstance(changes['done'], bool):
+        raise ValueError("Done status must be a boolean")
+    
+    # Prevent modification of protected fields
+    protected_fields = {'id', 'created'}
+    for field in protected_fields:
+        if field in changes:
+            raise ValueError(f"Cannot modify protected field: {field}")
+    
+    todos = load_todos()
+    
+    for i, todo in enumerate(todos):
+        if todo.get('id') == todo_id:
+            # Apply changes
+            for key, value in changes.items():
+                if key == 'text':
+                    todo[key] = value.strip()
+                else:
+                    todo[key] = value
             
-    except Exception as e:
-        print(f"Unexpected error updating todo: {e}")
-        return None
+            save_todos(todos)
+            return todo.copy()
+    
+    return None
 
 
 def delete_todo(todo_id: Union[int, str]) -> bool:
     """
-    Remove a todo by its ID.
+    Delete todo by ID.
     
     Args:
-        todo_id (Union[int, str]): The ID of the todo to delete
+        todo_id: ID of todo to delete
         
     Returns:
-        bool: True if todo was deleted, False if not found or failed
+        bool: True if todo was deleted, False if not found
         
     Raises:
-        None: All exceptions are handled gracefully
+        ValueError: If todo_id is not a valid integer
+        PermissionError: If file cannot be accessed
+        OSError: If file system operation fails
     """
-    # Input validation
     try:
         todo_id = int(todo_id)
-        if todo_id <= 0:
-            print("Error: Todo ID must be a positive integer")
-            return False
-    except (ValueError, TypeError):
-        print("Error: Todo ID must be a valid integer")
+    except (TypeError, ValueError):
+        raise ValueError("Todo ID must be a valid integer")
+    
+    if not _validate_todo_id(todo_id):
         return False
     
-    try:
-        todos = load_todos()
-        
-        # Find and remove the todo
-        original_length = len(todos)
-        todos = [todo for todo in todos if todo.get('id') != todo_id]
-        
-        if len(todos) == original_length:
-            print(f"Error: Todo with ID {todo_id} not found")
-            return False
-        
-        if save_todos(todos):
-            print(f"Todo {todo_id} deleted successfully")
+    todos = load_todos()
+    
+    for i, todo in enumerate(todos):
+        if todo.get('id') == todo_id:
+            todos.pop(i)
+            save_todos(todos)
             return True
-        else:
-            print("Error: Failed to save after deletion")
-            return False
-            
-    except Exception as e:
-        print(f"Unexpected error deleting todo: {e}")
-        return False
+    
+    return False
 
 
-def filter_todos(todos: List[Dict[str, Any]], done: Optional[bool] = None, 
-                priority: Optional[str] = None) -> List[Dict[str, Any]]:
+def filter_todos(todos: List[Dict], done: Optional[bool] = None, priority: Optional[str] = None) -> List[Dict]:
     """
     Filter todos by completion status and/or priority.
     
     Args:
-        todos (List[Dict[str, Any]]): List of todos to filter
-        done (Optional[bool]): Filter by completion status (None for all)
-        priority (Optional[str]): Filter by priority level (None for all)
+        todos: List of todo dictionaries to filter
+        done: Filter by completion status (None for all)
+        priority: Filter by priority level (None for all)
         
     Returns:
-        List[Dict[str, Any]]: Filtered list of todos
+        List[Dict]: Filtered list of todos
         
     Raises:
-        None: All exceptions are handled gracefully
+        ValueError: If priority is invalid
+        TypeError: If todos is not a list
     """
-    # Input validation
     if not isinstance(todos, list):
-        print(f"Error: Expected list of todos, got {type(todos).__name__}")
-        return []
+        raise TypeError("Todos must be a list")
+    
+    if priority is not None and not _validate_priority(priority):
+        raise ValueError(f"Invalid priority '{priority}'. Must be one of: {VALID_PRIORITIES}")
     
     if done is not None and not isinstance(done, bool):
-        print("Error: Done filter must be a boolean or None")
-        return []
+        raise ValueError("Done filter must be a boolean or None")
     
-    if priority is not None and (not isinstance(priority, str) or priority not in VALID_PRIORITIES):
-        print(f"Error: Priority filter must be one of {VALID_PRIORITIES} or None")
-        return []
+    filtered = []
     
-    try:
-        filtered_todos = []
+    for todo in todos:
+        # Skip invalid todo entries
+        if not isinstance(todo, dict):
+            continue
         
-        for todo in todos:
-            # Validate todo structure
-            if not _validate_todo_structure(todo):
-                continue
-            
-            # Apply filters
-            if done is not None and todo.get('done') != done:
-                continue
-                
-            if priority is not None and todo.get('priority') != priority:
-                continue
-            
-            filtered_todos.append(todo)
+        # Apply done filter
+        if done is not None and todo.get('done') != done:
+            continue
         
-        return filtered_todos
+        # Apply priority filter
+        if priority is not None and todo.get('priority') != priority:
+            continue
         
-    except Exception as e:
-        print(f"Unexpected error filtering todos: {e}")
-        return []
-
-
-def _validate_todo_structure(todo: Any) -> bool:
-    """
-    Validate that a todo has the correct structure and data types.
+        filtered.append(todo.copy())
     
-    Args:
-        todo (Any): The todo object to validate
-        
-    Returns:
-        bool: True if valid, False otherwise
-    """
-    if not isinstance(todo, dict):
-        return False
-    
-    required_fields = {'id', 'text', 'done', 'created', 'priority'}
-    if not all(field in todo for field in required_fields):
-        return False
-    
-    # Validate field types and values
-    if not isinstance(todo['id'], int) or todo['id'] <= 0:
-        return False
-    
-    if not isinstance(todo['text'], str) or not todo['text'].strip():
-        return False
-    
-    if not isinstance(todo['done'], bool):
-        return False
-    
-    if not isinstance(todo['created'], str):
-        return False
-    
-    if not isinstance(todo['priority'], str) or todo['priority'] not in VALID_PRIORITIES:
-        return False
-    
-    return True
-
-
-def _backup_and_recreate() -> None:
-    """
-    Backup corrupted todo file and create a new empty one.
-    
-    This is a helper function used when the JSON file is corrupted.
-    """
-    try:
-        if os.path.exists(TODO_FILE):
-            # Create backup
-            with open(TODO_FILE, 'r', encoding='utf-8') as src:
-                with open(BACKUP_FILE, 'w', encoding='utf-8') as dst:
-                    dst.write(src.read())
-            print(f"Corrupted file backed up to {BACKUP_FILE}")
-        
-        # Create new empty file
-        save_todos([])
-        print(f"Created new empty todo file at {TODO_FILE}")
-        
-    except Exception as e:
-        print(f"Error during backup and recreation: {e}")
-
-
-if __name__ == "__main__":
-    # Basic testing functionality
-    print("Todo Storage Module - Basic Test")
-    print("=" * 40)
-    
-    # Test adding a todo
-    todo1 = add_todo("Test todo item", "high")
-    if todo1:
-        print(f"Added: {todo1}")
-    
-    # Test loading todos
-    all_todos = load_todos()
-    print(f"Loaded {len(all_todos)} todos")
-    
-    # Test filtering
-    high_priority = filter_todos(all_todos, priority="high")
-    print(f"High priority todos: {len(high_priority)}")
+    return filtered
