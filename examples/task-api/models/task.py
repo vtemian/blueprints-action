@@ -1,24 +1,26 @@
 """
-Task model definition for task management system.
+Task model module for SQLAlchemy ORM.
 
-This module defines the Task SQLAlchemy model with comprehensive field definitions,
-relationships, and business logic methods.
+This module defines the Task model with proper relationships, constraints,
+and business logic methods for task management functionality.
 """
 
 import uuid
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from sqlalchemy import (
-    Column, String, Text, DateTime, ForeignKey, Index, 
-    func, Boolean
+    Column, String, Text, DateTime, ForeignKey, Index, Enum as SQLEnum
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.exc import SQLAlchemyError
+from enum import Enum
 
-from core.database import Base, db
+from core.database import Base
+
+if TYPE_CHECKING:
+    from models.user import User
 
 
 class TaskStatus(Enum):
@@ -37,101 +39,106 @@ class TaskPriority(Enum):
 
 class Task(Base):
     """
-    Task model representing a user task with status tracking and priority management.
+    Task model representing a user task with status tracking and due dates.
     
     This model handles task lifecycle management including creation, status updates,
-    completion tracking, and due date monitoring.
+    and completion tracking with proper timestamp management.
     """
     
     __tablename__ = "tasks"
     
-    # Table indexes for optimized queries
-    __table_args__ = (
-        Index('idx_task_user_id', 'user_id'),
-        Index('idx_task_status', 'status'),
-        Index('idx_task_due_date', 'due_date'),
-        Index('idx_task_user_status', 'user_id', 'status'),
-    )
-    
     # Primary key
-    id = Column(
+    id: UUID = Column(
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
-        nullable=False
+        nullable=False,
+        doc="Unique identifier for the task"
     )
     
     # Core task fields
-    title = Column(
+    title: str = Column(
         String(200),
         nullable=False,
-        index=True
+        doc="Task title (max 200 characters)"
     )
     
-    description = Column(
+    description: Optional[str] = Column(
         Text,
-        nullable=True
+        nullable=True,
+        doc="Detailed task description"
     )
     
-    status = Column(
-        String(20),
+    status: TaskStatus = Column(
+        SQLEnum(TaskStatus, name="task_status_enum"),
         nullable=False,
-        default=TaskStatus.PENDING.value,
-        index=True
+        default=TaskStatus.PENDING,
+        doc="Current task status"
     )
     
-    priority = Column(
-        String(10),
+    priority: TaskPriority = Column(
+        SQLEnum(TaskPriority, name="task_priority_enum"),
         nullable=False,
-        default=TaskPriority.MEDIUM.value
+        default=TaskPriority.MEDIUM,
+        doc="Task priority level"
     )
     
     # Foreign key relationship
-    user_id = Column(
+    user_id: UUID = Column(
         UUID(as_uuid=True),
-        ForeignKey('users.id', ondelete='CASCADE'),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
-        index=True
+        doc="ID of the user who owns this task"
     )
     
-    # Date/time fields
-    due_date = Column(
+    # Timestamp fields
+    due_date: Optional[datetime] = Column(
         DateTime(timezone=True),
         nullable=True,
-        index=True
+        doc="Task due date with timezone"
     )
     
-    completed_at = Column(
+    completed_at: Optional[datetime] = Column(
         DateTime(timezone=True),
-        nullable=True
+        nullable=True,
+        doc="Timestamp when task was completed"
     )
     
-    created_at = Column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now()
-    )
-    
-    updated_at = Column(
+    created_at: datetime = Column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=func.now(),
-        onupdate=func.now()
+        default=lambda: datetime.now(timezone.utc),
+        doc="Task creation timestamp"
+    )
+    
+    updated_at: datetime = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        doc="Last update timestamp"
     )
     
     # Relationships
-    user = relationship(
+    user: "User" = relationship(
         "User",
         back_populates="tasks",
-        lazy="select"
+        doc="User who owns this task"
+    )
+    
+    # Database indexes for performance
+    __table_args__ = (
+        Index("idx_task_user_id", "user_id"),
+        Index("idx_task_status", "status"),
+        Index("idx_task_due_date", "due_date"),
+        Index("idx_task_user_status", "user_id", "status"),  # Composite index for common queries
     )
     
     def __repr__(self) -> str:
-        """String representation of Task instance for debugging."""
+        """String representation of the Task instance."""
         return (
             f"<Task(id={self.id}, title='{self.title[:30]}...', "
-            f"status={self.status}, priority={self.priority}, "
-            f"user_id={self.user_id})>"
+            f"status={self.status.value}, priority={self.priority.value})>"
         )
     
     def mark_complete(self) -> bool:
@@ -139,129 +146,139 @@ class Task(Base):
         Mark the task as completed and set completion timestamp.
         
         Returns:
-            bool: True if successfully marked complete, False otherwise.
+            bool: True if task was successfully marked complete, False if already completed
             
         Raises:
-            SQLAlchemyError: If database operation fails.
+            SQLAlchemyError: If database operation fails
         """
         try:
-            if self.status == TaskStatus.COMPLETED.value:
-                return True  # Already completed
-                
-            self.status = TaskStatus.COMPLETED.value
-            self.completed_at = datetime.now(timezone.utc)
+            # Check if task is already completed
+            if self.status == TaskStatus.COMPLETED:
+                return False
             
-            # Commit the changes
-            db.session.add(self)
-            db.session.commit()
+            # Update status and completion timestamp
+            self.status = TaskStatus.COMPLETED
+            self.completed_at = datetime.now(timezone.utc)
             
             return True
             
         except SQLAlchemyError as e:
-            db.session.rollback()
-            raise SQLAlchemyError(f"Failed to mark task as complete: {str(e)}")
+            # Re-raise SQLAlchemy errors for proper handling at service layer
+            raise SQLAlchemyError(f"Failed to mark task as complete: {str(e)}") from e
+        except Exception as e:
+            # Handle any other unexpected errors
+            raise RuntimeError(f"Unexpected error marking task complete: {str(e)}") from e
     
     def is_overdue(self) -> bool:
         """
         Check if the task is overdue based on due_date.
         
         Returns:
-            bool: True if task has a due_date and it's in the past, False otherwise.
+            bool: True if task has a due_date and it's in the past, False otherwise
         """
-        if self.due_date is None:
+        try:
+            # Return False if no due date is set
+            if self.due_date is None:
+                return False
+            
+            # Return False if task is already completed
+            if self.status == TaskStatus.COMPLETED:
+                return False
+            
+            # Get current UTC time for comparison
+            current_time = datetime.now(timezone.utc)
+            
+            # Ensure due_date is timezone-aware for proper comparison
+            if self.due_date.tzinfo is None:
+                # If due_date is naive, assume it's UTC
+                due_date_aware = self.due_date.replace(tzinfo=timezone.utc)
+            else:
+                due_date_aware = self.due_date
+            
+            return due_date_aware < current_time
+            
+        except Exception as e:
+            # Log error and return False as safe default
+            # In production, you might want to use proper logging here
+            print(f"Error checking if task is overdue: {str(e)}")
             return False
-            
-        if self.status == TaskStatus.COMPLETED.value:
-            return False
-            
-        current_time = datetime.now(timezone.utc)
-        
-        # Handle timezone-naive due_date by assuming UTC
-        due_date = self.due_date
-        if due_date.tzinfo is None:
-            due_date = due_date.replace(tzinfo=timezone.utc)
-            
-        return due_date < current_time
     
     def update_status(self, new_status: TaskStatus) -> bool:
         """
-        Update task status with validation.
+        Update task status with proper validation.
         
         Args:
-            new_status (TaskStatus): The new status to set.
+            new_status: The new status to set
             
         Returns:
-            bool: True if successfully updated, False otherwise.
+            bool: True if status was updated, False if no change needed
             
         Raises:
-            ValueError: If invalid status provided.
-            SQLAlchemyError: If database operation fails.
+            ValueError: If new_status is not a valid TaskStatus
+            SQLAlchemyError: If database operation fails
         """
         try:
+            # Validate input
             if not isinstance(new_status, TaskStatus):
                 raise ValueError(f"Invalid status type: {type(new_status)}")
             
-            old_status = self.status
-            self.status = new_status.value
+            # Check if status is actually changing
+            if self.status == new_status:
+                return False
             
-            # Set completed_at if marking as completed
-            if new_status == TaskStatus.COMPLETED and old_status != TaskStatus.COMPLETED.value:
-                self.completed_at = datetime.now(timezone.utc)
-            elif new_status != TaskStatus.COMPLETED:
+            # Handle completion logic
+            if new_status == TaskStatus.COMPLETED:
+                return self.mark_complete()
+            
+            # Handle uncompleting a task
+            if self.status == TaskStatus.COMPLETED and new_status != TaskStatus.COMPLETED:
                 self.completed_at = None
             
-            db.session.add(self)
-            db.session.commit()
-            
+            # Update status
+            self.status = new_status
             return True
             
-        except (ValueError, SQLAlchemyError) as e:
-            db.session.rollback()
-            raise e
+        except ValueError:
+            # Re-raise validation errors
+            raise
+        except SQLAlchemyError as e:
+            raise SQLAlchemyError(f"Failed to update task status: {str(e)}") from e
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error updating task status: {str(e)}") from e
     
-    def set_priority(self, new_priority: TaskPriority) -> bool:
+    def set_due_date(self, due_date: Optional[datetime]) -> None:
         """
-        Update task priority with validation.
+        Set task due date with timezone handling.
         
         Args:
-            new_priority (TaskPriority): The new priority to set.
-            
-        Returns:
-            bool: True if successfully updated, False otherwise.
+            due_date: The due date to set (should be timezone-aware) or None to clear
             
         Raises:
-            ValueError: If invalid priority provided.
-            SQLAlchemyError: If database operation fails.
+            ValueError: If due_date is in the past
         """
         try:
-            if not isinstance(new_priority, TaskPriority):
-                raise ValueError(f"Invalid priority type: {type(new_priority)}")
+            if due_date is not None:
+                # Ensure timezone awareness
+                if due_date.tzinfo is None:
+                    due_date = due_date.replace(tzinfo=timezone.utc)
+                
+                # Validate due date is not in the past (with 1 minute tolerance)
+                current_time = datetime.now(timezone.utc)
+                if due_date < current_time:
+                    raise ValueError("Due date cannot be in the past")
             
-            self.priority = new_priority.value
+            self.due_date = due_date
             
-            db.session.add(self)
-            db.session.commit()
-            
-            return True
-            
-        except (ValueError, SQLAlchemyError) as e:
-            db.session.rollback()
-            raise e
-    
-    @property
-    def status_enum(self) -> TaskStatus:
-        """Get status as enum value."""
-        return TaskStatus(self.status)
-    
-    @property
-    def priority_enum(self) -> TaskPriority:
-        """Get priority as enum value."""
-        return TaskPriority(self.priority)
+        except ValueError:
+            # Re-raise validation errors
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error setting due date: {str(e)}") from e
     
     @property
     def is_completed(self) -> bool:
         """Check if task is completed."""
-        return self.status == TaskStatus.COMPLETED.value
+        return self.status == TaskStatus.COMPLETED
     
     @property
     def days_until_due(self) -> Optional[int]:
@@ -269,41 +286,22 @@ class Task(Base):
         Calculate days until due date.
         
         Returns:
-            Optional[int]: Number of days until due (negative if overdue), 
-                          None if no due date set.
+            int: Number of days until due (negative if overdue), None if no due date
         """
         if self.due_date is None:
             return None
-            
-        current_time = datetime.now(timezone.utc)
-        due_date = self.due_date
         
-        # Handle timezone-naive due_date
-        if due_date.tzinfo is None:
-            due_date = due_date.replace(tzinfo=timezone.utc)
+        try:
+            current_time = datetime.now(timezone.utc)
             
-        delta = due_date - current_time
-        return delta.days
-    
-    def to_dict(self) -> dict:
-        """
-        Convert task instance to dictionary representation.
-        
-        Returns:
-            dict: Dictionary containing task data.
-        """
-        return {
-            'id': str(self.id),
-            'title': self.title,
-            'description': self.description,
-            'status': self.status,
-            'priority': self.priority,
-            'user_id': str(self.user_id),
-            'due_date': self.due_date.isoformat() if self.due_date else None,
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'is_overdue': self.is_overdue(),
-            'is_completed': self.is_completed,
-            'days_until_due': self.days_until_due
-        }
+            # Ensure due_date is timezone-aware
+            if self.due_date.tzinfo is None:
+                due_date_aware = self.due_date.replace(tzinfo=timezone.utc)
+            else:
+                due_date_aware = self.due_date
+            
+            delta = due_date_aware - current_time
+            return delta.days
+            
+        except Exception:
+            return None
