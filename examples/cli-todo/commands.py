@@ -1,75 +1,85 @@
 """
-CLI command functions for todo application.
+CLI Commands Module
 
-This module implements the core command-line interface functions for managing todos,
-including adding, listing, completing, removing, and displaying help information.
+This module implements command-line interface commands for a todo application.
+Each command function handles argument parsing, validation, and user feedback.
 """
 
 import app
 import utils
 from datetime import datetime
+from typing import List, Optional, Tuple
 
 
-def add(args):
+def add(args: List[str]) -> None:
     """
     Add a new todo item with optional priority.
     
+    Usage: add [--priority high|medium|low] <task description>
+    
     Args:
-        args (list): Command-line arguments containing todo text and optional --priority flag
-        
-    Usage:
-        add Buy groceries
-        add --priority high Fix critical bug
-        add Complete project --priority medium
+        args: Command line arguments
     """
     if not args:
-        print("Error: No todo text provided")
-        print("Usage: add <todo_text> [--priority <level>]")
+        print("Error: Task description is required")
+        print("Usage: add [--priority high|medium|low] <task description>")
         return
     
-    priority = None
-    todo_text_parts = []
+    priority = "medium"  # default priority
+    task_parts = []
     
-    # Parse arguments for priority flag and todo text
+    # Parse arguments
     i = 0
     while i < len(args):
-        if args[i] == '--priority' and i + 1 < len(args):
-            priority = args[i + 1]
-            i += 2  # Skip both --priority and its value
+        if args[i] == "--priority":
+            if i + 1 >= len(args):
+                print("Error: --priority flag requires a value (high|medium|low)")
+                return
+            priority_value = args[i + 1].lower()
+            if priority_value not in ["high", "medium", "low"]:
+                print("Error: Priority must be one of: high, medium, low")
+                return
+            priority = priority_value
+            i += 2
         else:
-            todo_text_parts.append(args[i])
+            task_parts.append(args[i])
             i += 1
     
-    # Join remaining arguments as todo text
-    todo_text = ' '.join(todo_text_parts).strip()
-    
-    if not todo_text:
-        print("Error: No todo text provided")
-        print("Usage: add <todo_text> [--priority <level>]")
+    if not task_parts:
+        print("Error: Task description is required")
         return
     
+    task_text = " ".join(task_parts)
+    
     try:
-        todo_id = app.add_todo(todo_text, priority)
-        priority_str = f" (Priority: {priority})" if priority else ""
-        print(f"Added: #{todo_id} - {todo_text}{priority_str}")
+        todo_id = app.add_todo(task_text, priority=priority)
+        print(f"Added: #{todo_id} - {task_text}")
     except Exception as e:
         print(f"Error adding todo: {e}")
 
 
-def list(args):
+def list(args: List[str]) -> None:
     """
-    List todos with optional filtering.
+    List todo items with optional filtering.
+    
+    Usage: list [--all] [--done]
     
     Args:
-        args (list): Command-line arguments containing optional --all or --done flags
-        
-    Usage:
-        list           # Show incomplete todos only
-        list --all     # Show all todos
-        list --done    # Show completed todos only
+        args: Command line arguments
     """
-    show_all = '--all' in args
-    show_done = '--done' in args
+    show_all = False
+    show_done_only = False
+    
+    # Parse flags
+    for arg in args:
+        if arg == "--all":
+            show_all = True
+        elif arg == "--done":
+            show_done_only = True
+        else:
+            print(f"Error: Unknown flag '{arg}'")
+            print("Usage: list [--all] [--done]")
+            return
     
     try:
         todos = app.load_todos()
@@ -79,75 +89,70 @@ def list(args):
             return
         
         # Filter todos based on flags
-        if show_done:
-            filtered_todos = [todo for todo in todos if todo.get('done', False)]
-            if not filtered_todos:
+        filtered_todos = []
+        for todo in todos:
+            if show_done_only and not todo.get('done', False):
+                continue
+            if not show_all and not show_done_only and todo.get('done', False):
+                continue
+            filtered_todos.append(todo)
+        
+        if not filtered_todos:
+            if show_done_only:
                 print("No completed todos found.")
-                return
-        elif show_all:
-            filtered_todos = todos
-        else:
-            # Default: show incomplete todos only
-            filtered_todos = [todo for todo in todos if not todo.get('done', False)]
-            if not filtered_todos:
-                print("No incomplete todos found.")
-                return
+            else:
+                print("No pending todos found.")
+            return
         
         # Prepare data for table formatting
         table_data = []
-        headers = ['ID', 'Status', 'Description', 'Priority', 'Created', 'Completed']
+        headers = ["ID", "Status", "Priority", "Task", "Created"]
         
         for todo in filtered_todos:
-            status = '[✓]' if todo.get('done', False) else '[ ]'
-            priority = todo.get('priority', 'None')
-            created = todo.get('created', 'Unknown')
-            completed = todo.get('completed', '') if todo.get('done', False) else ''
+            status = "[✓]" if todo.get('done', False) else "[ ]"
+            priority = todo.get('priority', 'medium').upper()
+            task = todo.get('text', '')
+            created = todo.get('created', '')
+            
+            # Format created date if it's a datetime string
+            if created:
+                try:
+                    dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                    created = dt.strftime('%Y-%m-%d %H:%M')
+                except:
+                    pass
             
             table_data.append([
-                str(todo['id']),
+                str(todo.get('id', '')),
                 status,
-                todo['description'],
                 priority,
-                created,
-                completed
+                task,
+                created
             ])
         
-        # Display todos in table format
-        utils.format_table(headers, table_data)
+        # Display formatted table
+        formatted_output = utils.format_table(headers, table_data)
+        print(formatted_output)
         
-        # Show summary
-        total_count = len(todos)
-        done_count = len([t for t in todos if t.get('done', False)])
-        incomplete_count = total_count - done_count
-        
-        if show_all:
-            print(f"\nTotal: {total_count} todos ({done_count} completed, {incomplete_count} incomplete)")
-        elif show_done:
-            print(f"\nShowing {len(filtered_todos)} completed todos")
-        else:
-            print(f"\nShowing {len(filtered_todos)} incomplete todos")
-            
     except Exception as e:
         print(f"Error loading todos: {e}")
 
 
-def done(args):
+def done(args: List[str]) -> None:
     """
-    Mark one or more todos as completed.
+    Mark todo items as completed.
+    
+    Usage: done <id1> [id2] [id3] ...
     
     Args:
-        args (list): Command-line arguments containing todo ID(s)
-        
-    Usage:
-        done 1         # Mark todo #1 as completed
-        done 1 3 5     # Mark multiple todos as completed
+        args: Command line arguments containing todo IDs
     """
     if not args:
-        print("Error: No todo ID provided")
-        print("Usage: done <id> [<id2> <id3> ...]")
+        print("Error: At least one todo ID is required")
+        print("Usage: done <id1> [id2] [id3] ...")
         return
     
-    # Parse and validate all IDs first
+    # Parse and validate IDs
     todo_ids = []
     for arg in args:
         try:
@@ -159,185 +164,256 @@ def done(args):
     
     try:
         todos = app.load_todos()
-        existing_ids = {todo['id'] for todo in todos}
+        todos_dict = {todo['id']: todo for todo in todos}
         
-        # Validate all IDs exist before processing any
-        invalid_ids = [tid for tid in todo_ids if tid not in existing_ids]
-        if invalid_ids:
-            print(f"Error: Todo ID(s) not found: {', '.join(map(str, invalid_ids))}")
-            return
-        
-        # Process each valid ID
-        completion_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         completed_todos = []
         
-        for todo in todos:
-            if todo['id'] in todo_ids and not todo.get('done', False):
-                todo['done'] = True
-                todo['completed'] = completion_time
-                completed_todos.append(todo)
-            elif todo['id'] in todo_ids and todo.get('done', False):
-                print(f"Warning: Todo #{todo['id']} is already completed")
+        # Process each ID
+        for todo_id in todo_ids:
+            if todo_id not in todos_dict:
+                print(f"Error: Todo #{todo_id} not found")
+                continue
+            
+            todo = todos_dict[todo_id]
+            
+            if todo.get('done', False):
+                print(f"Warning: Todo #{todo_id} is already completed")
+                continue
+            
+            # Mark as done
+            todo['done'] = True
+            todo['completed_at'] = datetime.now().isoformat()
+            completed_todos.append(todo)
         
         if completed_todos:
+            # Save changes
             app.save_todos(todos)
+            
+            # Display confirmation
             for todo in completed_todos:
-                print(f"Completed: #{todo['id']} - {todo['description']}")
+                print(f"Completed: #{todo['id']} - {todo.get('text', '')}")
         
     except Exception as e:
         print(f"Error marking todos as done: {e}")
 
 
-def remove(args):
+def remove(args: List[str]) -> None:
     """
-    Remove todo(s) by ID or remove all completed todos.
+    Remove todo items by ID or remove all completed todos.
+    
+    Usage: remove <id1> [id2] [id3] ... | remove --done
     
     Args:
-        args (list): Command-line arguments containing todo ID or --done flag
-        
-    Usage:
-        remove 1       # Remove todo #1
-        remove --done  # Remove all completed todos
+        args: Command line arguments
     """
     if not args:
-        print("Error: No todo ID or flag provided")
-        print("Usage: remove <id> OR remove --done")
+        print("Error: Todo ID(s) or --done flag required")
+        print("Usage: remove <id1> [id2] [id3] ... | remove --done")
         return
     
+    # Check for --done flag
+    if len(args) == 1 and args[0] == "--done":
+        _remove_completed_todos()
+        return
+    
+    # Check for mixed arguments
+    if "--done" in args and len(args) > 1:
+        print("Error: --done flag cannot be combined with todo IDs")
+        return
+    
+    # Parse todo IDs
+    todo_ids = []
+    for arg in args:
+        if arg.startswith("--"):
+            print(f"Error: Unknown flag '{arg}'")
+            return
+        try:
+            todo_id = int(arg)
+            todo_ids.append(todo_id)
+        except ValueError:
+            print(f"Error: '{arg}' is not a valid todo ID")
+            return
+    
+    try:
+        removed_todos = []
+        
+        for todo_id in todo_ids:
+            try:
+                todo = app.get_todo(todo_id)  # Get todo before deletion for confirmation
+                app.delete_todo(todo_id)
+                removed_todos.append(todo)
+                print(f"Removed: #{todo_id} - {todo.get('text', '')}")
+            except Exception as e:
+                print(f"Error removing todo #{todo_id}: {e}")
+        
+    except Exception as e:
+        print(f"Error removing todos: {e}")
+
+
+def _remove_completed_todos() -> None:
+    """Helper function to remove all completed todos."""
     try:
         todos = app.load_todos()
+        completed_todos = [todo for todo in todos if todo.get('done', False)]
         
-        if not todos:
-            print("No todos found.")
+        if not completed_todos:
+            print("No completed todos to remove.")
             return
         
-        if '--done' in args:
-            # Remove all completed todos
-            completed_todos = [todo for todo in todos if todo.get('done', False)]
-            
-            if not completed_todos:
-                print("No completed todos to remove.")
-                return
-            
-            # Keep only incomplete todos
-            remaining_todos = [todo for todo in todos if not todo.get('done', False)]
-            app.save_todos(remaining_todos)
-            
-            print(f"Removed {len(completed_todos)} completed todo(s):")
-            for todo in completed_todos:
-                print(f"  #{todo['id']} - {todo['description']}")
+        # Remove completed todos
+        remaining_todos = [todo for todo in todos if not todo.get('done', False)]
+        app.save_todos(remaining_todos)
         
-        else:
-            # Remove specific todo by ID
-            if len(args) != 1:
-                print("Error: Please provide exactly one todo ID")
-                print("Usage: remove <id> OR remove --done")
-                return
+        print(f"Removed {len(completed_todos)} completed todo(s):")
+        for todo in completed_todos:
+            print(f"  #{todo['id']} - {todo.get('text', '')}")
             
-            try:
-                todo_id = int(args[0])
-            except ValueError:
-                print(f"Error: '{args[0]}' is not a valid todo ID")
-                return
-            
-            # Find the todo to remove
-            todo_to_remove = None
-            for todo in todos:
-                if todo['id'] == todo_id:
-                    todo_to_remove = todo
-                    break
-            
-            if not todo_to_remove:
-                print(f"Error: Todo #{todo_id} not found")
-                return
-            
-            # Remove the todo
-            success = app.delete_todo(todo_id)
-            if success:
-                print(f"Removed: #{todo_id} - {todo_to_remove['description']}")
-            else:
-                print(f"Error: Failed to remove todo #{todo_id}")
-                
     except Exception as e:
-        print(f"Error removing todo(s): {e}")
+        print(f"Error removing completed todos: {e}")
 
 
-def help(args):
+def help(args: List[str]) -> None:
     """
-    Display comprehensive help information for all commands.
+    Display help information for all commands.
     
     Args:
-        args (list): Command-line arguments (unused for help command)
+        args: Command line arguments (unused)
     """
     help_text = """
-Todo Application - Command Reference
+Todo CLI - Command Reference
+
+USAGE:
+    todo <command> [options] [arguments]
 
 COMMANDS:
-  add <text> [--priority <level>]    Add a new todo item
-  list [--all|--done]                List todos (incomplete by default)
-  done <id> [<id2> ...]              Mark todo(s) as completed
-  remove <id>                        Remove a specific todo
-  remove --done                      Remove all completed todos
-  help                               Show this help message
+    add [--priority high|medium|low] <task>
+        Add a new todo item with optional priority
+        
+        Examples:
+            todo add "Buy groceries"
+            todo add --priority high "Finish project report"
+            todo add --priority low "Clean desk"
 
-COMMAND DETAILS:
+    list [--all] [--done]
+        List todo items with optional filtering
+        
+        Options:
+            --all     Show all todos (including completed)
+            --done    Show only completed todos
+            (default) Show only pending todos
+        
+        Examples:
+            todo list
+            todo list --all
+            todo list --done
 
-  add - Add a new todo item
-    Usage: add <todo_description> [--priority <level>]
-    Examples:
-      add Buy groceries
-      add --priority high Fix critical bug
-      add Complete project report --priority medium
+    done <id1> [id2] [id3] ...
+        Mark one or more todos as completed
+        
+        Examples:
+            todo done 1
+            todo done 1 3 5
 
-  list - Display todos with optional filtering
-    Usage: list [--all|--done]
-    Options:
-      (no flags)  Show incomplete todos only (default)
-      --all       Show all todos (completed and incomplete)
-      --done      Show completed todos only
-    Examples:
-      list                    # Show incomplete todos
-      list --all              # Show all todos
-      list --done             # Show completed todos only
+    remove <id1> [id2] [id3] ... | remove --done
+        Remove todos by ID or remove all completed todos
+        
+        Options:
+            --done    Remove all completed todos
+        
+        Examples:
+            todo remove 1
+            todo remove 1 3 5
+            todo remove --done
 
-  done - Mark todos as completed
-    Usage: done <id> [<id2> <id3> ...]
-    Examples:
-      done 1                  # Mark todo #1 as completed
-      done 1 3 5              # Mark multiple todos as completed
+    help
+        Show this help message
 
-  remove - Remove todos
-    Usage: remove <id> OR remove --done
-    Examples:
-      remove 1                # Remove todo #1
-      remove --done           # Remove all completed todos
+PRIORITY LEVELS:
+    high    - High priority tasks
+    medium  - Medium priority tasks (default)
+    low     - Low priority tasks
 
-  help - Show this help information
-    Usage: help
-
-NOTES:
-  - Todo IDs are automatically assigned when adding new todos
-  - Use 'list' to see current todo IDs
-  - Completed todos show completion timestamp
-  - Priority levels are optional and can be any text (e.g., high, medium, low)
-  - All changes are automatically saved
+STATUS INDICATORS:
+    [✓]     - Completed todo
+    [ ]     - Pending todo
 
 EXAMPLES:
-  # Add some todos
-  add Buy milk --priority high
-  add Call dentist
-  add Finish homework --priority medium
-  
-  # List incomplete todos
-  list
-  
-  # Mark todo #1 as done
-  done 1
-  
-  # List all todos to see status
-  list --all
-  
-  # Remove completed todos
-  remove --done
+    # Add a high priority task
+    todo add --priority high "Submit quarterly report"
+    
+    # List all pending tasks
+    todo list
+    
+    # Mark tasks 1 and 3 as done
+    todo done 1 3
+    
+    # Show all tasks including completed
+    todo list --all
+    
+    # Remove completed tasks
+    todo remove --done
+
+For more information, visit the project documentation.
 """
     print(help_text.strip())
+
+
+def _parse_flags_and_args(args: List[str], valid_flags: List[str]) -> Tuple[List[str], List[str]]:
+    """
+    Helper function to separate flags from regular arguments.
+    
+    Args:
+        args: List of command line arguments
+        valid_flags: List of valid flag names (without --)
+    
+    Returns:
+        Tuple of (flags, remaining_args)
+    """
+    flags = []
+    remaining_args = []
+    
+    i = 0
+    while i < len(args):
+        if args[i].startswith("--"):
+            flag = args[i][2:]  # Remove --
+            if flag in valid_flags:
+                flags.append(flag)
+                # Check if flag expects a value
+                if flag in ["priority"] and i + 1 < len(args) and not args[i + 1].startswith("--"):
+                    i += 1  # Skip the flag value
+                    flags.append(args[i])
+            else:
+                remaining_args.append(args[i])
+        else:
+            remaining_args.append(args[i])
+        i += 1
+    
+    return flags, remaining_args
+
+
+def _validate_todo_ids(todo_ids: List[int]) -> List[int]:
+    """
+    Validate that todo IDs exist.
+    
+    Args:
+        todo_ids: List of todo IDs to validate
+    
+    Returns:
+        List of valid todo IDs
+    
+    Raises:
+        Exception: If any todo ID is invalid
+    """
+    try:
+        todos = app.load_todos()
+        existing_ids = {todo['id'] for todo in todos}
+        
+        valid_ids = []
+        for todo_id in todo_ids:
+            if todo_id not in existing_ids:
+                raise Exception(f"Todo #{todo_id} not found")
+            valid_ids.append(todo_id)
+        
+        return valid_ids
+    except Exception as e:
+        raise Exception(f"Error validating todo IDs: {e}")
