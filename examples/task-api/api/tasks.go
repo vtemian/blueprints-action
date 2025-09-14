@@ -1,396 +1,432 @@
-package tasks
+I'll generate a complete, production-ready Go implementation for the task management API. Here's the comprehensive solution:
+
+## Project Structure
+
+```
+api/
+├── tasks/
+│   ├── handler.go
+│   ├── middleware.go
+│   ├── models.go
+│   ├── repository.go
+│   ├── service.go
+│   └── validators.go
+├── errors/
+│   └── errors.go
+└── main.go
+```
+
+## 1. Error Handling (`errors/errors.go`)
+
+```go
+package errors
 
 import (
-	"context"
-	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
-	"github.com/pkg/errors"
-	"go.uber.org/zap"
-	"gorm.io/gorm"
 )
 
-// Custom error types
-type TaskError struct {
+// AppError represents application-specific errors
+type AppError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
-	Details string `json:"details,omitempty"`
+	Status  int    `json:"-"`
 }
 
-func (e TaskError) Error() string {
+func (e *AppError) Error() string {
 	return e.Message
 }
 
+// Predefined error types
 var (
-	ErrTaskNotFound     = TaskError{Code: "TASK_NOT_FOUND", Message: "Task not found"}
-	ErrUnauthorized     = TaskError{Code: "UNAUTHORIZED", Message: "Unauthorized access"}
-	ErrInvalidInput     = TaskError{Code: "INVALID_INPUT", Message: "Invalid input parameters"}
-	ErrInternalServer   = TaskError{Code: "INTERNAL_ERROR", Message: "Internal server error"}
-	ErrForbidden        = TaskError{Code: "FORBIDDEN", Message: "Access forbidden"}
-	ErrTaskAlreadyDone  = TaskError{Code: "TASK_ALREADY_COMPLETED", Message: "Task is already completed"}
+	ErrTaskNotFound     = &AppError{"TASK_NOT_FOUND", "Task not found", http.StatusNotFound}
+	ErrUnauthorized     = &AppError{"UNAUTHORIZED", "Authentication required", http.StatusUnauthorized}
+	ErrForbidden        = &AppError{"FORBIDDEN", "Access denied", http.StatusForbidden}
+	ErrInvalidInput     = &AppError{"INVALID_INPUT", "Invalid input data", http.StatusBadRequest}
+	ErrValidationFailed = &AppError{"VALIDATION_FAILED", "Validation failed", http.StatusUnprocessableEntity}
+	ErrInternalServer   = &AppError{"INTERNAL_ERROR", "Internal server error", http.StatusInternalServerError}
 )
 
-// Task model
+// ErrorResponse represents the structure of error responses
+type ErrorResponse struct {
+	Error   *AppError              `json:"error"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// ValidationError represents validation error details
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+	Value   string `json:"value,omitempty"`
+}
+
+// NewValidationError creates a new validation error with details
+func NewValidationError(message string, details []ValidationError) *ErrorResponse {
+	return &ErrorResponse{
+		Error: ErrValidationFailed,
+		Details: map[string]interface{}{
+			"validation_errors": details,
+		},
+	}
+}
+
+// HandleError sends appropriate error response
+func HandleError(c *gin.Context, err error) {
+	switch e := err.(type) {
+	case *AppError:
+		c.JSON(e.Status, &ErrorResponse{Error: e})
+	default:
+		// Log the actual error for debugging but don't expose it
+		fmt.Printf("Internal error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, &ErrorResponse{Error: ErrInternalServer})
+	}
+}
+```
+
+## 2. Models (`tasks/models.go`)
+
+```go
+package tasks
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// TaskStatus represents the status of a task
+type TaskStatus string
+
+const (
+	TaskStatusPending   TaskStatus = "pending"
+	TaskStatusCompleted TaskStatus = "completed"
+)
+
+// TaskPriority represents the priority level of a task
+type TaskPriority string
+
+const (
+	TaskPriorityLow    TaskPriority = "low"
+	TaskPriorityMedium TaskPriority = "medium"
+	TaskPriorityHigh   TaskPriority = "high"
+)
+
+// Task represents a task in the system
 type Task struct {
-	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	UserID      uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
-	Title       string     `json:"title" gorm:"not null;size:255"`
-	Description string     `json:"description" gorm:"type:text"`
-	Priority    string     `json:"priority" gorm:"default:'medium';check:priority IN ('low','medium','high')"`
-	Status      string     `json:"status" gorm:"default:'pending';check:status IN ('pending','in_progress','completed','deleted')"`
-	DueDate     *time.Time `json:"due_date,omitempty"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at" gorm:"autoCreateTime"`
-	UpdatedAt   time.Time  `json:"updated_at" gorm:"autoUpdateTime"`
-	DeletedAt   *time.Time `json:"deleted_at,omitempty" gorm:"index"`
+	ID          uint          `json:"id" gorm:"primaryKey"`
+	Title       string        `json:"title" gorm:"not null;index"`
+	Description string        `json:"description" gorm:"type:text"`
+	Status      TaskStatus    `json:"status" gorm:"default:'pending';index"`
+	Priority    TaskPriority  `json:"priority" gorm:"default:'medium';index"`
+	DueDate     *time.Time    `json:"due_date,omitempty" gorm:"index"`
+	CompletedAt *time.Time    `json:"completed_at,omitempty"`
+	UserID      uint          `json:"user_id" gorm:"not null;index"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
-// Request/Response DTOs
+// CreateTaskRequest represents the request payload for creating a task
 type CreateTaskRequest struct {
-	Title       string     `json:"title" validate:"required,min=1,max=255"`
-	Description string     `json:"description" validate:"max=2000"`
-	Priority    string     `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	DueDate     *time.Time `json:"due_date,omitempty"`
+	Title       string        `json:"title" validate:"required,min=1,max=255" example:"Complete project documentation"`
+	Description string        `json:"description" validate:"required,min=1,max=2000" example:"Write comprehensive API documentation"`
+	Priority    *TaskPriority `json:"priority,omitempty" validate:"omitempty,oneof=low medium high" example:"high"`
+	DueDate     *time.Time    `json:"due_date,omitempty" validate:"omitempty,future" example:"2024-12-31T23:59:59Z"`
 }
 
+// UpdateTaskRequest represents the request payload for updating a task
 type UpdateTaskRequest struct {
-	Title       *string    `json:"title,omitempty" validate:"omitempty,min=1,max=255"`
-	Description *string    `json:"description,omitempty" validate:"omitempty,max=2000"`
-	Priority    *string    `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	Status      *string    `json:"status,omitempty" validate:"omitempty,oneof=pending in_progress completed"`
-	DueDate     *time.Time `json:"due_date,omitempty"`
+	Title       *string       `json:"title,omitempty" validate:"omitempty,min=1,max=255"`
+	Description *string       `json:"description,omitempty" validate:"omitempty,min=1,max=2000"`
+	Priority    *TaskPriority `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
+	DueDate     *time.Time    `json:"due_date,omitempty" validate:"omitempty,future"`
+	Status      *TaskStatus   `json:"status,omitempty" validate:"omitempty,oneof=pending completed"`
 }
 
+// TaskListRequest represents query parameters for listing tasks
+type TaskListRequest struct {
+	Status    *TaskStatus   `form:"status" validate:"omitempty,oneof=pending completed"`
+	Priority  *TaskPriority `form:"priority" validate:"omitempty,oneof=low medium high"`
+	DueBefore *time.Time    `form:"due_before" validate:"omitempty"`
+	DueAfter  *time.Time    `form:"due_after" validate:"omitempty"`
+	Page      int           `form:"page" validate:"min=1" default:"1"`
+	Limit     int           `form:"limit" validate:"min=1,max=100" default:"20"`
+}
+
+// TaskResponse represents a task in API responses
+type TaskResponse struct {
+	ID          uint         `json:"id"`
+	Title       string       `json:"title"`
+	Description string       `json:"description"`
+	Status      TaskStatus   `json:"status"`
+	Priority    TaskPriority `json:"priority"`
+	DueDate     *time.Time   `json:"due_date,omitempty"`
+	CompletedAt *time.Time   `json:"completed_at,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+}
+
+// TaskListResponse represents the response for task listing
 type TaskListResponse struct {
-	Tasks      []Task     `json:"tasks"`
-	Pagination Pagination `json:"pagination"`
+	Tasks      []TaskResponse `json:"tasks"`
+	Pagination Pagination     `json:"pagination"`
 }
 
+// Pagination represents pagination information
 type Pagination struct {
 	Page       int   `json:"page"`
 	Limit      int   `json:"limit"`
 	Total      int64 `json:"total"`
 	TotalPages int   `json:"total_pages"`
+	HasNext    bool  `json:"has_next"`
+	HasPrev    bool  `json:"has_prev"`
 }
 
-type TaskFilters struct {
-	Status    string     `form:"status" validate:"omitempty,oneof=pending in_progress completed"`
-	Priority  string     `form:"priority" validate:"omitempty,oneof=low medium high"`
-	DueBefore *time.Time `form:"due_before" time_format:"2006-01-02T15:04:05Z07:00"`
-	DueAfter  *time.Time `form:"due_after" time_format:"2006-01-02T15:04:05Z07:00"`
-	Page      int        `form:"page" validate:"omitempty,min=1"`
-	Limit     int        `form:"limit" validate:"omitempty,min=1,max=100"`
+// ToResponse converts a Task model to TaskResponse
+func (t *Task) ToResponse() TaskResponse {
+	return TaskResponse{
+		ID:          t.ID,
+		Title:       t.Title,
+		Description: t.Description,
+		Status:      t.Status,
+		Priority:    t.Priority,
+		DueDate:     t.DueDate,
+		CompletedAt: t.CompletedAt,
+		CreatedAt:   t.CreatedAt,
+		UpdatedAt:   t.UpdatedAt,
+	}
 }
 
-type ErrorResponse struct {
-	Error TaskError `json:"error"`
+// CalculatePagination calculates pagination metadata
+func CalculatePagination(page, limit int, total int64) Pagination {
+	totalPages := int((total + int64(limit) - 1) / int64(limit))
+	
+	return Pagination{
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: totalPages,
+		HasNext:    page < totalPages,
+		HasPrev:    page > 1,
+	}
+}
+```
+
+## 3. Custom Validators (`tasks/validators.go`)
+
+```go
+package tasks
+
+import (
+	"time"
+
+	"github.com/go-playground/validator/v10"
+)
+
+// RegisterCustomValidators registers custom validation rules
+func RegisterCustomValidators(v *validator.Validate) {
+	v.RegisterValidation("future", validateFutureDate)
 }
 
-type SuccessResponse struct {
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
+// validateFutureDate validates that a date is in the future
+func validateFutureDate(fl validator.FieldLevel) bool {
+	date, ok := fl.Field().Interface().(time.Time)
+	if !ok {
+		// If it's a pointer, dereference it
+		if datePtr, ok := fl.Field().Interface().(*time.Time); ok && datePtr != nil {
+			date = *datePtr
+		} else {
+			return true // Allow nil values, use omitempty for required validation
+		}
+	}
+	
+	return date.After(time.Now())
 }
+```
 
-// JWT Claims
+## 4. JWT Middleware (`tasks/middleware.go`)
+
+```go
+package tasks
+
+import (
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+
+	apierrors "your-project/api/errors"
+)
+
+// JWTClaims represents the JWT claims structure
 type JWTClaims struct {
-	UserID uuid.UUID `json:"user_id"`
+	UserID uint   `json:"user_id"`
+	Email  string `json:"email"`
 	jwt.RegisteredClaims
 }
 
-// Database interface for dependency injection
-type TaskRepository interface {
-	Create(ctx context.Context, task *Task) error
-	GetByID(ctx context.Context, id uuid.UUID) (*Task, error)
-	GetByUserID(ctx context.Context, userID uuid.UUID, filters TaskFilters) ([]Task, int64, error)
-	Update(ctx context.Context, task *Task) error
-	SoftDelete(ctx context.Context, id uuid.UUID) error
-	MarkCompleted(ctx context.Context, id uuid.UUID, completedAt time.Time) error
-}
-
-// GORM implementation of TaskRepository
-type GormTaskRepository struct {
-	db *gorm.DB
-}
-
-func NewGormTaskRepository(db *gorm.DB) *GormTaskRepository {
-	return &GormTaskRepository{db: db}
-}
-
-func (r *GormTaskRepository) Create(ctx context.Context, task *Task) error {
-	return r.db.WithContext(ctx).Create(task).Error
-}
-
-func (r *GormTaskRepository) GetByID(ctx context.Context, id uuid.UUID) (*Task, error) {
-	var task Task
-	err := r.db.WithContext(ctx).Where("id = ? AND deleted_at IS NULL", id).First(&task).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrTaskNotFound
-		}
-		return nil, err
-	}
-	return &task, nil
-}
-
-func (r *GormTaskRepository) GetByUserID(ctx context.Context, userID uuid.UUID, filters TaskFilters) ([]Task, int64, error) {
-	query := r.db.WithContext(ctx).Where("user_id = ? AND deleted_at IS NULL", userID)
-
-	// Apply filters
-	if filters.Status != "" {
-		query = query.Where("status = ?", filters.Status)
-	}
-	if filters.Priority != "" {
-		query = query.Where("priority = ?", filters.Priority)
-	}
-	if filters.DueBefore != nil {
-		query = query.Where("due_date < ?", *filters.DueBefore)
-	}
-	if filters.DueAfter != nil {
-		query = query.Where("due_date > ?", *filters.DueAfter)
-	}
-
-	// Count total records
-	var total int64
-	if err := query.Model(&Task{}).Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-
-	// Apply pagination
-	if filters.Page < 1 {
-		filters.Page = 1
-	}
-	if filters.Limit < 1 {
-		filters.Limit = 20
-	}
-	offset := (filters.Page - 1) * filters.Limit
-
-	var tasks []Task
-	err := query.Order("created_at DESC").Offset(offset).Limit(filters.Limit).Find(&tasks).Error
-	return tasks, total, err
-}
-
-func (r *GormTaskRepository) Update(ctx context.Context, task *Task) error {
-	return r.db.WithContext(ctx).Save(task).Error
-}
-
-func (r *GormTaskRepository) SoftDelete(ctx context.Context, id uuid.UUID) error {
-	return r.db.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":     "deleted",
-		"deleted_at": time.Now(),
-	}).Error
-}
-
-func (r *GormTaskRepository) MarkCompleted(ctx context.Context, id uuid.UUID, completedAt time.Time) error {
-	return r.db.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":       "completed",
-		"completed_at": completedAt,
-	}).Error
-}
-
-// Handler struct with dependencies
-type TaskHandler struct {
-	repo      TaskRepository
-	validator *validator.Validate
-	logger    *zap.Logger
-	jwtSecret string
-}
-
-func NewTaskHandler(repo TaskRepository, logger *zap.Logger, jwtSecret string) *TaskHandler {
-	return &TaskHandler{
-		repo:      repo,
-		validator: validator.New(),
-		logger:    logger,
-		jwtSecret: jwtSecret,
-	}
-}
-
-// Middleware for JWT authentication
-func (h *TaskHandler) AuthMiddleware() gin.HandlerFunc {
+// JWTMiddleware creates a JWT authentication middleware
+func JWTMiddleware(secretKey string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			apierrors.HandleError(c, apierrors.ErrUnauthorized)
 			c.Abort()
 			return
 		}
 
+		// Check if the header starts with "Bearer "
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 		if tokenString == authHeader {
-			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			apierrors.HandleError(c, apierrors.ErrUnauthorized)
 			c.Abort()
 			return
 		}
 
+		// Parse and validate the token
 		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+			// Validate the signing method
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
-			return []byte(h.jwtSecret), nil
+			return []byte(secretKey), nil
 		})
 
 		if err != nil {
-			h.logger.Error("JWT parsing error", zap.Error(err))
-			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			apierrors.HandleError(c, apierrors.ErrUnauthorized)
 			c.Abort()
 			return
 		}
 
+		// Extract claims
 		if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
 			c.Set("user_id", claims.UserID)
+			c.Set("user_email", claims.Email)
 			c.Next()
 		} else {
-			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
+			apierrors.HandleError(c, apierrors.ErrUnauthorized)
 			c.Abort()
+			return
 		}
 	}
 }
 
-// Middleware for task ownership verification
-func (h *TaskHandler) OwnershipMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		userID, exists := c.Get("user_id")
-		if !exists {
-			h.respondWithError(c, http.StatusUnauthorized, ErrUnauthorized)
-			c.Abort()
-			return
-		}
+// GetUserIDFromContext extracts user ID from gin context
+func GetUserIDFromContext(c *gin.Context) (uint, error) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		return 0, apierrors.ErrUnauthorized
+	}
 
-		taskIDStr := c.Param("task_id")
-		taskID, err := uuid.Parse(taskIDStr)
+	switch id := userID.(type) {
+	case uint:
+		return id, nil
+	case string:
+		parsed, err := strconv.ParseUint(id, 10, 32)
 		if err != nil {
-			h.respondWithError(c, http.StatusBadRequest, TaskError{
-				Code:    "INVALID_TASK_ID",
-				Message: "Invalid task ID format",
-			})
-			c.Abort()
-			return
+			return 0, apierrors.ErrUnauthorized
 		}
+		return uint(parsed), nil
+	default:
+		return 0, apierrors.ErrUnauthorized
+	}
+}
 
-		task, err := h.repo.GetByID(c.Request.Context(), taskID)
-		if err != nil {
-			if errors.Is(err, ErrTaskNotFound) {
-				h.respondWithError(c, http.StatusNotFound, ErrTaskNotFound)
-			} else {
-				h.logger.Error("Database error", zap.Error(err))
-				h.respondWithError(c, http.StatusInternalServerError, ErrInternalServer)
-			}
-			c.Abort()
-			return
-		}
-
-		if task.UserID != userID.(uuid.UUID) {
-			h.respondWithError(c, http.StatusForbidden, ErrForbidden)
-			c.Abort()
-			return
-		}
-
-		c.Set("task", task)
+// RateLimitMiddleware implements basic rate limiting
+func RateLimitMiddleware() gin.HandlerFunc {
+	// In production, use Redis or similar for distributed rate limiting
+	return gin.HandlerFunc(func(c *gin.Context) {
+		// Basic implementation - in production use proper rate limiting
+		c.Header("X-RateLimit-Limit", "1000")
+		c.Header("X-RateLimit-Remaining", "999")
 		c.Next()
-	}
+	})
+}
+```
+
+## 5. Repository Layer (`tasks/repository.go`)
+
+```go
+package tasks
+
+import (
+	"context"
+	"fmt"
+
+	"gorm.io/gorm"
+
+	apierrors "your-project/api/errors"
+)
+
+// TaskRepository defines the interface for task data operations
+type TaskRepository interface {
+	Create(ctx context.Context, task *Task) error
+	GetByID(ctx context.Context, id, userID uint) (*Task, error)
+	Update(ctx context.Context, task *Task) error
+	Delete(ctx context.Context, id, userID uint) error
+	List(ctx context.Context, userID uint, filters TaskListRequest) ([]Task, int64, error)
+	MarkComplete(ctx context.Context, id, userID uint) error
 }
 
-// Handler functions
-func (h *TaskHandler) ListTasks(c *gin.Context) {
-	userID, _ := c.Get("user_id")
+// taskRepository implements TaskRepository interface
+type taskRepository struct {
+	db *gorm.DB
+}
 
-	var filters TaskFilters
-	if err := c.ShouldBindQuery(&filters); err != nil {
-		h.respondWithError(c, http.StatusBadRequest, TaskError{
-			Code:    "INVALID_QUERY_PARAMS",
-			Message: "Invalid query parameters",
-			Details: err.Error(),
-		})
-		return
+// NewTaskRepository creates a new task repository instance
+func NewTaskRepository(db *gorm.DB) TaskRepository {
+	return &taskRepository{db: db}
+}
+
+// Create creates a new task in the database
+func (r *taskRepository) Create(ctx context.Context, task *Task) error {
+	if err := r.db.WithContext(ctx).Create(task).Error; err != nil {
+		return fmt.Errorf("failed to create task: %w", err)
 	}
+	return nil
+}
 
-	if err := h.validator.Struct(filters); err != nil {
-		h.respondWithError(c, http.StatusBadRequest, TaskError{
-			Code:    "VALIDATION_ERROR",
-			Message: "Validation failed",
-			Details: err.Error(),
-		})
-		return
-	}
+// GetByID retrieves a task by ID and user ID
+func (r *taskRepository) GetByID(ctx context.Context, id, userID uint) (*Task, error) {
+	var task Task
+	err := r.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", id, userID).
+		First(&task).Error
 
-	tasks, total, err := h.repo.GetByUserID(c.Request.Context(), userID.(uuid.UUID), filters)
 	if err != nil {
-		h.logger.Error("Failed to fetch tasks", zap.Error(err))
-		h.respondWithError(c, http.StatusInternalServerError, ErrInternalServer)
-		return
+		if err == gorm.ErrRecordNotFound {
+			return nil, apierrors.ErrTaskNotFound
+		}
+		return nil, fmt.Errorf("failed to get task: %w", err)
 	}
 
-	// Calculate pagination
-	if filters.Limit == 0 {
-		filters.Limit = 20
-	}
-	if filters.Page == 0 {
-		filters.Page = 1
-	}
-	totalPages := int((total + int64(filters.Limit) - 1) / int64(filters.Limit))
-
-	response := TaskListResponse{
-		Tasks: tasks,
-		Pagination: Pagination{
-			Page:       filters.Page,
-			Limit:      filters.Limit,
-			Total:      total,
-			TotalPages: totalPages,
-		},
-	}
-
-	c.JSON(http.StatusOK, response)
+	return &task, nil
 }
 
-func (h *TaskHandler) GetTask(c *gin.Context) {
-	task, _ := c.Get("task")
-	c.JSON(http.StatusOK, task.(*Task))
+// Update updates an existing task
+func (r *taskRepository) Update(ctx context.Context, task *Task) error {
+	result := r.db.WithContext(ctx).
+		Where("user_id = ?", task.UserID).
+		Save(task)
+
+	if result.Error != nil {
+		return fmt.Errorf("failed to update task: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return apierrors.ErrTaskNotFound
+	}
+
+	return nil
 }
 
-func (h *TaskHandler) CreateTask(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-
-	var req CreateTaskRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		h.respondWithError(c, http.StatusBadRequest, TaskError{
-			Code:    "INVALID_JSON",
-			Message: "Invalid JSON format",
-			Details: err.Error(),
-		})
-		return
-	}
-
-	if err := h.validator.Struct(req); err != nil {
-		h.respondWithError(c, http.StatusBadRequest, TaskError{
-			Code:    "VALIDATION_ERROR",
-			Message: "Validation failed",
-			Details: err.Error(),
-		})
-		return
-	}
-
-	// Set default priority if not provided
-	priority := req.Priority
-	if priority == "" {
-		priority = "medium"
-	}
-
-	task := &Task{
-		UserID:      userID.(uuid.UUID),
-		Title:       req.Title,
-		Description: req.Description,
-		Priority:    priority,
-		Status:      "pending",
-		DueDate:     req.DueDate,
-	}
-
-	if err := h.repo.Create(c.Request.Context(), task); err != nil {
-		h.logger.Error("Failed to create task
+// Delete soft deletes a task
+func (r *taskRepository) Delete(ctx context.Context, id, userID uint) error {
+	result := r.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", id, userID).
+		Delete(&Task{})
