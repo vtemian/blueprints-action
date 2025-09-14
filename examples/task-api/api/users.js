@@ -1,142 +1,26 @@
 /**
  * User Management and Authentication API Module
  * Provides comprehensive user registration, authentication, and profile management
- * 
- * @author Senior JavaScript Developer
- * @version 1.0.0
  */
 
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const Joi = require('joi');
-const mongoose = require('mongoose');
-const rateLimit = require('express-rate-limit');
+const { body, validationResult } = require('express-validator');
 
 const router = express.Router();
 
-// Environment variables - should be loaded from .env file
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/userauth';
-const BCRYPT_SALT_ROUNDS = 12;
+// Configuration constants
+const SALT_ROUNDS = 12;
+const JWT_EXPIRATION = '24h';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+
+// Email validation regex
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Database Connection Setup
- * MongoDB connection with proper error handling
- */
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('MongoDB connected successfully'))
-.catch(err => console.error('MongoDB connection error:', err));
-
-/**
- * User Schema Definition
- * Defines the structure for user documents in MongoDB
- * 
- * Fields:
- * - email: unique identifier, required
- * - password: bcrypt hashed password, required
- * - name: user's display name, required
- * - createdAt: account creation timestamp
- * - updatedAt: last profile update timestamp
- * - lastLogin: last successful login timestamp
- */
-const userSchema = new mongoose.Schema({
-  email: {
-    type: String,
-    required: true,
-    unique: true,
-    lowercase: true,
-    trim: true,
-    index: true
-  },
-  password: {
-    type: String,
-    required: true,
-    minlength: 8
-  },
-  name: {
-    type: String,
-    required: true,
-    trim: true,
-    maxlength: 100
-  },
-  lastLogin: {
-    type: Date,
-    default: null
-  }
-}, {
-  timestamps: true,
-  toJSON: {
-    transform: function(doc, ret) {
-      delete ret.password;
-      delete ret.__v;
-      return ret;
-    }
-  }
-});
-
-const User = mongoose.model('User', userSchema);
-
-/**
- * Rate Limiting Configuration
- * Implement rate limiting to prevent brute force attacks
- * Recommended: 5 requests per 15 minutes for auth endpoints
- */
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // limit each IP to 5 requests per windowMs
-  message: {
-    error: 'TOO_MANY_REQUESTS',
-    message: 'Too many authentication attempts, please try again later',
-    statusCode: 429
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-/**
- * Input Validation Schemas
- * Joi schemas for validating request payloads
- */
-const validationSchemas = {
-  register: Joi.object({
-    email: Joi.string().email().required().max(255),
-    password: Joi.string().min(8).required().max(128),
-    name: Joi.string().required().min(1).max(100).trim()
-  }),
-
-  login: Joi.object({
-    email: Joi.string().email().required().max(255),
-    password: Joi.string().required().max(128)
-  }),
-
-  updateProfile: Joi.object({
-    name: Joi.string().min(1).max(100).trim(),
-    email: Joi.string().email().max(255),
-    current_password: Joi.string().when('email', {
-      is: Joi.exist(),
-      then: Joi.required(),
-      otherwise: Joi.optional()
-    })
-  }).min(1),
-
-  changePassword: Joi.object({
-    current_password: Joi.string().required().max(128),
-    new_password: Joi.string().min(8).required().max(128)
-  })
-};
-
-/**
- * JWT Authentication Middleware
- * Validates JWT tokens and attaches user information to request object
- * 
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
+ * Authentication middleware to protect routes
+ * Validates JWT bearer tokens and attaches user info to request
  */
 const authenticateToken = async (req, res, next) => {
   try {
@@ -145,186 +29,159 @@ const authenticateToken = async (req, res, next) => {
 
     if (!token) {
       return res.status(401).json({
-        error: 'ACCESS_TOKEN_REQUIRED',
-        message: 'Access token is required for this operation',
-        statusCode: 401
+        error: 'Access token required',
+        code: 'TOKEN_MISSING'
       });
     }
 
     const decoded = jwt.verify(token, JWT_SECRET);
     
-    // Verify user still exists in database
-    const user = await User.findById(decoded.userId);
+    // Fetch user from database (placeholder)
+    const user = await getUserById(decoded.userId);
+    
     if (!user) {
       return res.status(401).json({
-        error: 'INVALID_TOKEN',
-        message: 'Token is invalid or user no longer exists',
-        statusCode: 401
+        error: 'Invalid token - user not found',
+        code: 'USER_NOT_FOUND'
       });
     }
 
-    req.user = {
-      userId: decoded.userId,
-      email: decoded.email
-    };
-    
+    req.user = user;
     next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({
-        error: 'INVALID_TOKEN',
-        message: 'Invalid access token provided',
-        statusCode: 401
+        error: 'Invalid token',
+        code: 'TOKEN_INVALID'
       });
     }
     
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
-        error: 'TOKEN_EXPIRED',
-        message: 'Access token has expired',
-        statusCode: 401
+        error: 'Token expired',
+        code: 'TOKEN_EXPIRED'
       });
     }
 
     console.error('Authentication middleware error:', error);
     return res.status(500).json({
-      error: 'AUTHENTICATION_ERROR',
-      message: 'An error occurred during authentication',
-      statusCode: 500
+      error: 'Authentication service error',
+      code: 'AUTH_SERVICE_ERROR'
     });
   }
 };
 
 /**
- * Utility function to generate JWT tokens
- * 
- * @param {Object} payload - Token payload containing user information
- * @returns {string} Generated JWT token
+ * Input validation middleware
  */
-const generateToken = (payload) => {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+const validateInput = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      error: 'Validation failed',
+      code: 'VALIDATION_ERROR',
+      details: errors.array()
+    });
+  }
+  next();
 };
 
 /**
- * Utility function to validate request payload
- * 
- * @param {Object} schema - Joi validation schema
- * @param {Object} data - Data to validate
- * @returns {Object} Validation result
- */
-const validateInput = (schema, data) => {
-  return schema.validate(data, { abortEarly: false });
-};
-
-/**
- * POST /api/users/register
+ * POST /register
  * Register a new user account
- * 
- * @route POST /api/users/register
- * @param {string} email - User's email address (required, unique)
- * @param {string} password - User's password (required, min 8 characters)
- * @param {string} name - User's display name (required)
- * @returns {Object} JWT token and user information
  */
-router.post('/register', authLimiter, async (req, res) => {
+router.post('/register', [
+  body('email')
+    .isEmail()
+    .withMessage('Valid email is required')
+    .normalizeEmail(),
+  body('password')
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters long'),
+  body('name')
+    .trim()
+    .isLength({ min: 1 })
+    .withMessage('Name is required')
+], validateInput, async (req, res) => {
   try {
-    // Validate input data
-    const { error, value } = validateInput(validationSchemas.register, req.body);
-    if (error) {
-      return res.status(400).json({
-        error: 'VALIDATION_ERROR',
-        message: error.details.map(detail => detail.message).join(', '),
-        statusCode: 400
-      });
-    }
-
-    const { email, password, name } = value;
+    const { email, password, name } = req.body;
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await getUserByEmail(email);
     if (existingUser) {
       return res.status(409).json({
-        error: 'EMAIL_ALREADY_EXISTS',
-        message: 'An account with this email address already exists',
-        statusCode: 409
+        error: 'Email already registered',
+        code: 'EMAIL_EXISTS'
       });
     }
 
     // Hash password
-    const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
 
-    // Create new user
-    const newUser = new User({
+    // Create user in database
+    const newUser = await createUser({
       email,
       password: hashedPassword,
-      name
+      name,
+      createdAt: new Date(),
+      lastLogin: null
     });
-
-    const savedUser = await newUser.save();
 
     // Generate JWT token
-    const token = generateToken({
-      userId: savedUser._id,
-      email: savedUser.email
-    });
+    const token = jwt.sign(
+      { userId: newUser.id },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRATION }
+    );
 
-    // Return success response
+    // Return user data without password
+    const { password: _, ...userResponse } = newUser;
+
     res.status(201).json({
       message: 'User registered successfully',
-      token,
-      user: savedUser.toJSON()
+      user: userResponse,
+      token
     });
 
   } catch (error) {
     console.error('Registration error:', error);
     
-    // Handle MongoDB duplicate key error
-    if (error.code === 11000) {
-      return res.status(409).json({
-        error: 'EMAIL_ALREADY_EXISTS',
-        message: 'An account with this email address already exists',
-        statusCode: 409
+    if (error.code === 'DB_CONNECTION_ERROR') {
+      return res.status(500).json({
+        error: 'Database connection failed',
+        code: 'DB_CONNECTION_ERROR'
       });
     }
 
     res.status(500).json({
-      error: 'REGISTRATION_FAILED',
-      message: 'An error occurred during user registration',
-      statusCode: 500
+      error: 'Registration failed',
+      code: 'REGISTRATION_ERROR'
     });
   }
 });
 
 /**
- * POST /api/users/login
- * Authenticate user and generate access token
- * 
- * @route POST /api/users/login
- * @param {string} email - User's email address (required)
- * @param {string} password - User's password (required)
- * @returns {Object} JWT token and user information
+ * POST /login
+ * Authenticate user and return JWT token
  */
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', [
+  body('email')
+    .isEmail()
+    .withMessage('Valid email is required')
+    .normalizeEmail(),
+  body('password')
+    .isLength({ min: 1 })
+    .withMessage('Password is required')
+], validateInput, async (req, res) => {
   try {
-    // Validate input data
-    const { error, value } = validateInput(validationSchemas.login, req.body);
-    if (error) {
-      return res.status(400).json({
-        error: 'VALIDATION_ERROR',
-        message: error.details.map(detail => detail.message).join(', '),
-        statusCode: 400
-      });
-    }
-
-    const { email, password } = value;
+    const { email, password } = req.body;
 
     // Find user by email
-    const user = await User.findOne({ email });
+    const user = await getUserByEmail(email);
     if (!user) {
       return res.status(401).json({
-        error: 'INVALID_CREDENTIALS',
-        message: 'Invalid email or password',
-        statusCode: 401
+        error: 'Invalid email or password',
+        code: 'INVALID_CREDENTIALS'
       });
     }
 
@@ -332,175 +189,306 @@ router.post('/login', authLimiter, async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       return res.status(401).json({
-        error: 'INVALID_CREDENTIALS',
-        message: 'Invalid email or password',
-        statusCode: 401
+        error: 'Invalid email or password',
+        code: 'INVALID_CREDENTIALS'
       });
     }
 
     // Update last login timestamp
-    user.lastLogin = new Date();
-    await user.save();
+    await updateUserLastLogin(user.id, new Date());
 
     // Generate JWT token
-    const token = generateToken({
-      userId: user._id,
-      email: user.email
-    });
+    const token = jwt.sign(
+      { userId: user.id },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRATION }
+    );
 
-    // Return success response
-    res.status(200).json({
+    // Return user data without password
+    const { password: _, ...userResponse } = user;
+    userResponse.lastLogin = new Date();
+
+    res.json({
       message: 'Login successful',
-      token,
-      user: user.toJSON()
+      user: userResponse,
+      token
     });
 
   } catch (error) {
     console.error('Login error:', error);
+    
+    if (error.code === 'DB_CONNECTION_ERROR') {
+      return res.status(500).json({
+        error: 'Database connection failed',
+        code: 'DB_CONNECTION_ERROR'
+      });
+    }
+
     res.status(500).json({
-      error: 'LOGIN_FAILED',
-      message: 'An error occurred during login',
-      statusCode: 500
+      error: 'Login failed',
+      code: 'LOGIN_ERROR'
     });
   }
 });
 
 /**
- * GET /api/users/me
+ * GET /me
  * Get current user profile information
- * 
- * @route GET /api/users/me
- * @middleware authenticateToken
- * @returns {Object} Current user information
  */
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId);
-    
-    if (!user) {
-      return res.status(404).json({
-        error: 'USER_NOT_FOUND',
-        message: 'User account not found',
-        statusCode: 404
-      });
-    }
+    // User is already attached to request by authenticateToken middleware
+    const { password, ...userResponse } = req.user;
 
-    res.status(200).json({
-      user: user.toJSON()
+    res.json({
+      user: userResponse
     });
 
   } catch (error) {
     console.error('Get profile error:', error);
     res.status(500).json({
-      error: 'PROFILE_FETCH_FAILED',
-      message: 'An error occurred while fetching user profile',
-      statusCode: 500
+      error: 'Failed to retrieve profile',
+      code: 'PROFILE_RETRIEVAL_ERROR'
     });
   }
 });
 
 /**
- * PUT /api/users/me
+ * PUT /me
  * Update current user profile information
- * 
- * @route PUT /api/users/me
- * @middleware authenticateToken
- * @param {string} [name] - Updated user name
- * @param {string} [email] - Updated email address
- * @param {string} [current_password] - Required when updating email
- * @returns {Object} Updated user information
  */
-router.put('/me', authenticateToken, async (req, res) => {
+router.put('/me', authenticateToken, [
+  body('email')
+    .optional()
+    .isEmail()
+    .withMessage('Valid email is required')
+    .normalizeEmail(),
+  body('name')
+    .optional()
+    .trim()
+    .isLength({ min: 1 })
+    .withMessage('Name cannot be empty'),
+  body('currentPassword')
+    .if(body('email').exists())
+    .isLength({ min: 1 })
+    .withMessage('Current password required for email changes')
+], validateInput, async (req, res) => {
   try {
-    // Validate input data
-    const { error, value } = validateInput(validationSchemas.updateProfile, req.body);
-    if (error) {
-      return res.status(400).json({
-        error: 'VALIDATION_ERROR',
-        message: error.details.map(detail => detail.message).join(', '),
-        statusCode: 400
-      });
-    }
+    const { email, name, currentPassword } = req.body;
+    const userId = req.user.id;
 
-    const { name, email, current_password } = value;
-
-    // Find current user
-    const user = await User.findById(req.user.userId);
-    if (!user) {
-      return res.status(404).json({
-        error: 'USER_NOT_FOUND',
-        message: 'User account not found',
-        statusCode: 404
-      });
-    }
-
-    // If email is being updated, verify current password
-    if (email && email !== user.email) {
-      if (!current_password) {
+    // If email is being changed, verify current password
+    if (email && email !== req.user.email) {
+      if (!currentPassword) {
         return res.status(400).json({
-          error: 'PASSWORD_REQUIRED',
-          message: 'Current password is required to change email address',
-          statusCode: 400
+          error: 'Current password required for email changes',
+          code: 'PASSWORD_REQUIRED'
         });
       }
 
-      const isPasswordValid = await bcrypt.compare(current_password, user.password);
+      const isPasswordValid = await bcrypt.compare(currentPassword, req.user.password);
       if (!isPasswordValid) {
         return res.status(401).json({
-          error: 'INVALID_PASSWORD',
-          message: 'Current password is incorrect',
-          statusCode: 401
+          error: 'Current password is incorrect',
+          code: 'INVALID_PASSWORD'
         });
       }
 
       // Check if new email is already taken
-      const existingUser = await User.findOne({ email, _id: { $ne: user._id } });
-      if (existingUser) {
+      const existingUser = await getUserByEmail(email);
+      if (existingUser && existingUser.id !== userId) {
         return res.status(409).json({
-          error: 'EMAIL_ALREADY_EXISTS',
-          message: 'This email address is already in use',
-          statusCode: 409
+          error: 'Email already in use',
+          code: 'EMAIL_EXISTS'
         });
       }
-
-      user.email = email;
     }
 
-    // Update name if provided
-    if (name) {
-      user.name = name;
-    }
+    // Prepare update data
+    const updateData = {};
+    if (email) updateData.email = email;
+    if (name) updateData.name = name;
+    updateData.updatedAt = new Date();
 
-    // Save updated user
-    const updatedUser = await user.save();
+    // Update user in database
+    const updatedUser = await updateUser(userId, updateData);
 
-    res.status(200).json({
+    // Return updated user data without password
+    const { password, ...userResponse } = updatedUser;
+
+    res.json({
       message: 'Profile updated successfully',
-      user: updatedUser.toJSON()
+      user: userResponse
     });
 
   } catch (error) {
     console.error('Profile update error:', error);
     
-    // Handle MongoDB duplicate key error
-    if (error.code === 11000) {
-      return res.status(409).json({
-        error: 'EMAIL_ALREADY_EXISTS',
-        message: 'This email address is already in use',
-        statusCode: 409
+    if (error.code === 'DB_CONNECTION_ERROR') {
+      return res.status(500).json({
+        error: 'Database connection failed',
+        code: 'DB_CONNECTION_ERROR'
       });
     }
 
     res.status(500).json({
-      error: 'PROFILE_UPDATE_FAILED',
-      message: 'An error occurred while updating profile',
-      statusCode: 500
+      error: 'Profile update failed',
+      code: 'PROFILE_UPDATE_ERROR'
     });
   }
 });
 
 /**
- * POST /api/users/change-password
- * Change user password
- * 
- * @route POST /api/users/change-password
+ * POST /change-password
+ * Change user password with current password verification
+ */
+router.post('/change-password', authenticateToken, [
+  body('currentPassword')
+    .isLength({ min: 1 })
+    .withMessage('Current password is required'),
+  body('newPassword')
+    .isLength({ min: 8 })
+    .withMessage('New password must be at least 8 characters long')
+], validateInput, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user.id;
+
+    // Verify current password
+    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, req.user.password);
+    if (!isCurrentPasswordValid) {
+      return res.status(401).json({
+        error: 'Current password is incorrect',
+        code: 'INVALID_CURRENT_PASSWORD'
+      });
+    }
+
+    // Check if new password is different from current
+    const isSamePassword = await bcrypt.compare(newPassword, req.user.password);
+    if (isSamePassword) {
+      return res.status(400).json({
+        error: 'New password must be different from current password',
+        code: 'SAME_PASSWORD'
+      });
+    }
+
+    // Hash new password
+    const hashedNewPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+    // Update password in database
+    await updateUser(userId, {
+      password: hashedNewPassword,
+      updatedAt: new Date()
+    });
+
+    res.json({
+      message: 'Password changed successfully'
+    });
+
+  } catch (error) {
+    console.error('Password change error:', error);
+    
+    if (error.code === 'DB_CONNECTION_ERROR') {
+      return res.status(500).json({
+        error: 'Database connection failed',
+        code: 'DB_CONNECTION_ERROR'
+      });
+    }
+
+    res.status(500).json({
+      error: 'Password change failed',
+      code: 'PASSWORD_CHANGE_ERROR'
+    });
+  }
+});
+
+// Database operation placeholders
+// These should be replaced with actual database implementations
+
+/**
+ * Get user by email from database
+ * @param {string} email - User email
+ * @returns {Promise<Object|null>} User object or null
+ */
+async function getUserByEmail(email) {
+  try {
+    // Placeholder for database query
+    // Example: return await db.users.findOne({ email });
+    console.log(`Database query: getUserByEmail(${email})`);
+    return null; // Replace with actual implementation
+  } catch (error) {
+    error.code = 'DB_CONNECTION_ERROR';
+    throw error;
+  }
+}
+
+/**
+ * Get user by ID from database
+ * @param {string} userId - User ID
+ * @returns {Promise<Object|null>} User object or null
+ */
+async function getUserById(userId) {
+  try {
+    // Placeholder for database query
+    // Example: return await db.users.findById(userId);
+    console.log(`Database query: getUserById(${userId})`);
+    return null; // Replace with actual implementation
+  } catch (error) {
+    error.code = 'DB_CONNECTION_ERROR';
+    throw error;
+  }
+}
+
+/**
+ * Create new user in database
+ * @param {Object} userData - User data object
+ * @returns {Promise<Object>} Created user object
+ */
+async function createUser(userData) {
+  try {
+    // Placeholder for database insertion
+    // Example: return await db.users.create(userData);
+    console.log('Database query: createUser', userData);
+    return { id: 'generated-id', ...userData }; // Replace with actual implementation
+  } catch (error) {
+    error.code = 'DB_CONNECTION_ERROR';
+    throw error;
+  }
+}
+
+/**
+ * Update user in database
+ * @param {string} userId - User ID
+ * @param {Object} updateData - Data to update
+ * @returns {Promise<Object>} Updated user object
+ */
+async function updateUser(userId, updateData) {
+  try {
+    // Placeholder for database update
+    // Example: return await db.users.findByIdAndUpdate(userId, updateData, { new: true });
+    console.log(`Database query: updateUser(${userId})`, updateData);
+    return { id: userId, ...updateData }; // Replace with actual implementation
+  } catch (error) {
+    error.code = 'DB_CONNECTION_ERROR';
+    throw error;
+  }
+}
+
+/**
+ * Update user's last login timestamp
+ * @param {string} userId - User ID
+ * @param {Date} timestamp - Login timestamp
+ * @returns {Promise<void>}
+ */
+async function updateUserLastLogin(userId, timestamp) {
+  try {
+    // Placeholder for database update
+    // Example: await db.users.findByIdAndUpdate(userId, { lastLogin: timestamp });
+    console.log(`Database query: updateUserLastLogin(${userId}, ${timestamp})`);
+  } catch (error) {
+    error.code = 'DB_CONNECTION_ERROR';
+    throw error;
+  }
+}
+
+module.exports = router;

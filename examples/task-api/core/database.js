@@ -1,545 +1,514 @@
 /**
- * Core Database Module - Production-ready database connection and session management
- * @module core.database
+ * Database Connection and Session Management Module
+ * Provides SQLite database connectivity with connection pooling,
+ * session management, and base model functionality.
  */
 
-import Database from 'better-sqlite3';
-import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { Sequelize, DataTypes, Model } from 'sequelize';
+import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import fs from 'fs/promises';
 
 /**
- * Database configuration with environment-based settings
- */
-const DB_CONFIG = {
-  url: process.env.DATABASE_URL || './tasks.db',
-  poolSize: parseInt(process.env.DB_POOL_SIZE) || 10,
-  timeout: parseInt(process.env.DB_TIMEOUT) || 5000,
-  retryAttempts: parseInt(process.env.DB_RETRY_ATTEMPTS) || 3,
-  retryDelay: parseInt(process.env.DB_RETRY_DELAY) || 1000,
-  enableWAL: process.env.DB_ENABLE_WAL !== 'false',
-  enableForeignKeys: process.env.DB_ENABLE_FOREIGN_KEYS !== 'false'
-};
-
-/**
- * Database connection pool manager
- */
-class DatabasePool {
-  constructor(config) {
-    this.config = config;
-    this.connections = new Set();
-    this.availableConnections = [];
-    this.waitingQueue = [];
-    this.isShuttingDown = false;
-    this.healthCheckInterval = null;
-  }
-
-  /**
-   * Initialize the database pool
-   */
-  async initialize() {
-    try {
-      // Ensure database directory exists
-      const dbDir = dirname(this.config.url);
-      if (!existsSync(dbDir)) {
-        mkdirSync(dbDir, { recursive: true });
-      }
-
-      // Create initial connections
-      for (let i = 0; i < Math.min(2, this.config.poolSize); i++) {
-        await this._createConnection();
-      }
-
-      // Start health check interval
-      this._startHealthCheck();
-      
-      console.log(`Database pool initialized with ${this.connections.size} connections`);
-    } catch (error) {
-      console.error('Failed to initialize database pool:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Create a new database connection
-   * @private
-   */
-  async _createConnection() {
-    return new Promise((resolve, reject) => {
-      try {
-        const db = new Database(this.config.url, {
-          timeout: this.config.timeout,
-          verbose: process.env.NODE_ENV === 'development' ? console.log : null
-        });
-
-        // Configure database settings
-        if (this.config.enableWAL) {
-          db.pragma('journal_mode = WAL');
-        }
-        
-        if (this.config.enableForeignKeys) {
-          db.pragma('foreign_keys = ON');
-        }
-
-        db.pragma('synchronous = NORMAL');
-        db.pragma('cache_size = 1000');
-        db.pragma('temp_store = memory');
-
-        // Add connection metadata
-        db._poolId = randomUUID();
-        db._createdAt = Date.now();
-        db._lastUsed = Date.now();
-        db._inUse = false;
-
-        this.connections.add(db);
-        this.availableConnections.push(db);
-
-        resolve(db);
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  /**
-   * Get a connection from the pool
-   * @returns {Promise<Database>} Database connection
-   */
-  async getConnection() {
-    if (this.isShuttingDown) {
-      throw new Error('Database pool is shutting down');
-    }
-
-    return new Promise(async (resolve, reject) => {
-      try {
-        // Check for available connection
-        if (this.availableConnections.length > 0) {
-          const connection = this.availableConnections.pop();
-          connection._inUse = true;
-          connection._lastUsed = Date.now();
-          resolve(connection);
-          return;
-        }
-
-        // Create new connection if under pool limit
-        if (this.connections.size < this.config.poolSize) {
-          const connection = await this._createConnection();
-          connection._inUse = true;
-          connection._lastUsed = Date.now();
-          this.availableConnections.pop(); // Remove from available since we're using it
-          resolve(connection);
-          return;
-        }
-
-        // Add to waiting queue
-        this.waitingQueue.push({ resolve, reject, timestamp: Date.now() });
-
-        // Set timeout for waiting requests
-        setTimeout(() => {
-          const index = this.waitingQueue.findIndex(item => item.resolve === resolve);
-          if (index !== -1) {
-            this.waitingQueue.splice(index, 1);
-            reject(new Error('Database connection timeout'));
-          }
-        }, this.config.timeout);
-
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  /**
-   * Release a connection back to the pool
-   * @param {Database} connection - Database connection to release
-   */
-  releaseConnection(connection) {
-    if (!connection || !this.connections.has(connection)) {
-      return;
-    }
-
-    connection._inUse = false;
-    connection._lastUsed = Date.now();
-
-    // Serve waiting requests first
-    if (this.waitingQueue.length > 0) {
-      const { resolve } = this.waitingQueue.shift();
-      connection._inUse = true;
-      resolve(connection);
-      return;
-    }
-
-    // Return to available pool
-    this.availableConnections.push(connection);
-  }
-
-  /**
-   * Start health check for connections
-   * @private
-   */
-  _startHealthCheck() {
-    this.healthCheckInterval = setInterval(() => {
-      const now = Date.now();
-      const maxIdleTime = 300000; // 5 minutes
-
-      // Close idle connections (keep at least 1)
-      for (const connection of this.connections) {
-        if (!connection._inUse && 
-            this.connections.size > 1 && 
-            now - connection._lastUsed > maxIdleTime) {
-          this._closeConnection(connection);
-        }
-      }
-    }, 60000); // Check every minute
-  }
-
-  /**
-   * Close a specific connection
-   * @private
-   */
-  _closeConnection(connection) {
-    try {
-      this.connections.delete(connection);
-      const index = this.availableConnections.indexOf(connection);
-      if (index !== -1) {
-        this.availableConnections.splice(index, 1);
-      }
-      connection.close();
-    } catch (error) {
-      console.error('Error closing database connection:', error);
-    }
-  }
-
-  /**
-   * Close all connections and shutdown pool
-   */
-  async close() {
-    this.isShuttingDown = true;
-
-    // Clear health check interval
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-    }
-
-    // Reject all waiting requests
-    while (this.waitingQueue.length > 0) {
-      const { reject } = this.waitingQueue.shift();
-      reject(new Error('Database pool is shutting down'));
-    }
-
-    // Close all connections
-    const closePromises = Array.from(this.connections).map(connection => {
-      return new Promise(resolve => {
-        try {
-          connection.close();
-          resolve();
-        } catch (error) {
-          console.error('Error closing connection:', error);
-          resolve();
-        }
-      });
-    });
-
-    await Promise.all(closePromises);
-    this.connections.clear();
-    this.availableConnections.length = 0;
-
-    console.log('Database pool closed successfully');
-  }
-
-  /**
-   * Get pool statistics
-   */
-  getStats() {
-    return {
-      totalConnections: this.connections.size,
-      availableConnections: this.availableConnections.length,
-      activeConnections: this.connections.size - this.availableConnections.length,
-      waitingRequests: this.waitingQueue.length,
-      isShuttingDown: this.isShuttingDown
-    };
-  }
-}
-
-/**
- * Base model class with common fields and operations
- */
-class BaseModel {
-  constructor(data = {}) {
-    this.id = data.id || randomUUID();
-    this.createdAt = data.created_at || new Date().toISOString();
-    this.updatedAt = data.updated_at || new Date().toISOString();
-  }
-
-  /**
-   * Convert model to database row format
-   */
-  toRow() {
-    return {
-      id: this.id,
-      created_at: this.createdAt,
-      updated_at: this.updatedAt
-    };
-  }
-
-  /**
-   * Update the updatedAt timestamp
-   */
-  touch() {
-    this.updatedAt = new Date().toISOString();
-  }
-}
-
-/**
- * Main database manager class
+ * Database configuration and connection management
  */
 class DatabaseManager {
-  constructor(config = DB_CONFIG) {
-    this.config = config;
-    this.pool = new DatabasePool(config);
+  constructor() {
+    this.sequelize = null;
     this.isInitialized = false;
-    this.migrations = new Map();
+    this.connectionRetries = 0;
+    this.maxRetries = 5;
+    this.retryDelay = 1000; // Start with 1 second
   }
 
   /**
-   * Initialize the database and create tables
+   * Initialize database connection with retry logic
+   * @returns {Promise<Sequelize>} Database connection instance
    */
-  async initDb() {
-    let retryCount = 0;
-    
-    while (retryCount < this.config.retryAttempts) {
-      try {
-        await this.pool.initialize();
-        await this._runMigrations();
-        this.isInitialized = true;
-        
-        console.log('Database initialized successfully');
-        return;
-        
-      } catch (error) {
-        retryCount++;
-        console.error(`Database initialization attempt ${retryCount} failed:`, error);
-        
-        if (retryCount >= this.config.retryAttempts) {
-          throw new Error(`Failed to initialize database after ${this.config.retryAttempts} attempts: ${error.message}`);
-        }
-        
-        // Wait before retry
-        await new Promise(resolve => setTimeout(resolve, this.config.retryDelay * retryCount));
+  async initialize() {
+    if (this.isInitialized && this.sequelize) {
+      return this.sequelize;
+    }
+
+    const dbUrl = process.env.DATABASE_URL || './tasks.db';
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    try {
+      // Ensure database directory exists
+      if (dbUrl.startsWith('./') || dbUrl.startsWith('/')) {
+        const dbDir = path.dirname(path.resolve(dbUrl));
+        await fs.mkdir(dbDir, { recursive: true });
       }
+
+      this.sequelize = new Sequelize({
+        dialect: 'sqlite',
+        storage: dbUrl,
+        logging: isProduction ? false : console.log,
+        pool: {
+          max: 10,
+          min: 0,
+          acquire: 30000,
+          idle: 10000,
+        },
+        retry: {
+          match: [
+            /SQLITE_BUSY/,
+            /SQLITE_LOCKED/,
+            /database is locked/,
+          ],
+          max: 3,
+        },
+        dialectOptions: {
+          // Enable foreign keys for SQLite
+          options: '--enable-fkey',
+        },
+        define: {
+          // Global model options
+          underscored: true,
+          freezeTableName: true,
+          charset: 'utf8',
+          dialectOptions: {
+            collate: 'utf8_general_ci',
+          },
+        },
+      });
+
+      await this.testConnection();
+      this.isInitialized = true;
+      this.connectionRetries = 0;
+
+      console.log('✅ Database connection established successfully');
+      return this.sequelize;
+
+    } catch (error) {
+      console.error('❌ Database connection failed:', error.message);
+      
+      if (this.connectionRetries < this.maxRetries) {
+        this.connectionRetries++;
+        const delay = this.retryDelay * Math.pow(2, this.connectionRetries - 1);
+        
+        console.log(`🔄 Retrying connection in ${delay}ms (attempt ${this.connectionRetries}/${this.maxRetries})`);
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.initialize();
+      }
+
+      throw new Error(`Failed to connect to database after ${this.maxRetries} attempts: ${error.message}`);
     }
   }
 
   /**
-   * Run database migrations
+   * Test database connection
    * @private
    */
-  async _runMigrations() {
-    const connection = await this.pool.getConnection();
-    
+  async testConnection() {
     try {
-      // Create migrations table if it doesn't exist
-      connection.exec(`
-        CREATE TABLE IF NOT EXISTS migrations (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          executed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-
-      // Get executed migrations
-      const executedMigrations = connection.prepare('SELECT name FROM migrations').all();
-      const executedSet = new Set(executedMigrations.map(m => m.name));
-
-      // Run pending migrations
-      for (const [name, migration] of this.migrations) {
-        if (!executedSet.has(name)) {
-          console.log(`Running migration: ${name}`);
-          
-          const transaction = connection.transaction(() => {
-            migration(connection);
-            connection.prepare('INSERT INTO migrations (id, name) VALUES (?, ?)').run(randomUUID(), name);
-          });
-          
-          transaction();
-        }
-      }
-      
-    } finally {
-      this.pool.releaseConnection(connection);
-    }
-  }
-
-  /**
-   * Add a migration
-   * @param {string} name - Migration name
-   * @param {Function} migration - Migration function
-   */
-  addMigration(name, migration) {
-    this.migrations.set(name, migration);
-  }
-
-  /**
-   * Execute a database operation with automatic connection management
-   * @param {Function} operation - Database operation function
-   * @param {boolean} useTransaction - Whether to wrap in transaction
-   * @returns {Promise<any>} Operation result
-   */
-  async execute(operation, useTransaction = false) {
-    if (!this.isInitialized) {
-      throw new Error('Database not initialized. Call initDb() first.');
-    }
-
-    const connection = await this.pool.getConnection();
-    
-    try {
-      if (useTransaction) {
-        const transaction = connection.transaction(operation);
-        return transaction();
-      } else {
-        return operation(connection);
-      }
+      await this.sequelize.authenticate();
+      console.log('🔍 Database connection test passed');
     } catch (error) {
-      console.error('Database operation failed:', error);
-      throw error;
-    } finally {
-      this.pool.releaseConnection(connection);
+      throw new Error(`Database authentication failed: ${error.message}`);
     }
   }
 
   /**
-   * Get database connection for dependency injection
-   * @returns {Function} Database getter function
+   * Get database instance (for dependency injection)
+   * @returns {Promise<Sequelize>} Database connection instance
    */
-  getDb() {
-    return async () => {
-      if (!this.isInitialized) {
-        throw new Error('Database not initialized. Call initDb() first.');
-      }
-      return this.pool.getConnection();
-    };
+  async getConnection() {
+    if (!this.isInitialized || !this.sequelize) {
+      await this.initialize();
+    }
+    return this.sequelize;
   }
 
   /**
-   * Health check for database connectivity
-   * @returns {Promise<Object>} Health status
+   * Close database connection gracefully
+   * @returns {Promise<void>}
+   */
+  async close() {
+    if (this.sequelize) {
+      try {
+        await this.sequelize.close();
+        console.log('🔒 Database connection closed successfully');
+      } catch (error) {
+        console.error('❌ Error closing database connection:', error.message);
+        throw error;
+      } finally {
+        this.sequelize = null;
+        this.isInitialized = false;
+        this.connectionRetries = 0;
+      }
+    }
+  }
+
+  /**
+   * Check database health
+   * @returns {Promise<Object>} Health status object
    */
   async healthCheck() {
     try {
-      const connection = await this.pool.getConnection();
-      
-      try {
-        // Simple query to test connectivity
-        const result = connection.prepare('SELECT 1 as test').get();
-        const stats = this.pool.getStats();
-        
-        return {
-          status: 'healthy',
-          timestamp: new Date().toISOString(),
-          stats,
-          testQuery: result
-        };
-      } finally {
-        this.pool.releaseConnection(connection);
+      if (!this.sequelize) {
+        return { status: 'disconnected', message: 'No database connection' };
       }
+
+      const startTime = Date.now();
+      await this.sequelize.authenticate();
+      const responseTime = Date.now() - startTime;
+
+      return {
+        status: 'healthy',
+        responseTime: `${responseTime}ms`,
+        connection: 'active',
+        dialect: this.sequelize.getDialect(),
+      };
     } catch (error) {
       return {
         status: 'unhealthy',
-        timestamp: new Date().toISOString(),
         error: error.message,
-        stats: this.pool.getStats()
+        connection: 'failed',
       };
     }
   }
-
-  /**
-   * Close database connections and cleanup
-   */
-  async closeDb() {
-    try {
-      await this.pool.close();
-      this.isInitialized = false;
-      console.log('Database connections closed successfully');
-    } catch (error) {
-      console.error('Error closing database:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Get pool statistics
-   */
-  getStats() {
-    return this.pool.getStats();
-  }
 }
 
-// Global database manager instance
+// Singleton instance
 const dbManager = new DatabaseManager();
 
-// Add default migrations
-dbManager.addMigration('001_create_sessions', (db) => {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)
-  `);
-});
-
 /**
- * Session management utilities
+ * Base Model class with common fields and functionality
+ * Provides UUID primary keys and automatic timestamps
  */
-class SessionManager {
-  constructor(dbManager) {
-    this.dbManager = dbManager;
-    this.cleanupInterval = null;
-  }
-
+class BaseModel extends Model {
   /**
-   * Start automatic session cleanup
+   * Initialize base model with common attributes
+   * @param {Sequelize} sequelize - Database connection instance
+   * @returns {void}
    */
-  startCleanup(intervalMs = 3600000) { // 1 hour default
-    this.cleanupInterval = setInterval(async () => {
-      try {
-        await this.cleanup();
-      } catch (error) {
-        console.error('Session cleanup failed:', error);
-      }
-    }, intervalMs);
-  }
-
-  /**
-   * Stop automatic session cleanup
-   */
-  stopCleanup() {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-      this.cleanupInterval = null;
-    }
-  }
-
-  /**
-   * Clean up expired sessions
-   */
-  async cleanup() {
-    return this.dbManager.execute((db) => {
-      const result = db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(new Date().toISOString());
-      if (result.changes > 0) {
-        console.log(`Cleaned up ${result.changes} expired sessions`);
-      }
-      return result.changes;
+  static initBaseModel(sequelize) {
+    return super.init({
+      id: {
+        type: DataTypes.UUID,
+        defaultValue: () => uuidv4(),
+        primaryKey: true,
+        allowNull: false,
+      },
+      created_at: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updated_at: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+    }, {
+      sequelize,
+      timestamps: true,
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
+      hooks: {
+        beforeUpdate: (instance) => {
+          instance.updated_at = new Date();
+        },
+      },
     });
   }
 
   /**
-   * Create a new session
+   * Convert model instance to JSON with custom formatting
+   * @returns {Object} JSON representation of the model
    */
-  async create(sessionId, data, expiresAt)
+  toJSON() {
+    const values = { ...this.get() };
+    
+    // Format dates to ISO strings
+    if (values.created_at) {
+      values.created_at = values.created_at.toISOString();
+    }
+    if (values.updated_at) {
+      values.updated_at = values.updated_at.toISOString();
+    }
+    
+    return values;
+  }
+}
+
+/**
+ * Transaction wrapper for database operations
+ * @param {Function} operation - Async function to execute within transaction
+ * @returns {Promise<any>} Result of the operation
+ */
+async function withTransaction(operation) {
+  const sequelize = await getDb();
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const result = await operation(transaction);
+    await transaction.commit();
+    return result;
+  } catch (error) {
+    await transaction.rollback();
+    console.error('🔄 Transaction rolled back:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Initialize database and create tables
+ * @param {Object} options - Initialization options
+ * @param {boolean} options.force - Force recreate tables (development only)
+ * @param {boolean} options.alter - Alter existing tables to match models
+ * @returns {Promise<void>}
+ */
+async function initDb(options = {}) {
+  const { force = false, alter = false } = options;
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  if (force && isProduction) {
+    throw new Error('Cannot use force=true in production environment');
+  }
+
+  try {
+    console.log('🚀 Initializing database...');
+    
+    const sequelize = await dbManager.initialize();
+    
+    // Sync all models
+    await sequelize.sync({ 
+      force, 
+      alter: alter && !isProduction,
+      logging: !isProduction ? console.log : false,
+    });
+    
+    console.log('✅ Database initialization completed');
+    
+    // Run health check
+    const health = await dbManager.healthCheck();
+    console.log('🏥 Database health:', health);
+    
+  } catch (error) {
+    console.error('❌ Database initialization failed:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Get database connection instance (for dependency injection)
+ * @returns {Promise<Sequelize>} Database connection instance
+ * 
+ * @example
+ * // In Express.js route handler
+ * app.get('/api/health', async (req, res) => {
+ *   try {
+ *     const db = await getDb();
+ *     await db.authenticate();
+ *     res.json({ status: 'healthy' });
+ *   } catch (error) {
+ *     res.status(500).json({ status: 'unhealthy', error: error.message });
+ *   }
+ * });
+ */
+async function getDb() {
+  return dbManager.getConnection();
+}
+
+/**
+ * Close database connection gracefully
+ * @returns {Promise<void>}
+ * 
+ * @example
+ * // Graceful shutdown
+ * process.on('SIGTERM', async () => {
+ *   console.log('Received SIGTERM, shutting down gracefully');
+ *   await closeDb();
+ *   process.exit(0);
+ * });
+ */
+async function closeDb() {
+  return dbManager.close();
+}
+
+/**
+ * Get database health status
+ * @returns {Promise<Object>} Health status object
+ */
+async function getDbHealth() {
+  return dbManager.healthCheck();
+}
+
+/**
+ * Create a new model class extending BaseModel
+ * @param {string} modelName - Name of the model
+ * @param {Object} attributes - Model attributes definition
+ * @param {Object} options - Model options
+ * @returns {Promise<Model>} Model class
+ * 
+ * @example
+ * const Task = await createModel('Task', {
+ *   title: {
+ *     type: DataTypes.STRING,
+ *     allowNull: false,
+ *   },
+ *   description: {
+ *     type: DataTypes.TEXT,
+ *     allowNull: true,
+ *   },
+ *   completed: {
+ *     type: DataTypes.BOOLEAN,
+ *     defaultValue: false,
+ *   },
+ * });
+ */
+async function createModel(modelName, attributes = {}, options = {}) {
+  const sequelize = await getDb();
+  
+  class CustomModel extends BaseModel {}
+  
+  // Merge base attributes with custom attributes
+  const allAttributes = {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: () => uuidv4(),
+      primaryKey: true,
+      allowNull: false,
+    },
+    created_at: {
+      type: DataTypes.DATE,
+      allowNull: false,
+      defaultValue: DataTypes.NOW,
+    },
+    updated_at: {
+      type: DataTypes.DATE,
+      allowNull: false,
+      defaultValue: DataTypes.NOW,
+    },
+    ...attributes,
+  };
+
+  const modelOptions = {
+    sequelize,
+    modelName,
+    tableName: options.tableName || modelName.toLowerCase() + 's',
+    timestamps: true,
+    createdAt: 'created_at',
+    updatedAt: 'updated_at',
+    hooks: {
+      beforeUpdate: (instance) => {
+        instance.updated_at = new Date();
+      },
+      ...options.hooks,
+    },
+    ...options,
+  };
+
+  CustomModel.init(allAttributes, modelOptions);
+  
+  return CustomModel;
+}
+
+// Graceful shutdown handlers
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+  try {
+    await closeDb();
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error during shutdown:', error.message);
+    process.exit(1);
+  }
+});
+
+process.on('SIGTERM', async () => {
+  console.log('🛑 Received SIGTERM, shutting down gracefully...');
+  try {
+    await closeDb();
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error during shutdown:', error.message);
+    process.exit(1);
+  }
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+  console.error('💥 Uncaught Exception:', error);
+  try {
+    await closeDb();
+  } catch (closeError) {
+    console.error('❌ Error closing database during exception:', closeError.message);
+  }
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', async (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  try {
+    await closeDb();
+  } catch (closeError) {
+    console.error('❌ Error closing database during rejection:', closeError.message);
+  }
+  process.exit(1);
+});
+
+// Named exports
+export {
+  getDb,
+  initDb,
+  closeDb,
+  getDbHealth,
+  BaseModel,
+  createModel,
+  withTransaction,
+  DataTypes,
+};
+
+// Default export for convenience
+export default {
+  getDb,
+  initDb,
+  closeDb,
+  getDbHealth,
+  BaseModel,
+  createModel,
+  withTransaction,
+  DataTypes,
+};
+
+/**
+ * USAGE EXAMPLES:
+ * 
+ * // 1. Initialize database
+ * import { initDb } from './database.js';
+ * await initDb({ alter: true });
+ * 
+ * // 2. Create a model
+ * import { createModel, DataTypes } from './database.js';
+ * const User = await createModel('User', {
+ *   name: { type: DataTypes.STRING, allowNull: false },
+ *   email: { type: DataTypes.STRING, unique: true },
+ * });
+ * 
+ * // 3. Use in Express.js middleware
+ * import { getDb } from './database.js';
+ * app.use(async (req, res, next) => {
+ *   req.db = await getDb();
+ *   next();
+ * });
+ * 
+ * // 4. Transaction example
+ * import { withTransaction } from './database.js';
+ * const result = await withTransaction(async (transaction) => {
+ *   const user = await User.create({ name: 'John' }, { transaction });
+ *   const profile = await Profile.create({ userId: user.id }, { transaction });
+ *   return { user, profile };
+ * });
+ * 
+ * // 5. Health check endpoint
+ * import { getDbHealth } from './database.js';
+ * app.get('/health/db', async (req, res) => {
+ *   const health = await getDbHealth();
+ *   res.json(health);
+ * });
+ */

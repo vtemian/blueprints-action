@@ -1,400 +1,481 @@
 /**
  * Task Management API Module
- * FastAPI-style task management endpoints implemented with Express.js
- * 
+ * Provides RESTful endpoints for task CRUD operations
  * @module api/tasks
- * @requires express
- * @requires joi
- * @requires ../models/Task
- * @requires ../middleware/auth
- * @requires ../utils/database
- * @requires ../utils/errors
  */
 
-const express = require('express');
-const Joi = require('joi');
-const Task = require('../models/Task');
-const { authenticateToken, requireAuth } = require('../middleware/auth');
-const { getDbConnection, handleDbError } = require('../utils/database');
-const { AppError, handleAsync, validateRequest } = require('../utils/errors');
+import express from 'express';
+import { body, query, param, validationResult } from 'express-validator';
+import { Task } from '../models/task.js';
+import { requireAuth, getCurrentUser } from '../core/auth.js';
+import { db } from '../core/database.js';
+import logger from '../core/logger.js';
 
 const router = express.Router();
 
-// Apply authentication middleware to all routes
-router.use(authenticateToken);
-router.use(requireAuth);
-
 /**
- * Validation schemas
+ * Validation middleware to check for validation errors
  */
-const schemas = {
-  createTask: Joi.object({
-    title: Joi.string().trim().min(1).max(255).required()
-      .messages({
-        'string.empty': 'Title is required',
-        'string.max': 'Title must not exceed 255 characters'
-      }),
-    description: Joi.string().trim().min(1).max(2000).required()
-      .messages({
-        'string.empty': 'Description is required',
-        'string.max': 'Description must not exceed 2000 characters'
-      }),
-    priority: Joi.string().valid('low', 'medium', 'high').default('medium'),
-    due_date: Joi.date().iso().min('now').optional()
-      .messages({
-        'date.min': 'Due date must be in the future'
-      })
-  }),
-
-  updateTask: Joi.object({
-    title: Joi.string().trim().min(1).max(255).optional(),
-    description: Joi.string().trim().min(1).max(2000).optional(),
-    priority: Joi.string().valid('low', 'medium', 'high').optional(),
-    due_date: Joi.date().iso().allow(null).optional(),
-    status: Joi.string().valid('pending', 'in_progress', 'completed').optional(),
-    user_id: Joi.forbidden().messages({
-      'any.unknown': 'Cannot modify user_id field'
-    })
-  }).min(1).messages({
-    'object.min': 'At least one field must be provided for update'
-  }),
-
-  queryParams: Joi.object({
-    status: Joi.string().valid('pending', 'in_progress', 'completed').optional(),
-    priority: Joi.string().valid('low', 'medium', 'high').optional(),
-    due_before: Joi.date().iso().optional(),
-    due_after: Joi.date().iso().optional(),
-    page: Joi.number().integer().min(1).default(1),
-    limit: Joi.number().integer().min(1).max(100).default(20)
-  }),
-
-  taskId: Joi.object({
-    taskId: Joi.string().uuid().required().messages({
-      'string.guid': 'Invalid task ID format'
-    })
-  })
+const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(422).json({
+      error: 'Validation failed',
+      details: errors.array().map(err => ({
+        field: err.path,
+        message: err.msg,
+        value: err.value
+      }))
+    });
+  }
+  next();
 };
 
 /**
- * Helper function to verify task ownership
- * @param {string} taskId - Task ID to verify
- * @param {string} userId - User ID from authentication
- * @returns {Promise<Object>} Task object if owned by user
- * @throws {AppError} If task not found or not owned by user
+ * Middleware to verify task ownership
  */
-const verifyTaskOwnership = async (taskId, userId) => {
+const verifyTaskOwnership = async (req, res, next) => {
   try {
+    const taskId = req.params.task_id;
+    const userId = req.user.id;
+
     const task = await Task.findById(taskId);
     
     if (!task) {
-      throw new AppError('Task not found', 404);
+      return res.status(404).json({
+        error: 'Task not found',
+        message: 'The requested task does not exist'
+      });
     }
-    
-    if (task.user_id !== userId) {
-      throw new AppError('Access denied: Task not owned by user', 403);
-    }
-    
-    if (task.deleted_at) {
-      throw new AppError('Task not found', 404);
-    }
-    
-    return task;
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    throw handleDbError(error);
-  }
-};
 
-/**
- * Build database query filters from request parameters
- * @param {Object} queryParams - Validated query parameters
- * @param {string} userId - User ID from authentication
- * @returns {Object} Database query filters and pagination
- */
-const buildTaskFilters = (queryParams, userId) => {
-  const filters = {
-    user_id: userId,
-    deleted_at: null
-  };
-  
-  if (queryParams.status) {
-    filters.status = queryParams.status;
-  }
-  
-  if (queryParams.priority) {
-    filters.priority = queryParams.priority;
-  }
-  
-  const dateFilters = {};
-  if (queryParams.due_before) {
-    dateFilters.due_date = { ...dateFilters.due_date, $lte: queryParams.due_before };
-  }
-  
-  if (queryParams.due_after) {
-    dateFilters.due_date = { ...dateFilters.due_date, $gte: queryParams.due_after };
-  }
-  
-  return {
-    filters: { ...filters, ...dateFilters },
-    pagination: {
-      page: queryParams.page,
-      limit: queryParams.limit,
-      offset: (queryParams.page - 1) * queryParams.limit
+    if (task.user_id !== userId) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: 'You do not have permission to access this task'
+      });
     }
-  };
+
+    req.task = task;
+    next();
+  } catch (error) {
+    logger.error('Error verifying task ownership:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to verify task ownership'
+    });
+  }
 };
 
 /**
  * GET /api/tasks
- * List user tasks with filtering and pagination
+ * List tasks with filtering and pagination
  */
-router.get('/', 
-  validateRequest({ query: schemas.queryParams }),
-  handleAsync(async (req, res) => {
-    const { filters, pagination } = buildTaskFilters(req.query, req.user.id);
-    
+router.get('/tasks',
+  requireAuth,
+  [
+    query('status').optional().isIn(['pending', 'in_progress', 'completed', 'cancelled'])
+      .withMessage('Status must be one of: pending, in_progress, completed, cancelled'),
+    query('priority').optional().isIn(['low', 'medium', 'high', 'urgent'])
+      .withMessage('Priority must be one of: low, medium, high, urgent'),
+    query('due_before').optional().isISO8601()
+      .withMessage('due_before must be a valid ISO 8601 date'),
+    query('due_after').optional().isISO8601()
+      .withMessage('due_after must be a valid ISO 8601 date'),
+    query('page').optional().isInt({ min: 1 })
+      .withMessage('Page must be a positive integer'),
+    query('limit').optional().isInt({ min: 1, max: 100 })
+      .withMessage('Limit must be between 1 and 100')
+  ],
+  handleValidationErrors,
+  async (req, res) => {
     try {
-      const [tasks, totalCount] = await Promise.all([
-        Task.find(filters)
-          .sort({ created_at: -1 })
-          .limit(pagination.limit)
-          .skip(pagination.offset),
-        Task.countDocuments(filters)
-      ]);
+      const userId = req.user.id;
+      const {
+        status,
+        priority,
+        due_before: dueBefore,
+        due_after: dueAfter,
+        page = 1,
+        limit = 20
+      } = req.query;
+
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      // Build dynamic query
+      let whereClause = 'WHERE t.user_id = ? AND t.deleted_at IS NULL';
+      const queryParams = [userId];
+
+      if (status) {
+        whereClause += ' AND t.status = ?';
+        queryParams.push(status);
+      }
+
+      if (priority) {
+        whereClause += ' AND t.priority = ?';
+        queryParams.push(priority);
+      }
+
+      if (dueBefore) {
+        whereClause += ' AND t.due_date <= ?';
+        queryParams.push(dueBefore);
+      }
+
+      if (dueAfter) {
+        whereClause += ' AND t.due_date >= ?';
+        queryParams.push(dueAfter);
+      }
+
+      // Get total count for pagination
+      const countQuery = `
+        SELECT COUNT(*) as total 
+        FROM tasks t 
+        ${whereClause}
+      `;
       
-      const totalPages = Math.ceil(totalCount / pagination.limit);
-      const hasNext = pagination.page < totalPages;
-      const hasPrev = pagination.page > 1;
-      
-      res.status(200).json({
-        success: true,
-        data: {
-          tasks: tasks.map(task => task.toJSON()),
-          pagination: {
-            current_page: pagination.page,
-            per_page: pagination.limit,
-            total_items: totalCount,
-            total_pages: totalPages,
-            has_next: hasNext,
-            has_previous: hasPrev
-          }
+      const countResult = await db.query(countQuery, queryParams);
+      const total = countResult[0].total;
+
+      // Get tasks with user info
+      const tasksQuery = `
+        SELECT 
+          t.id,
+          t.title,
+          t.description,
+          t.status,
+          t.priority,
+          t.due_date,
+          t.completed_at,
+          t.created_at,
+          t.updated_at,
+          u.id as user_id,
+          u.username,
+          u.email
+        FROM tasks t
+        JOIN users u ON t.user_id = u.id
+        ${whereClause}
+        ORDER BY t.created_at DESC
+        LIMIT ? OFFSET ?
+      `;
+
+      queryParams.push(parseInt(limit), offset);
+      const tasks = await db.query(tasksQuery, queryParams);
+
+      // Format response
+      const formattedTasks = tasks.map(task => ({
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        status: task.status,
+        priority: task.priority,
+        due_date: task.due_date,
+        completed_at: task.completed_at,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        user: {
+          id: task.user_id,
+          username: task.username,
+          email: task.email
+        }
+      }));
+
+      const totalPages = Math.ceil(total / parseInt(limit));
+
+      res.json({
+        tasks: formattedTasks,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          totalPages,
+          hasNext: parseInt(page) < totalPages,
+          hasPrev: parseInt(page) > 1
         }
       });
+
     } catch (error) {
-      throw handleDbError(error);
+      logger.error('Error fetching tasks:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        message: 'Failed to fetch tasks'
+      });
     }
-  })
+  }
 );
 
 /**
- * GET /api/tasks/:taskId
- * Get single task with ownership verification
+ * GET /api/tasks/:task_id
+ * Get single task by ID
  */
-router.get('/:taskId',
-  validateRequest({ params: schemas.taskId }),
-  handleAsync(async (req, res) => {
-    const task = await verifyTaskOwnership(req.params.taskId, req.user.id);
-    
-    res.status(200).json({
-      success: true,
-      data: {
-        task: task.toJSON()
+router.get('/tasks/:task_id',
+  requireAuth,
+  [
+    param('task_id').isUUID().withMessage('Task ID must be a valid UUID')
+  ],
+  handleValidationErrors,
+  verifyTaskOwnership,
+  async (req, res) => {
+    try {
+      const task = req.task;
+
+      // Get task with user info
+      const query = `
+        SELECT 
+          t.id,
+          t.title,
+          t.description,
+          t.status,
+          t.priority,
+          t.due_date,
+          t.completed_at,
+          t.created_at,
+          t.updated_at,
+          u.id as user_id,
+          u.username,
+          u.email
+        FROM tasks t
+        JOIN users u ON t.user_id = u.id
+        WHERE t.id = ? AND t.deleted_at IS NULL
+      `;
+
+      const result = await db.query(query, [task.id]);
+      
+      if (result.length === 0) {
+        return res.status(404).json({
+          error: 'Task not found',
+          message: 'The requested task does not exist'
+        });
       }
-    });
-  })
+
+      const taskData = result[0];
+
+      res.json({
+        id: taskData.id,
+        title: taskData.title,
+        description: taskData.description,
+        status: taskData.status,
+        priority: taskData.priority,
+        due_date: taskData.due_date,
+        completed_at: taskData.completed_at,
+        created_at: taskData.created_at,
+        updated_at: taskData.updated_at,
+        user: {
+          id: taskData.user_id,
+          username: taskData.username,
+          email: taskData.email
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error fetching task:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        message: 'Failed to fetch task'
+      });
+    }
+  }
 );
 
 /**
  * POST /api/tasks
- * Create new task with validation
+ * Create a new task
  */
-router.post('/',
-  validateRequest({ body: schemas.createTask }),
-  handleAsync(async (req, res) => {
-    const taskData = {
-      ...req.body,
-      user_id: req.user.id,
-      status: 'pending',
-      created_at: new Date(),
-      updated_at: new Date()
-    };
+router.post('/tasks',
+  requireAuth,
+  [
+    body('title').trim().notEmpty().isLength({ min: 1, max: 255 })
+      .withMessage('Title is required and must be between 1 and 255 characters'),
+    body('description').trim().notEmpty().isLength({ min: 1, max: 2000 })
+      .withMessage('Description is required and must be between 1 and 2000 characters'),
+    body('priority').optional().isIn(['low', 'medium', 'high', 'urgent'])
+      .withMessage('Priority must be one of: low, medium, high, urgent'),
+    body('due_date').optional().isISO8601()
+      .withMessage('Due date must be a valid ISO 8601 date')
+  ],
+  handleValidationErrors,
+  async (req, res) => {
+    const transaction = await db.beginTransaction();
     
     try {
-      const task = await Task.create(taskData);
-      
+      const userId = req.user.id;
+      const { title, description, priority = 'medium', due_date } = req.body;
+
+      // Validate due_date is not in the past
+      if (due_date && new Date(due_date) < new Date()) {
+        return res.status(422).json({
+          error: 'Validation failed',
+          message: 'Due date cannot be in the past'
+        });
+      }
+
+      const taskId = crypto.randomUUID();
+      const now = new Date().toISOString();
+
+      const query = `
+        INSERT INTO tasks (
+          id, user_id, title, description, status, priority, due_date, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+      `;
+
+      await db.query(query, [
+        taskId,
+        userId,
+        title,
+        description,
+        priority,
+        due_date || null,
+        now,
+        now
+      ], { transaction });
+
+      await transaction.commit();
+
+      // Fetch the created task with user info
+      const createdTaskQuery = `
+        SELECT 
+          t.id,
+          t.title,
+          t.description,
+          t.status,
+          t.priority,
+          t.due_date,
+          t.completed_at,
+          t.created_at,
+          t.updated_at,
+          u.id as user_id,
+          u.username,
+          u.email
+        FROM tasks t
+        JOIN users u ON t.user_id = u.id
+        WHERE t.id = ?
+      `;
+
+      const createdTask = await db.query(createdTaskQuery, [taskId]);
+      const taskData = createdTask[0];
+
+      logger.info(`Task created successfully: ${taskId} by user: ${userId}`);
+
       res.status(201).json({
-        success: true,
-        message: 'Task created successfully',
-        data: {
-          task: task.toJSON()
+        id: taskData.id,
+        title: taskData.title,
+        description: taskData.description,
+        status: taskData.status,
+        priority: taskData.priority,
+        due_date: taskData.due_date,
+        completed_at: taskData.completed_at,
+        created_at: taskData.created_at,
+        updated_at: taskData.updated_at,
+        user: {
+          id: taskData.user_id,
+          username: taskData.username,
+          email: taskData.email
         }
       });
+
     } catch (error) {
-      throw handleDbError(error);
+      await transaction.rollback();
+      logger.error('Error creating task:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        message: 'Failed to create task'
+      });
     }
-  })
+  }
 );
 
 /**
- * PUT /api/tasks/:taskId
- * Update task with ownership verification
+ * PUT /api/tasks/:task_id
+ * Update an existing task
  */
-router.put('/:taskId',
-  validateRequest({ 
-    params: schemas.taskId,
-    body: schemas.updateTask 
-  }),
-  handleAsync(async (req, res) => {
-    await verifyTaskOwnership(req.params.taskId, req.user.id);
-    
-    const updateData = {
-      ...req.body,
-      updated_at: new Date()
-    };
+router.put('/tasks/:task_id',
+  requireAuth,
+  [
+    param('task_id').isUUID().withMessage('Task ID must be a valid UUID'),
+    body('title').optional().trim().isLength({ min: 1, max: 255 })
+      .withMessage('Title must be between 1 and 255 characters'),
+    body('description').optional().trim().isLength({ min: 1, max: 2000 })
+      .withMessage('Description must be between 1 and 2000 characters'),
+    body('status').optional().isIn(['pending', 'in_progress', 'completed', 'cancelled'])
+      .withMessage('Status must be one of: pending, in_progress, completed, cancelled'),
+    body('priority').optional().isIn(['low', 'medium', 'high', 'urgent'])
+      .withMessage('Priority must be one of: low, medium, high, urgent'),
+    body('due_date').optional().isISO8601()
+      .withMessage('Due date must be a valid ISO 8601 date'),
+    body('user_id').not().exists()
+      .withMessage('User ID cannot be modified')
+  ],
+  handleValidationErrors,
+  verifyTaskOwnership,
+  async (req, res) => {
+    const transaction = await db.beginTransaction();
     
     try {
-      const updatedTask = await Task.findByIdAndUpdate(
-        req.params.taskId,
-        updateData,
-        { 
-          new: true,
-          runValidators: true
-        }
-      );
-      
-      res.status(200).json({
-        success: true,
-        message: 'Task updated successfully',
-        data: {
-          task: updatedTask.toJSON()
-        }
-      });
-    } catch (error) {
-      throw handleDbError(error);
-    }
-  })
-);
+      const taskId = req.params.task_id;
+      const { title, description, status, priority, due_date } = req.body;
 
-/**
- * DELETE /api/tasks/:taskId
- * Soft delete task with ownership verification
- */
-router.delete('/:taskId',
-  validateRequest({ params: schemas.taskId }),
-  handleAsync(async (req, res) => {
-    await verifyTaskOwnership(req.params.taskId, req.user.id);
-    
-    try {
-      await Task.findByIdAndUpdate(
-        req.params.taskId,
-        { 
-          deleted_at: new Date(),
-          updated_at: new Date()
-        }
-      );
-      
-      res.status(204).send();
-    } catch (error) {
-      throw handleDbError(error);
-    }
-  })
-);
-
-/**
- * POST /api/tasks/:taskId/complete
- * Mark task as completed with timestamp
- */
-router.post('/:taskId/complete',
-  validateRequest({ params: schemas.taskId }),
-  handleAsync(async (req, res) => {
-    const task = await verifyTaskOwnership(req.params.taskId, req.user.id);
-    
-    if (task.status === 'completed') {
-      return res.status(400).json({
-        success: false,
-        error: {
-          message: 'Task is already completed',
-          code: 'TASK_ALREADY_COMPLETED'
-        }
-      });
-    }
-    
-    try {
-      const completedTask = await Task.findByIdAndUpdate(
-        req.params.taskId,
-        {
-          status: 'completed',
-          completed_at: new Date(),
-          updated_at: new Date()
-        },
-        { 
-          new: true,
-          runValidators: true
-        }
-      );
-      
-      res.status(200).json({
-        success: true,
-        message: 'Task marked as completed',
-        data: {
-          task: completedTask.toJSON()
-        }
-      });
-    } catch (error) {
-      throw handleDbError(error);
-    }
-  })
-);
-
-/**
- * Error handling middleware for this router
- */
-router.use((error, req, res, next) => {
-  // Handle Joi validation errors
-  if (error.isJoi) {
-    return res.status(400).json({
-      success: false,
-      error: {
-        message: 'Validation failed',
-        details: error.details.map(detail => ({
-          field: detail.path.join('.'),
-          message: detail.message
-        }))
+      // Validate due_date is not in the past (if provided)
+      if (due_date && new Date(due_date) < new Date()) {
+        return res.status(422).json({
+          error: 'Validation failed',
+          message: 'Due date cannot be in the past'
+        });
       }
-    });
-  }
-  
-  // Handle custom AppError instances
-  if (error instanceof AppError) {
-    return res.status(error.statusCode).json({
-      success: false,
-      error: {
-        message: error.message,
-        code: error.code || 'APPLICATION_ERROR'
-      }
-    });
-  }
-  
-  // Handle database connection errors
-  if (error.name === 'MongoError' || error.name === 'MongooseError') {
-    return res.status(500).json({
-      success: false,
-      error: {
-        message: 'Database operation failed',
-        code: 'DATABASE_ERROR'
-      }
-    });
-  }
-  
-  // Handle unexpected errors
-  console.error('Unexpected error in tasks API:', error);
-  res.status(500).json({
-    success: false,
-    error: {
-      message: 'Internal server error',
-      code: 'INTERNAL_ERROR'
-    }
-  });
-});
 
-module.exports = router;
+      // Build dynamic update query
+      const updateFields = [];
+      const updateValues = [];
+
+      if (title !== undefined) {
+        updateFields.push('title = ?');
+        updateValues.push(title);
+      }
+
+      if (description !== undefined) {
+        updateFields.push('description = ?');
+        updateValues.push(description);
+      }
+
+      if (status !== undefined) {
+        updateFields.push('status = ?');
+        updateValues.push(status);
+        
+        // Set completed_at when status changes to completed
+        if (status === 'completed') {
+          updateFields.push('completed_at = ?');
+          updateValues.push(new Date().toISOString());
+        } else if (req.task.status === 'completed' && status !== 'completed') {
+          // Clear completed_at if moving away from completed status
+          updateFields.push('completed_at = NULL');
+        }
+      }
+
+      if (priority !== undefined) {
+        updateFields.push('priority = ?');
+        updateValues.push(priority);
+      }
+
+      if (due_date !== undefined) {
+        updateFields.push('due_date = ?');
+        updateValues.push(due_date);
+      }
+
+      if (updateFields.length === 0) {
+        return res.status(422).json({
+          error: 'Validation failed',
+          message: 'At least one field must be provided for update'
+        });
+      }
+
+      updateFields.push('updated_at = ?');
+      updateValues.push(new Date().toISOString());
+      updateValues.push(taskId);
+
+      const updateQuery = `
+        UPDATE tasks 
+        SET ${updateFields.join(', ')} 
+        WHERE id = ? AND deleted_at IS NULL
+      `;
+
+      await db.query(updateQuery, updateValues, { transaction });
+      await transaction.commit();
+
+      //
