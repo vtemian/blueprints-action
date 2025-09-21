@@ -1,432 +1,402 @@
-I'll generate a complete, production-ready Go implementation for the task management API. Here's the comprehensive solution:
-
-## Project Structure
-
-```
-api/
-├── tasks/
-│   ├── handler.go
-│   ├── middleware.go
-│   ├── models.go
-│   ├── repository.go
-│   ├── service.go
-│   └── validators.go
-├── errors/
-│   └── errors.go
-└── main.go
-```
-
-## 1. Error Handling (`errors/errors.go`)
-
-```go
-package errors
-
-import (
-	"fmt"
-	"net/http"
-
-	"github.com/gin-gonic/gin"
-)
-
-// AppError represents application-specific errors
-type AppError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Status  int    `json:"-"`
-}
-
-func (e *AppError) Error() string {
-	return e.Message
-}
-
-// Predefined error types
-var (
-	ErrTaskNotFound     = &AppError{"TASK_NOT_FOUND", "Task not found", http.StatusNotFound}
-	ErrUnauthorized     = &AppError{"UNAUTHORIZED", "Authentication required", http.StatusUnauthorized}
-	ErrForbidden        = &AppError{"FORBIDDEN", "Access denied", http.StatusForbidden}
-	ErrInvalidInput     = &AppError{"INVALID_INPUT", "Invalid input data", http.StatusBadRequest}
-	ErrValidationFailed = &AppError{"VALIDATION_FAILED", "Validation failed", http.StatusUnprocessableEntity}
-	ErrInternalServer   = &AppError{"INTERNAL_ERROR", "Internal server error", http.StatusInternalServerError}
-)
-
-// ErrorResponse represents the structure of error responses
-type ErrorResponse struct {
-	Error   *AppError              `json:"error"`
-	Details map[string]interface{} `json:"details,omitempty"`
-}
-
-// ValidationError represents validation error details
-type ValidationError struct {
-	Field   string `json:"field"`
-	Message string `json:"message"`
-	Value   string `json:"value,omitempty"`
-}
-
-// NewValidationError creates a new validation error with details
-func NewValidationError(message string, details []ValidationError) *ErrorResponse {
-	return &ErrorResponse{
-		Error: ErrValidationFailed,
-		Details: map[string]interface{}{
-			"validation_errors": details,
-		},
-	}
-}
-
-// HandleError sends appropriate error response
-func HandleError(c *gin.Context, err error) {
-	switch e := err.(type) {
-	case *AppError:
-		c.JSON(e.Status, &ErrorResponse{Error: e})
-	default:
-		// Log the actual error for debugging but don't expose it
-		fmt.Printf("Internal error: %v\n", err)
-		c.JSON(http.StatusInternalServerError, &ErrorResponse{Error: ErrInternalServer})
-	}
-}
-```
-
-## 2. Models (`tasks/models.go`)
-
-```go
-package tasks
-
-import (
-	"time"
-
-	"gorm.io/gorm"
-)
-
-// TaskStatus represents the status of a task
-type TaskStatus string
-
-const (
-	TaskStatusPending   TaskStatus = "pending"
-	TaskStatusCompleted TaskStatus = "completed"
-)
-
-// TaskPriority represents the priority level of a task
-type TaskPriority string
-
-const (
-	TaskPriorityLow    TaskPriority = "low"
-	TaskPriorityMedium TaskPriority = "medium"
-	TaskPriorityHigh   TaskPriority = "high"
-)
-
-// Task represents a task in the system
-type Task struct {
-	ID          uint          `json:"id" gorm:"primaryKey"`
-	Title       string        `json:"title" gorm:"not null;index"`
-	Description string        `json:"description" gorm:"type:text"`
-	Status      TaskStatus    `json:"status" gorm:"default:'pending';index"`
-	Priority    TaskPriority  `json:"priority" gorm:"default:'medium';index"`
-	DueDate     *time.Time    `json:"due_date,omitempty" gorm:"index"`
-	CompletedAt *time.Time    `json:"completed_at,omitempty"`
-	UserID      uint          `json:"user_id" gorm:"not null;index"`
-	CreatedAt   time.Time     `json:"created_at"`
-	UpdatedAt   time.Time     `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
-}
-
-// CreateTaskRequest represents the request payload for creating a task
-type CreateTaskRequest struct {
-	Title       string        `json:"title" validate:"required,min=1,max=255" example:"Complete project documentation"`
-	Description string        `json:"description" validate:"required,min=1,max=2000" example:"Write comprehensive API documentation"`
-	Priority    *TaskPriority `json:"priority,omitempty" validate:"omitempty,oneof=low medium high" example:"high"`
-	DueDate     *time.Time    `json:"due_date,omitempty" validate:"omitempty,future" example:"2024-12-31T23:59:59Z"`
-}
-
-// UpdateTaskRequest represents the request payload for updating a task
-type UpdateTaskRequest struct {
-	Title       *string       `json:"title,omitempty" validate:"omitempty,min=1,max=255"`
-	Description *string       `json:"description,omitempty" validate:"omitempty,min=1,max=2000"`
-	Priority    *TaskPriority `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
-	DueDate     *time.Time    `json:"due_date,omitempty" validate:"omitempty,future"`
-	Status      *TaskStatus   `json:"status,omitempty" validate:"omitempty,oneof=pending completed"`
-}
-
-// TaskListRequest represents query parameters for listing tasks
-type TaskListRequest struct {
-	Status    *TaskStatus   `form:"status" validate:"omitempty,oneof=pending completed"`
-	Priority  *TaskPriority `form:"priority" validate:"omitempty,oneof=low medium high"`
-	DueBefore *time.Time    `form:"due_before" validate:"omitempty"`
-	DueAfter  *time.Time    `form:"due_after" validate:"omitempty"`
-	Page      int           `form:"page" validate:"min=1" default:"1"`
-	Limit     int           `form:"limit" validate:"min=1,max=100" default:"20"`
-}
-
-// TaskResponse represents a task in API responses
-type TaskResponse struct {
-	ID          uint         `json:"id"`
-	Title       string       `json:"title"`
-	Description string       `json:"description"`
-	Status      TaskStatus   `json:"status"`
-	Priority    TaskPriority `json:"priority"`
-	DueDate     *time.Time   `json:"due_date,omitempty"`
-	CompletedAt *time.Time   `json:"completed_at,omitempty"`
-	CreatedAt   time.Time    `json:"created_at"`
-	UpdatedAt   time.Time    `json:"updated_at"`
-}
-
-// TaskListResponse represents the response for task listing
-type TaskListResponse struct {
-	Tasks      []TaskResponse `json:"tasks"`
-	Pagination Pagination     `json:"pagination"`
-}
-
-// Pagination represents pagination information
-type Pagination struct {
-	Page       int   `json:"page"`
-	Limit      int   `json:"limit"`
-	Total      int64 `json:"total"`
-	TotalPages int   `json:"total_pages"`
-	HasNext    bool  `json:"has_next"`
-	HasPrev    bool  `json:"has_prev"`
-}
-
-// ToResponse converts a Task model to TaskResponse
-func (t *Task) ToResponse() TaskResponse {
-	return TaskResponse{
-		ID:          t.ID,
-		Title:       t.Title,
-		Description: t.Description,
-		Status:      t.Status,
-		Priority:    t.Priority,
-		DueDate:     t.DueDate,
-		CompletedAt: t.CompletedAt,
-		CreatedAt:   t.CreatedAt,
-		UpdatedAt:   t.UpdatedAt,
-	}
-}
-
-// CalculatePagination calculates pagination metadata
-func CalculatePagination(page, limit int, total int64) Pagination {
-	totalPages := int((total + int64(limit) - 1) / int64(limit))
-	
-	return Pagination{
-		Page:       page,
-		Limit:      limit,
-		Total:      total,
-		TotalPages: totalPages,
-		HasNext:    page < totalPages,
-		HasPrev:    page > 1,
-	}
-}
-```
-
-## 3. Custom Validators (`tasks/validators.go`)
-
-```go
-package tasks
-
-import (
-	"time"
-
-	"github.com/go-playground/validator/v10"
-)
-
-// RegisterCustomValidators registers custom validation rules
-func RegisterCustomValidators(v *validator.Validate) {
-	v.RegisterValidation("future", validateFutureDate)
-}
-
-// validateFutureDate validates that a date is in the future
-func validateFutureDate(fl validator.FieldLevel) bool {
-	date, ok := fl.Field().Interface().(time.Time)
-	if !ok {
-		// If it's a pointer, dereference it
-		if datePtr, ok := fl.Field().Interface().(*time.Time); ok && datePtr != nil {
-			date = *datePtr
-		} else {
-			return true // Allow nil values, use omitempty for required validation
-		}
-	}
-	
-	return date.After(time.Now())
-}
-```
-
-## 4. JWT Middleware (`tasks/middleware.go`)
-
-```go
-package tasks
-
-import (
-	"fmt"
-	"net/http"
-	"strconv"
-	"strings"
-
-	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-
-	apierrors "your-project/api/errors"
-)
-
-// JWTClaims represents the JWT claims structure
-type JWTClaims struct {
-	UserID uint   `json:"user_id"`
-	Email  string `json:"email"`
-	jwt.RegisteredClaims
-}
-
-// JWTMiddleware creates a JWT authentication middleware
-func JWTMiddleware(secretKey string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			apierrors.HandleError(c, apierrors.ErrUnauthorized)
-			c.Abort()
-			return
-		}
-
-		// Check if the header starts with "Bearer "
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		if tokenString == authHeader {
-			apierrors.HandleError(c, apierrors.ErrUnauthorized)
-			c.Abort()
-			return
-		}
-
-		// Parse and validate the token
-		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
-			// Validate the signing method
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return []byte(secretKey), nil
-		})
-
-		if err != nil {
-			apierrors.HandleError(c, apierrors.ErrUnauthorized)
-			c.Abort()
-			return
-		}
-
-		// Extract claims
-		if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
-			c.Set("user_id", claims.UserID)
-			c.Set("user_email", claims.Email)
-			c.Next()
-		} else {
-			apierrors.HandleError(c, apierrors.ErrUnauthorized)
-			c.Abort()
-			return
-		}
-	}
-}
-
-// GetUserIDFromContext extracts user ID from gin context
-func GetUserIDFromContext(c *gin.Context) (uint, error) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		return 0, apierrors.ErrUnauthorized
-	}
-
-	switch id := userID.(type) {
-	case uint:
-		return id, nil
-	case string:
-		parsed, err := strconv.ParseUint(id, 10, 32)
-		if err != nil {
-			return 0, apierrors.ErrUnauthorized
-		}
-		return uint(parsed), nil
-	default:
-		return 0, apierrors.ErrUnauthorized
-	}
-}
-
-// RateLimitMiddleware implements basic rate limiting
-func RateLimitMiddleware() gin.HandlerFunc {
-	// In production, use Redis or similar for distributed rate limiting
-	return gin.HandlerFunc(func(c *gin.Context) {
-		// Basic implementation - in production use proper rate limiting
-		c.Header("X-RateLimit-Limit", "1000")
-		c.Header("X-RateLimit-Remaining", "999")
-		c.Next()
-	})
-}
-```
-
-## 5. Repository Layer (`tasks/repository.go`)
-
-```go
-package tasks
+package handlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
-	"gorm.io/gorm"
-
-	apierrors "your-project/api/errors"
+	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 )
 
-// TaskRepository defines the interface for task data operations
+// Request/Response Models
+type CreateTaskRequest struct {
+	Title       string     `json:"title" validate:"required,min=1,max=255"`
+	Description string     `json:"description" validate:"required,min=1,max=1000"`
+	Priority    *string    `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+}
+
+type UpdateTaskRequest struct {
+	Title       *string    `json:"title,omitempty" validate:"omitempty,min=1,max=255"`
+	Description *string    `json:"description,omitempty" validate:"omitempty,min=1,max=1000"`
+	Priority    *string    `json:"priority,omitempty" validate:"omitempty,oneof=low medium high"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+	Status      *string    `json:"status,omitempty" validate:"omitempty,oneof=pending in_progress completed"`
+}
+
+type TaskResponse struct {
+	ID          int        `json:"id"`
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Priority    string     `json:"priority"`
+	Status      string     `json:"status"`
+	DueDate     *time.Time `json:"due_date"`
+	CompletedAt *time.Time `json:"completed_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	UserID      int        `json:"user_id"`
+}
+
+type TaskListResponse struct {
+	Tasks      []TaskResponse `json:"tasks"`
+	Total      int            `json:"total"`
+	Page       int            `json:"page"`
+	Limit      int            `json:"limit"`
+	TotalPages int            `json:"total_pages"`
+}
+
+type ErrorResponse struct {
+	Error   string                 `json:"error"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+type SuccessResponse struct {
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// Task represents the task model
+type Task struct {
+	ID          int        `db:"id"`
+	Title       string     `db:"title"`
+	Description string     `db:"description"`
+	Priority    string     `db:"priority"`
+	Status      string     `db:"status"`
+	DueDate     *time.Time `db:"due_date"`
+	CompletedAt *time.Time `db:"completed_at"`
+	CreatedAt   time.Time  `db:"created_at"`
+	UpdatedAt   time.Time  `db:"updated_at"`
+	DeletedAt   *time.Time `db:"deleted_at"`
+	UserID      int        `db:"user_id"`
+}
+
+// Repository interface for dependency injection
 type TaskRepository interface {
-	Create(ctx context.Context, task *Task) error
-	GetByID(ctx context.Context, id, userID uint) (*Task, error)
-	Update(ctx context.Context, task *Task) error
-	Delete(ctx context.Context, id, userID uint) error
-	List(ctx context.Context, userID uint, filters TaskListRequest) ([]Task, int64, error)
-	MarkComplete(ctx context.Context, id, userID uint) error
+	GetTasksByUserID(ctx context.Context, userID int, filters TaskFilters, offset, limit int) ([]Task, int, error)
+	GetTaskByID(ctx context.Context, taskID int) (*Task, error)
+	CreateTask(ctx context.Context, task *Task) error
+	UpdateTask(ctx context.Context, task *Task) error
+	SoftDeleteTask(ctx context.Context, taskID int) error
+	MarkTaskComplete(ctx context.Context, taskID int, completedAt time.Time) error
 }
 
-// taskRepository implements TaskRepository interface
-type taskRepository struct {
-	db *gorm.DB
+// AuthService interface for JWT handling
+type AuthService interface {
+	ValidateToken(token string) (*Claims, error)
 }
 
-// NewTaskRepository creates a new task repository instance
-func NewTaskRepository(db *gorm.DB) TaskRepository {
-	return &taskRepository{db: db}
+type Claims struct {
+	UserID int    `json:"user_id"`
+	Email  string `json:"email"`
 }
 
-// Create creates a new task in the database
-func (r *taskRepository) Create(ctx context.Context, task *Task) error {
-	if err := r.db.WithContext(ctx).Create(task).Error; err != nil {
-		return fmt.Errorf("failed to create task: %w", err)
+// TaskFilters for query parameters
+type TaskFilters struct {
+	Status    string
+	Priority  string
+	DueBefore *time.Time
+	DueAfter  *time.Time
+}
+
+// TaskHandler contains dependencies
+type TaskHandler struct {
+	repo      TaskRepository
+	auth      AuthService
+	validator *validator.Validate
+}
+
+// NewTaskHandler creates a new task handler with dependencies
+func NewTaskHandler(repo TaskRepository, auth AuthService) *TaskHandler {
+	return &TaskHandler{
+		repo:      repo,
+		auth:      auth,
+		validator: validator.New(),
 	}
-	return nil
 }
 
-// GetByID retrieves a task by ID and user ID
-func (r *taskRepository) GetByID(ctx context.Context, id, userID uint) (*Task, error) {
-	var task Task
-	err := r.db.WithContext(ctx).
-		Where("id = ? AND user_id = ?", id, userID).
-		First(&task).Error
-
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, apierrors.ErrTaskNotFound
+// JWT Authentication Middleware
+func (h *TaskHandler) AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			h.errorResponse(c, http.StatusUnauthorized, "missing_auth_header", "Authorization header is required", nil)
+			c.Abort()
+			return
 		}
-		return nil, fmt.Errorf("failed to get task: %w", err)
-	}
 
-	return &task, nil
+		tokenParts := strings.Split(authHeader, " ")
+		if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+			h.errorResponse(c, http.StatusUnauthorized, "invalid_auth_header", "Authorization header must be Bearer token", nil)
+			c.Abort()
+			return
+		}
+
+		claims, err := h.auth.ValidateToken(tokenParts[1])
+		if err != nil {
+			log.Printf("Token validation failed: %v", err)
+			h.errorResponse(c, http.StatusUnauthorized, "invalid_token", "Invalid or expired token", nil)
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", claims.UserID)
+		c.Set("user_email", claims.Email)
+		c.Next()
+	}
 }
 
-// Update updates an existing task
-func (r *taskRepository) Update(ctx context.Context, task *Task) error {
-	result := r.db.WithContext(ctx).
-		Where("user_id = ?", task.UserID).
-		Save(task)
+// GET /api/tasks - List user's tasks with filtering and pagination
+func (h *TaskHandler) ListTasks(c *gin.Context) {
+	userID := c.GetInt("user_id")
+	
+	// Parse pagination parameters
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	
+	offset := (page - 1) * limit
 
-	if result.Error != nil {
-		return fmt.Errorf("failed to update task: %w", result.Error)
+	// Parse filters
+	filters := TaskFilters{
+		Status:   c.Query("status"),
+		Priority: c.Query("priority"),
 	}
 
-	if result.RowsAffected == 0 {
-		return apierrors.ErrTaskNotFound
+	if dueBefore := c.Query("due_before"); dueBefore != "" {
+		if parsed, err := time.Parse(time.RFC3339, dueBefore); err == nil {
+			filters.DueBefore = &parsed
+		} else {
+			h.errorResponse(c, http.StatusBadRequest, "invalid_date_format", "due_before must be in RFC3339 format", map[string]interface{}{
+				"field": "due_before",
+				"value": dueBefore,
+			})
+			return
+		}
 	}
 
-	return nil
+	if dueAfter := c.Query("due_after"); dueAfter != "" {
+		if parsed, err := time.Parse(time.RFC3339, dueAfter); err == nil {
+			filters.DueAfter = &parsed
+		} else {
+			h.errorResponse(c, http.StatusBadRequest, "invalid_date_format", "due_after must be in RFC3339 format", map[string]interface{}{
+				"field": "due_after",
+				"value": dueAfter,
+			})
+			return
+		}
+	}
+
+	// Validate filter values
+	if filters.Status != "" && !isValidStatus(filters.Status) {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_status", "Status must be one of: pending, in_progress, completed", nil)
+		return
+	}
+
+	if filters.Priority != "" && !isValidPriority(filters.Priority) {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_priority", "Priority must be one of: low, medium, high", nil)
+		return
+	}
+
+	tasks, total, err := h.repo.GetTasksByUserID(c.Request.Context(), userID, filters, offset, limit)
+	if err != nil {
+		log.Printf("Failed to get tasks for user %d: %v", userID, err)
+		h.errorResponse(c, http.StatusInternalServerError, "database_error", "Failed to retrieve tasks", nil)
+		return
+	}
+
+	taskResponses := make([]TaskResponse, len(tasks))
+	for i, task := range tasks {
+		taskResponses[i] = h.taskToResponse(task)
+	}
+
+	totalPages := (total + limit - 1) / limit
+
+	response := TaskListResponse{
+		Tasks:      taskResponses,
+		Total:      total,
+		Page:       page,
+		Limit:      limit,
+		TotalPages: totalPages,
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
-// Delete soft deletes a task
-func (r *taskRepository) Delete(ctx context.Context, id, userID uint) error {
-	result := r.db.WithContext(ctx).
-		Where("id = ? AND user_id = ?", id, userID).
-		Delete(&Task{})
+// GET /api/tasks/:id - Get single task with ownership verification
+func (h *TaskHandler) GetTask(c *gin.Context) {
+	userID := c.GetInt("user_id")
+	taskID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_task_id", "Task ID must be a valid integer", nil)
+		return
+	}
+
+	task, err := h.repo.GetTaskByID(c.Request.Context(), taskID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			h.errorResponse(c, http.StatusNotFound, "task_not_found", "Task not found", nil)
+			return
+		}
+		log.Printf("Failed to get task %d: %v", taskID, err)
+		h.errorResponse(c, http.StatusInternalServerError, "database_error", "Failed to retrieve task", nil)
+		return
+	}
+
+	if !h.verifyTaskOwnership(task, userID) {
+		h.errorResponse(c, http.StatusForbidden, "access_denied", "You don't have permission to access this task", nil)
+		return
+	}
+
+	c.JSON(http.StatusOK, h.taskToResponse(*task))
+}
+
+// POST /api/tasks - Create task
+func (h *TaskHandler) CreateTask(c *gin.Context) {
+	userID := c.GetInt("user_id")
+	
+	var req CreateTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_json", "Invalid JSON format", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	if err := h.validator.Struct(&req); err != nil {
+		h.validationErrorResponse(c, err)
+		return
+	}
+
+	task := &Task{
+		Title:       req.Title,
+		Description: req.Description,
+		Priority:    "medium", // default priority
+		Status:      "pending",
+		DueDate:     req.DueDate,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		UserID:      userID,
+	}
+
+	if req.Priority != nil {
+		task.Priority = *req.Priority
+	}
+
+	if err := h.repo.CreateTask(c.Request.Context(), task); err != nil {
+		log.Printf("Failed to create task for user %d: %v", userID, err)
+		h.errorResponse(c, http.StatusInternalServerError, "database_error", "Failed to create task", nil)
+		return
+	}
+
+	c.JSON(http.StatusCreated, SuccessResponse{
+		Message: "Task created successfully",
+		Data:    h.taskToResponse(*task),
+	})
+}
+
+// PUT /api/tasks/:id - Update task with ownership verification
+func (h *TaskHandler) UpdateTask(c *gin.Context) {
+	userID := c.GetInt("user_id")
+	taskID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_task_id", "Task ID must be a valid integer", nil)
+		return
+	}
+
+	var req UpdateTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_json", "Invalid JSON format", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	if err := h.validator.Struct(&req); err != nil {
+		h.validationErrorResponse(c, err)
+		return
+	}
+
+	task, err := h.repo.GetTaskByID(c.Request.Context(), taskID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			h.errorResponse(c, http.StatusNotFound, "task_not_found", "Task not found", nil)
+			return
+		}
+		log.Printf("Failed to get task %d: %v", taskID, err)
+		h.errorResponse(c, http.StatusInternalServerError, "database_error", "Failed to retrieve task", nil)
+		return
+	}
+
+	if !h.verifyTaskOwnership(task, userID) {
+		h.errorResponse(c, http.StatusForbidden, "access_denied", "You don't have permission to update this task", nil)
+		return
+	}
+
+	// Update fields if provided
+	if req.Title != nil {
+		task.Title = *req.Title
+	}
+	if req.Description != nil {
+		task.Description = *req.Description
+	}
+	if req.Priority != nil {
+		task.Priority = *req.Priority
+	}
+	if req.Status != nil {
+		task.Status = *req.Status
+		// If marking as completed, set completed_at timestamp
+		if *req.Status == "completed" && task.CompletedAt == nil {
+			now := time.Now()
+			task.CompletedAt = &now
+		}
+	}
+	if req.DueDate != nil {
+		task.DueDate = req.DueDate
+	}
+	
+	task.UpdatedAt = time.Now()
+
+	if err := h.repo.UpdateTask(c.Request.Context(), task); err != nil {
+		log.Printf("Failed to update task %d: %v", taskID, err)
+		h.errorResponse(c, http.StatusInternalServerError, "database_error", "Failed to update task", nil)
+		return
+	}
+
+	c.JSON(http.StatusOK, SuccessResponse{
+		Message: "Task updated successfully",
+		Data:    h.taskToResponse(*task),
+	})
+}
+
+// DELETE /api/tasks/:id - Soft delete with ownership verification
+func (h *TaskHandler) DeleteTask(c *gin.Context) {
+	userID := c.GetInt("user_id")
+	taskID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_task_id", "Task ID must be a valid integer", nil)
+		return
+	}
+
+	task, err := h.repo.GetTaskByID(c.Request.Context(), taskID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			h.errorResponse(c, http.StatusNotFound, "task_not_found", "Task not found", nil)
+			return
+		}
+		log.Printf("Failed to get task %d: %v", taskID, err)

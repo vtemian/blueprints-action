@@ -1,15 +1,14 @@
-// Package database provides database connection management and session handling
-// for the web application with SQLite support and connection pooling.
+// Package database provides database connection and session management
+// for SQLite with support for connection pooling, async operations,
+// and dependency injection patterns.
 package database
 
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,37 +16,49 @@ import (
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
-// Database connection instance
-var (
-	db   *sql.DB
-	once sync.Once
-	mu   sync.RWMutex
-)
-
-// Configuration constants
+// Database configuration constants
 const (
-	defaultDatabaseURL     = "sqlite:///./tasks.db"
-	maxOpenConnections     = 25
-	maxIdleConnections     = 5
-	connectionMaxLifetime  = 5 * time.Minute
-	connectionMaxIdleTime  = 1 * time.Minute
-	defaultTimeout         = 30 * time.Second
-	maxRetries            = 3
-	baseRetryDelay        = 100 * time.Millisecond
+	DefaultDatabaseURL     = "./tasks.db"
+	DefaultMaxOpenConns    = 25
+	DefaultMaxIdleConns    = 5
+	DefaultConnMaxLifetime = 5 * time.Minute
+	DefaultConnMaxIdleTime = 1 * time.Minute
+	DefaultConnectTimeout  = 10 * time.Second
+	DefaultQueryTimeout    = 30 * time.Second
 )
 
-// Custom error types for database operations
-var (
-	ErrDatabaseNotInitialized = errors.New("database not initialized")
-	ErrConnectionFailed       = errors.New("database connection failed")
-	ErrInvalidDatabaseURL     = errors.New("invalid database URL")
-	ErrTransactionFailed      = errors.New("transaction failed")
-)
+// DatabaseConfig holds configuration for database connection
+type DatabaseConfig struct {
+	DatabaseURL     string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+	ConnectTimeout  time.Duration
+	QueryTimeout    time.Duration
+	EnableWAL       bool
+	EnableForeignKeys bool
+}
 
-// DatabaseError wraps database errors with additional context
+// DefaultConfig returns a default database configuration
+func DefaultConfig() *DatabaseConfig {
+	return &DatabaseConfig{
+		DatabaseURL:     getEnv("DATABASE_URL", DefaultDatabaseURL),
+		MaxOpenConns:    DefaultMaxOpenConns,
+		MaxIdleConns:    DefaultMaxIdleConns,
+		ConnMaxLifetime: DefaultConnMaxLifetime,
+		ConnMaxIdleTime: DefaultConnMaxIdleTime,
+		ConnectTimeout:  DefaultConnectTimeout,
+		QueryTimeout:    DefaultQueryTimeout,
+		EnableWAL:       true,
+		EnableForeignKeys: true,
+	}
+}
+
+// DatabaseError represents database-specific errors
 type DatabaseError struct {
-	Op  string // Operation that failed
-	Err error  // Underlying error
+	Op  string
+	Err error
 }
 
 func (e *DatabaseError) Error() string {
@@ -58,9 +69,35 @@ func (e *DatabaseError) Unwrap() error {
 	return e.Err
 }
 
+// Database interface for dependency injection and testing
+type Database interface {
+	DB() *sql.DB
+	Ping(ctx context.Context) error
+	Close() error
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+// SQLiteDatabase implements Database interface
+type SQLiteDatabase struct {
+	db     *sql.DB
+	config *DatabaseConfig
+	logger *slog.Logger
+	mu     sync.RWMutex
+	closed bool
+}
+
+// Global database instance
+var (
+	instance Database
+	once     sync.Once
+)
+
 // BaseModel provides common fields for all database models
 type BaseModel struct {
-	ID        string    `db:"id" json:"id"`
+	ID        uuid.UUID `db:"id" json:"id"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
@@ -69,331 +106,392 @@ type BaseModel struct {
 func NewBaseModel() BaseModel {
 	now := time.Now().UTC()
 	return BaseModel{
-		ID:        uuid.New().String(),
+		ID:        uuid.New(),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 }
 
-// UpdateTimestamp updates the UpdatedAt field to current time
-func (bm *BaseModel) UpdateTimestamp() {
+// Touch updates the UpdatedAt timestamp
+func (bm *BaseModel) Touch() {
 	bm.UpdatedAt = time.Now().UTC()
 }
 
-// Config holds database configuration
-type Config struct {
-	DatabaseURL           string
-	MaxOpenConnections    int
-	MaxIdleConnections    int
-	ConnectionMaxLifetime time.Duration
-	ConnectionMaxIdleTime time.Duration
-}
-
-// LoadConfig loads database configuration from environment variables
-func LoadConfig() *Config {
-	config := &Config{
-		DatabaseURL:           getEnv("DATABASE_URL", defaultDatabaseURL),
-		MaxOpenConnections:    maxOpenConnections,
-		MaxIdleConnections:    maxIdleConnections,
-		ConnectionMaxLifetime: connectionMaxLifetime,
-		ConnectionMaxIdleTime: connectionMaxIdleTime,
+// NewDatabase creates a new database connection with the given configuration
+func NewDatabase(config *DatabaseConfig) (Database, error) {
+	if config == nil {
+		config = DefaultConfig()
 	}
 
-	return config
-}
+	logger := slog.Default().With("component", "database")
 
-// getEnv gets environment variable with fallback to default value
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
+	// Create context with timeout for connection
+	ctx, cancel := context.WithTimeout(context.Background(), config.ConnectTimeout)
+	defer cancel()
 
-// parseDatabaseURL parses the database URL and returns driver and connection string
-func parseDatabaseURL(databaseURL string) (driver, connectionString string, err error) {
-	if databaseURL == "" {
-		return "", "", &DatabaseError{Op: "parse_url", Err: ErrInvalidDatabaseURL}
-	}
-
-	// Handle SQLite URLs
-	if strings.HasPrefix(databaseURL, "sqlite://") {
-		return "sqlite3", strings.TrimPrefix(databaseURL, "sqlite://"), nil
-	}
-	if strings.HasPrefix(databaseURL, "sqlite:///") {
-		return "sqlite3", strings.TrimPrefix(databaseURL, "sqlite:///"), nil
-	}
-
-	// Default to SQLite if no scheme provided
-	return "sqlite3", databaseURL, nil
-}
-
-// InitDB initializes the database connection with proper configuration
-func InitDB() error {
-	var initErr error
+	// Build connection string with SQLite-specific options
+	connStr := buildConnectionString(config)
 	
-	once.Do(func() {
-		config := LoadConfig()
-		
-		driver, connectionString, err := parseDatabaseURL(config.DatabaseURL)
-		if err != nil {
-			initErr = fmt.Errorf("failed to parse database URL: %w", err)
-			return
-		}
-
-		// Add SQLite-specific pragmas for better performance and reliability
-		if driver == "sqlite3" {
-			connectionString += "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(memory)&_pragma=mmap_size(268435456)"
-		}
-
-		// Open database connection with retry logic
-		db, err = openWithRetry(driver, connectionString)
-		if err != nil {
-			initErr = &DatabaseError{Op: "init", Err: fmt.Errorf("%w: %v", ErrConnectionFailed, err)}
-			return
-		}
-
-		// Configure connection pool
-		db.SetMaxOpenConns(config.MaxOpenConnections)
-		db.SetMaxIdleConns(config.MaxIdleConnections)
-		db.SetConnMaxLifetime(config.ConnectionMaxLifetime)
-		db.SetConnMaxIdleTime(config.ConnectionMaxIdleTime)
-
-		// Verify connection
-		ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-		defer cancel()
-
-		if err := db.PingContext(ctx); err != nil {
-			db.Close()
-			db = nil
-			initErr = &DatabaseError{Op: "ping", Err: fmt.Errorf("%w: %v", ErrConnectionFailed, err)}
-			return
-		}
-
-		// Create tables
-		if err := createTables(ctx); err != nil {
-			db.Close()
-			db = nil
-			initErr = &DatabaseError{Op: "create_tables", Err: err}
-			return
-		}
-
-		log.Printf("Database initialized successfully with driver: %s", driver)
-	})
-
-	return initErr
-}
-
-// openWithRetry attempts to open database connection with exponential backoff retry
-func openWithRetry(driver, connectionString string) (*sql.DB, error) {
-	var db *sql.DB
-	var err error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		db, err = sql.Open(driver, connectionString)
-		if err == nil {
-			return db, nil
-		}
-
-		if attempt < maxRetries-1 {
-			delay := baseRetryDelay * time.Duration(1<<attempt) // Exponential backoff
-			log.Printf("Database connection attempt %d failed, retrying in %v: %v", attempt+1, delay, err)
-			time.Sleep(delay)
-		}
-	}
-
-	return nil, fmt.Errorf("failed to open database after %d attempts: %w", maxRetries, err)
-}
-
-// createTables creates the necessary database tables
-func createTables(ctx context.Context) error {
-	// Example table creation - modify according to your needs
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS tasks (
-			id TEXT PRIMARY KEY,
-			title TEXT NOT NULL,
-			description TEXT,
-			completed BOOLEAN DEFAULT FALSE,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_tasks_completed ON tasks(completed)`,
-	}
-
-	tx, err := db.BeginTx(ctx, nil)
+	db, err := sql.Open("sqlite3", connStr)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, &DatabaseError{Op: "open", Err: err}
 	}
-	defer func() {
-		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				log.Printf("Failed to rollback transaction: %v", rbErr)
-			}
+
+	// Configure connection pool
+	db.SetMaxOpenConns(config.MaxOpenConns)
+	db.SetMaxIdleConns(config.MaxIdleConns)
+	db.SetConnMaxLifetime(config.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(config.ConnMaxIdleTime)
+
+	sqliteDB := &SQLiteDatabase{
+		db:     db,
+		config: config,
+		logger: logger,
+	}
+
+	// Test connection
+	if err := sqliteDB.Ping(ctx); err != nil {
+		db.Close()
+		return nil, &DatabaseError{Op: "ping", Err: err}
+	}
+
+	// Configure SQLite-specific settings
+	if err := sqliteDB.configureSQLite(ctx); err != nil {
+		db.Close()
+		return nil, &DatabaseError{Op: "configure", Err: err}
+	}
+
+	logger.Info("Database connection established", 
+		"url", config.DatabaseURL,
+		"max_open_conns", config.MaxOpenConns,
+		"max_idle_conns", config.MaxIdleConns)
+
+	return sqliteDB, nil
+}
+
+// buildConnectionString constructs SQLite connection string with options
+func buildConnectionString(config *DatabaseConfig) string {
+	connStr := config.DatabaseURL + "?"
+	
+	params := []string{
+		"_timeout=10000",
+		"_journal_mode=WAL",
+		"_synchronous=NORMAL",
+		"_cache_size=1000",
+		"_temp_store=memory",
+	}
+	
+	if config.EnableForeignKeys {
+		params = append(params, "_foreign_keys=on")
+	}
+	
+	for i, param := range params {
+		if i > 0 {
+			connStr += "&"
 		}
-	}()
+		connStr += param
+	}
+	
+	return connStr
+}
+
+// configureSQLite sets SQLite-specific configuration
+func (d *SQLiteDatabase) configureSQLite(ctx context.Context) error {
+	queries := []string{
+		"PRAGMA busy_timeout = 10000",
+		"PRAGMA temp_store = memory",
+		"PRAGMA mmap_size = 268435456", // 256MB
+	}
+
+	if d.config.EnableWAL {
+		queries = append(queries, "PRAGMA journal_mode = WAL")
+		queries = append(queries, "PRAGMA synchronous = NORMAL")
+	}
+
+	if d.config.EnableForeignKeys {
+		queries = append(queries, "PRAGMA foreign_keys = ON")
+	}
 
 	for _, query := range queries {
-		if _, err = tx.ExecContext(ctx, query); err != nil {
-			return fmt.Errorf("failed to execute query: %w", err)
+		if _, err := d.db.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("failed to execute pragma %s: %w", query, err)
 		}
 	}
 
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
 	return nil
 }
 
-// GetDB returns the database connection instance
-// Returns nil if database is not initialized
-func GetDB() *sql.DB {
-	mu.RLock()
-	defer mu.RUnlock()
-	return db
+// DB returns the underlying sql.DB instance
+func (d *SQLiteDatabase) DB() *sql.DB {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.db
 }
 
-// MustGetDB returns the database connection or panics if not initialized
-// Use this only when you're certain the database is initialized
-func MustGetDB() *sql.DB {
-	mu.RLock()
-	defer mu.RUnlock()
+// Ping verifies database connection is alive
+func (d *SQLiteDatabase) Ping(ctx context.Context) error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	
-	if db == nil {
-		panic("database not initialized - call InitDB() first")
+	if d.closed {
+		return &DatabaseError{Op: "ping", Err: fmt.Errorf("database is closed")}
 	}
-	return db
-}
-
-// CloseDB closes the database connection gracefully
-func CloseDB() error {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if db == nil {
-		return nil
-	}
-
-	err := db.Close()
-	db = nil
-	once = sync.Once{} // Reset once to allow re-initialization
-
-	if err != nil {
-		return &DatabaseError{Op: "close", Err: err}
-	}
-
-	log.Println("Database connection closed successfully")
-	return nil
-}
-
-// Ping checks if the database connection is alive
-func Ping(ctx context.Context) error {
-	mu.RLock()
-	currentDB := db
-	mu.RUnlock()
-
-	if currentDB == nil {
-		return &DatabaseError{Op: "ping", Err: ErrDatabaseNotInitialized}
-	}
-
-	if err := currentDB.PingContext(ctx); err != nil {
+	
+	if err := d.db.PingContext(ctx); err != nil {
 		return &DatabaseError{Op: "ping", Err: err}
 	}
-
+	
 	return nil
 }
 
-// Health performs a comprehensive health check
-func Health(ctx context.Context) error {
-	if err := Ping(ctx); err != nil {
-		return err
+// Close closes the database connection
+func (d *SQLiteDatabase) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	
+	if d.closed {
+		return nil
 	}
+	
+	d.closed = true
+	
+	if err := d.db.Close(); err != nil {
+		return &DatabaseError{Op: "close", Err: err}
+	}
+	
+	d.logger.Info("Database connection closed")
+	return nil
+}
 
-	// Test a simple query
-	mu.RLock()
-	currentDB := db
-	mu.RUnlock()
-
-	var result int
-	err := currentDB.QueryRowContext(ctx, "SELECT 1").Scan(&result)
+// BeginTx starts a new transaction
+func (d *SQLiteDatabase) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	
+	if d.closed {
+		return nil, &DatabaseError{Op: "begin_tx", Err: fmt.Errorf("database is closed")}
+	}
+	
+	tx, err := d.db.BeginTx(ctx, opts)
 	if err != nil {
-		return &DatabaseError{Op: "health_check", Err: err}
+		return nil, &DatabaseError{Op: "begin_tx", Err: err}
 	}
+	
+	return tx, nil
+}
 
-	if result != 1 {
-		return &DatabaseError{Op: "health_check", Err: errors.New("unexpected query result")}
+// ExecContext executes a query without returning any rows
+func (d *SQLiteDatabase) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	
+	if d.closed {
+		return nil, &DatabaseError{Op: "exec", Err: fmt.Errorf("database is closed")}
 	}
+	
+	result, err := d.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return nil, &DatabaseError{Op: "exec", Err: err}
+	}
+	
+	return result, nil
+}
 
+// QueryContext executes a query that returns rows
+func (d *SQLiteDatabase) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	
+	if d.closed {
+		return nil, &DatabaseError{Op: "query", Err: fmt.Errorf("database is closed")}
+	}
+	
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, &DatabaseError{Op: "query", Err: err}
+	}
+	
+	return rows, nil
+}
+
+// QueryRowContext executes a query that returns at most one row
+func (d *SQLiteDatabase) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	
+	return d.db.QueryRowContext(ctx, query, args...)
+}
+
+// GetDB returns the global database instance (singleton pattern)
+func GetDB() Database {
+	once.Do(func() {
+		db, err := NewDatabase(DefaultConfig())
+		if err != nil {
+			panic(fmt.Sprintf("failed to initialize database: %v", err))
+		}
+		instance = db
+	})
+	return instance
+}
+
+// InitDB initializes the database and creates necessary tables
+func InitDB(ctx context.Context) error {
+	db := GetDB()
+	
+	// Create base tables schema
+	schema := `
+	CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	
+	-- Example table using BaseModel pattern
+	CREATE TABLE IF NOT EXISTS tasks (
+		id TEXT PRIMARY KEY,
+		title TEXT NOT NULL,
+		description TEXT,
+		completed BOOLEAN DEFAULT FALSE,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+	
+	-- Indexes for performance
+	CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
+	CREATE INDEX IF NOT EXISTS idx_tasks_completed ON tasks(completed);
+	`
+	
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		return &DatabaseError{Op: "init_schema", Err: err}
+	}
+	
+	slog.Info("Database schema initialized successfully")
+	return nil
+}
+
+// CloseDB closes the global database connection
+func CloseDB() error {
+	if instance != nil {
+		return instance.Close()
+	}
 	return nil
 }
 
 // WithTransaction executes a function within a database transaction
-func WithTransaction(ctx context.Context, fn func(*sql.Tx) error) error {
-	mu.RLock()
-	currentDB := db
-	mu.RUnlock()
-
-	if currentDB == nil {
-		return &DatabaseError{Op: "transaction", Err: ErrDatabaseNotInitialized}
-	}
-
-	tx, err := currentDB.BeginTx(ctx, nil)
+func WithTransaction(ctx context.Context, db Database, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return &DatabaseError{Op: "begin_transaction", Err: err}
+		return err
 	}
-
+	
 	defer func() {
 		if p := recover(); p != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				log.Printf("Failed to rollback transaction after panic: %v", rbErr)
-			}
-			panic(p) // Re-throw panic after rollback
+			tx.Rollback()
+			panic(p)
 		}
 	}()
-
+	
 	if err := fn(tx); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
-			log.Printf("Failed to rollback transaction: %v", rbErr)
+			return fmt.Errorf("transaction error: %v, rollback error: %v", err, rbErr)
 		}
-		return &DatabaseError{Op: "transaction", Err: fmt.Errorf("%w: %v", ErrTransactionFailed, err)}
+		return err
 	}
+	
+	return tx.Commit()
+}
 
-	if err := tx.Commit(); err != nil {
-		return &DatabaseError{Op: "commit_transaction", Err: err}
+// HealthCheck performs a comprehensive database health check
+func HealthCheck(ctx context.Context, db Database) error {
+	// Basic connectivity check
+	if err := db.Ping(ctx); err != nil {
+		return fmt.Errorf("ping failed: %w", err)
 	}
-
+	
+	// Query execution check
+	var result int
+	err := db.QueryRowContext(ctx, "SELECT 1").Scan(&result)
+	if err != nil {
+		return fmt.Errorf("query test failed: %w", err)
+	}
+	
+	if result != 1 {
+		return fmt.Errorf("unexpected query result: %d", result)
+	}
+	
 	return nil
 }
 
-// Stats returns database statistics
-func Stats() sql.DBStats {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if db == nil {
-		return sql.DBStats{}
+// getEnv gets environment variable with fallback
+func getEnv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
-
-	return db.Stats()
+	return fallback
 }
 
-// IsInitialized returns true if the database is initialized
-func IsInitialized() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	return db != nil
+/*
+Example Usage:
+
+// Initialize database
+ctx := context.Background()
+if err := InitDB(ctx); err != nil {
+    log.Fatal("Failed to initialize database:", err)
 }
 
-// Closer implements io.Closer interface for graceful shutdown
-type Closer struct{}
+// Get database instance
+db := GetDB()
 
-// Close implements the io.Closer interface
-func (c *Closer) Close() error {
-	return CloseDB()
+// Use in application
+type Task struct {
+    BaseModel
+    Title       string `db:"title" json:"title"`
+    Description string `db:"description" json:"description"`
+    Completed   bool   `db:"completed" json:"completed"`
 }
 
-// NewCloser returns a new Closer instance
-func NewCloser() *Closer {
-	return &Closer{}
+// Create a new task
+func CreateTask(ctx context.Context, title, description string) (*Task, error) {
+    task := &Task{
+        BaseModel:   NewBaseModel(),
+        Title:       title,
+        Description: description,
+        Completed:   false,
+    }
+    
+    query := `
+        INSERT INTO tasks (id, title, description, completed, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    `
+    
+    db := GetDB()
+    _, err := db.ExecContext(ctx, query,
+        task.ID.String(),
+        task.Title,
+        task.Description,
+        task.Completed,
+        task.CreatedAt,
+        task.UpdatedAt,
+    )
+    
+    if err != nil {
+        return nil, err
+    }
+    
+    return task, nil
 }
+
+// Use with transaction
+func UpdateTaskWithHistory(ctx context.Context, taskID uuid.UUID, title string) error {
+    db := GetDB()
+    
+    return WithTransaction(ctx, db, func(tx *sql.Tx) error {
+        // Update task
+        _, err := tx.ExecContext(ctx,
+            "UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?",
+            title, time.Now().UTC(), taskID.String())
+        if err != nil {
+            return err
+        }
+        
+        // Insert history record
+        _, err = tx.ExecContext

@@ -1,473 +1,494 @@
-Here's a complete Go implementation of a web API application using the Gin framework based on your FastAPI specification:
+I'll create a production-ready Go application using Gin that mirrors FastAPI's structure and capabilities. Here's the complete implementation:
 
-```go
-package main
-
-import (
-	"context"
-	"database/sql"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
-
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-	_ "github.com/lib/pq" // PostgreSQL driver
-)
-
-// Application constants
-const (
-	AppTitle   = "Task Management API"
-	AppVersion = "1.0.0"
-)
-
-// Configuration holds application configuration
-type Config struct {
-	DatabaseURL string
-	JWTSecret   string
-	Port        string
-	Environment string
-}
-
-// Application holds the application state
-type Application struct {
-	config *Config
-	db     *sql.DB
-	router *gin.Engine
-}
-
-// Claims represents JWT claims structure
-type Claims struct {
-	UserID string `json:"user_id"`
-	jwt.RegisteredClaims
-}
-
-// HealthResponse represents health check response
-type HealthResponse struct {
-	Status    string `json:"status"`
-	Version   string `json:"version"`
-	Database  string `json:"database"`
-	Timestamp string `json:"timestamp"`
-}
-
-// ErrorResponse represents API error response
-type ErrorResponse struct {
-	Error   string `json:"error"`
-	Message string `json:"message"`
-	Code    int    `json:"code"`
-}
-
-func main() {
-	// Load configuration
-	config := loadConfig()
-
-	// Initialize application
-	app, err := newApplication(config)
-	if err != nil {
-		log.Fatalf("Failed to initialize application: %v", err)
-	}
-	defer app.cleanup()
-
-	// Setup router and middleware
-	app.setupRouter()
-	app.setupMiddleware()
-	app.setupRoutes()
-
-	// Start server with graceful shutdown
-	app.startServer()
-}
-
-// loadConfig loads configuration from environment variables
-func loadConfig() *Config {
-	return &Config{
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://localhost/taskdb?sslmode=disable"),
-		JWTSecret:   getEnv("JWT_SECRET", "your-secret-key"),
-		Port:        getEnv("PORT", "8080"),
-		Environment: getEnv("GIN_MODE", "debug"),
-	}
-}
-
-// getEnv gets environment variable with fallback
-func getEnv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-// newApplication creates a new application instance
-func newApplication(config *Config) (*Application, error) {
-	// Set Gin mode
-	gin.SetMode(config.Environment)
-
-	// Initialize database connection
-	db, err := initDatabase(config.DatabaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("database initialization failed: %w", err)
-	}
-
-	return &Application{
-		config: config,
-		db:     db,
-		router: gin.New(),
-	}, nil
-}
-
-// initDatabase initializes database connection with pooling
-func initDatabase(databaseURL string) (*sql.DB, error) {
-	db, err := sql.Open("postgres", databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	// Configure connection pool
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-	db.SetConnMaxIdleTime(1 * time.Minute)
-
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	log.Println("Database connection established successfully")
-	return db, nil
-}
-
-// setupRouter configures the Gin router with basic middleware
-func (app *Application) setupRouter() {
-	// Add recovery middleware
-	app.router.Use(gin.Recovery())
-
-	// Add custom logger middleware
-	app.router.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		return fmt.Sprintf("%s - [%s] \"%s %s %s %d %s \"%s\" %s\"\n",
-			param.ClientIP,
-			param.TimeStamp.Format(time.RFC1123),
-			param.Method,
-			param.Path,
-			param.Request.Proto,
-			param.StatusCode,
-			param.Latency,
-			param.Request.UserAgent(),
-			param.ErrorMessage,
-		)
-	}))
-}
-
-// setupMiddleware configures application middleware
-func (app *Application) setupMiddleware() {
-	// CORS middleware
-	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowOrigins = []string{"http://localhost:3000"}
-	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
-	corsConfig.AllowCredentials = true
-	app.router.Use(cors.New(corsConfig))
-
-	// Custom error handling middleware
-	app.router.Use(app.errorHandlerMiddleware())
-}
-
-// setupRoutes configures application routes
-func (app *Application) setupRoutes() {
-	// Health check endpoint
-	app.router.GET("/health", app.healthCheckHandler)
-
-	// API route groups
-	api := app.router.Group("/api")
-	{
-		// Task routes (protected)
-		tasks := api.Group("/tasks")
-		tasks.Use(app.jwtAuthMiddleware())
-		{
-			tasks.GET("", app.getTasksHandler)
-			tasks.POST("", app.createTaskHandler)
-			tasks.GET("/:id", app.getTaskHandler)
-			tasks.PUT("/:id", app.updateTaskHandler)
-			tasks.DELETE("/:id", app.deleteTaskHandler)
-		}
-
-		// User routes
-		users := api.Group("/users")
-		{
-			users.POST("/register", app.registerHandler)
-			users.POST("/login", app.loginHandler)
-			
-			// Protected user routes
-			protected := users.Group("")
-			protected.Use(app.jwtAuthMiddleware())
-			{
-				protected.GET("/profile", app.getProfileHandler)
-				protected.PUT("/profile", app.updateProfileHandler)
-			}
-		}
-	}
-}
-
-// jwtAuthMiddleware validates JWT tokens
-func (app *Application) jwtAuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, ErrorResponse{
-				Error:   "unauthorized",
-				Message: "Authorization header required",
-				Code:    http.StatusUnauthorized,
-			})
-			c.Abort()
-			return
-		}
-
-		// Extract token from "Bearer <token>"
-		tokenString := ""
-		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
-			tokenString = authHeader[7:]
-		} else {
-			c.JSON(http.StatusUnauthorized, ErrorResponse{
-				Error:   "unauthorized",
-				Message: "Invalid authorization header format",
-				Code:    http.StatusUnauthorized,
-			})
-			c.Abort()
-			return
-		}
-
-		// Parse and validate token
-		token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return []byte(app.config.JWTSecret), nil
-		})
-
-		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, ErrorResponse{
-				Error:   "unauthorized",
-				Message: "Invalid or expired token",
-				Code:    http.StatusUnauthorized,
-			})
-			c.Abort()
-			return
-		}
-
-		// Extract claims and set user context
-		if claims, ok := token.Claims.(*Claims); ok {
-			c.Set("user_id", claims.UserID)
-		}
-
-		c.Next()
-	}
-}
-
-// errorHandlerMiddleware handles panics and errors
-func (app *Application) errorHandlerMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		defer func() {
-			if err := recover(); err != nil {
-				log.Printf("Panic recovered: %v", err)
-				c.JSON(http.StatusInternalServerError, ErrorResponse{
-					Error:   "internal_server_error",
-					Message: "An unexpected error occurred",
-					Code:    http.StatusInternalServerError,
-				})
-				c.Abort()
-			}
-		}()
-		c.Next()
-	}
-}
-
-// healthCheckHandler handles health check requests
-func (app *Application) healthCheckHandler(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-	defer cancel()
-
-	// Check database connectivity
-	dbStatus := "healthy"
-	if err := app.db.PingContext(ctx); err != nil {
-		dbStatus = "unhealthy"
-		log.Printf("Database health check failed: %v", err)
-	}
-
-	response := HealthResponse{
-		Status:    "healthy",
-		Version:   AppVersion,
-		Database:  dbStatus,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	// Return 503 if database is unhealthy
-	if dbStatus == "unhealthy" {
-		response.Status = "unhealthy"
-		c.JSON(http.StatusServiceUnavailable, response)
-		return
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
-// Placeholder handlers for API endpoints
-func (app *Application) getTasksHandler(c *gin.Context) {
-	userID := c.GetString("user_id")
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Get tasks endpoint",
-		"user_id": userID,
-	})
-}
-
-func (app *Application) createTaskHandler(c *gin.Context) {
-	userID := c.GetString("user_id")
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Create task endpoint",
-		"user_id": userID,
-	})
-}
-
-func (app *Application) getTaskHandler(c *gin.Context) {
-	taskID := c.Param("id")
-	userID := c.GetString("user_id")
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Get task endpoint",
-		"task_id": taskID,
-		"user_id": userID,
-	})
-}
-
-func (app *Application) updateTaskHandler(c *gin.Context) {
-	taskID := c.Param("id")
-	userID := c.GetString("user_id")
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Update task endpoint",
-		"task_id": taskID,
-		"user_id": userID,
-	})
-}
-
-func (app *Application) deleteTaskHandler(c *gin.Context) {
-	taskID := c.Param("id")
-	userID := c.GetString("user_id")
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Delete task endpoint",
-		"task_id": taskID,
-		"user_id": userID,
-	})
-}
-
-func (app *Application) registerHandler(c *gin.Context) {
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "User registration endpoint",
-	})
-}
-
-func (app *Application) loginHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"message": "User login endpoint",
-	})
-}
-
-func (app *Application) getProfileHandler(c *gin.Context) {
-	userID := c.GetString("user_id")
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Get profile endpoint",
-		"user_id": userID,
-	})
-}
-
-func (app *Application) updateProfileHandler(c *gin.Context) {
-	userID := c.GetString("user_id")
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Update profile endpoint",
-		"user_id": userID,
-	})
-}
-
-// startServer starts the HTTP server with graceful shutdown
-func (app *Application) startServer() {
-	server := &http.Server{
-		Addr:         ":" + app.config.Port,
-		Handler:      app.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	// Start server in a goroutine
-	go func() {
-		log.Printf("Starting %s v%s on port %s", AppTitle, AppVersion, app.config.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed to start: %v", err)
-		}
-	}()
-
-	// Wait for interrupt signal for graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("Shutting down server...")
-
-	// Create shutdown context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Shutdown server
-	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
-	}
-
-	log.Println("Server exited")
-}
-
-// cleanup closes database connections and performs cleanup
-func (app *Application) cleanup() {
-	if app.db != nil {
-		log.Println("Closing database connections...")
-		if err := app.db.Close(); err != nil {
-			log.Printf("Error closing database: %v", err)
-		}
-	}
-}
+## Project Structure
+```
+task-management-api/
+├── go.mod
+├── go.sum
+├── main.go
+├── config/
+│   └── config.go
+├── middleware/
+│   ├── auth.go
+│   ├── cors.go
+│   ├── error.go
+│   ├── logging.go
+│   └── ratelimit.go
+├── handlers/
+│   ├── health.go
+│   ├── tasks.go
+│   └── users.go
+├── database/
+│   └── database.go
+└── models/
+    └── models.go
 ```
 
-This implementation includes:
-
-**Key Features:**
-- Complete Gin web framework setup with middleware
-- JWT authentication middleware for protected routes
-- CORS configuration for localhost:3000
-- Database connection pooling with PostgreSQL
-- Health check endpoint with database status
-- Graceful shutdown with signal handling
-- Structured error handling and logging
-
-**Required Dependencies (go.mod):**
+## go.mod
 ```go
-module your-app-name
+module task-management-api
 
 go 1.21
 
 require (
     github.com/gin-contrib/cors v1.4.0
     github.com/gin-gonic/gin v1.9.1
-    github.com/golang-jwt/jwt/v5 v5.0.0
-    github.com/lib/pq v1.10.9
+    github.com/golang-jwt/jwt/v4 v4.5.0
+    github.com/jackc/pgx/v5 v5.4.3
+    github.com/joho/godotenv v1.4.0
+    github.com/sirupsen/logrus v1.9.3
+    golang.org/x/time v0.3.0
 )
 ```
 
-**Environment Variables:**
-- `DATABASE_URL`: PostgreSQL connection string
-- `JWT_SECRET`: Secret key for JWT signing
-- `PORT`: Server port (default: 8080)
-- `GIN_MODE`: Gin mode (debug/release)
+## main.go
+```go
+package main
 
-The code follows Go best practices with proper error handling, context usage, and production-ready configuration. All API endpoints are structured as placeholder handlers that can be implemented with your specific business logic.
+import (
+    "context"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "task-management-api/config"
+    "task-management-api/database"
+    "task-management-api/handlers"
+    "task-management-api/middleware"
+
+    "github.com/gin-gonic/gin"
+    "github.com/joho/godotenv"
+    "github.com/sirupsen/logrus"
+)
+
+// Application represents the main application structure
+// This mirrors FastAPI's app instance with dependency injection
+type Application struct {
+    Config   *config.Config
+    Database *database.Database
+    Router   *gin.Engine
+    Logger   *logrus.Logger
+}
+
+// NewApplication creates a new application instance with all dependencies
+// Similar to FastAPI's app creation with middleware and route registration
+func NewApplication() (*Application, error) {
+    // Load environment variables (FastAPI equivalent of settings management)
+    if err := godotenv.Load(); err != nil {
+        log.Println("No .env file found, using system environment variables")
+    }
+
+    // Initialize configuration
+    cfg := config.Load()
+
+    // Initialize logger
+    logger := logrus.New()
+    logger.SetFormatter(&logrus.JSONFormatter{})
+    if cfg.Environment == "development" {
+        logger.SetLevel(logrus.DebugLevel)
+        gin.SetMode(gin.DebugMode)
+    } else {
+        logger.SetLevel(logrus.InfoLevel)
+        gin.SetMode(gin.ReleaseMode)
+    }
+
+    // Initialize database with connection pooling
+    db, err := database.NewDatabase(cfg.DatabaseURL, logger)
+    if err != nil {
+        return nil, fmt.Errorf("failed to initialize database: %w", err)
+    }
+
+    // Create Gin router with recovery middleware
+    router := gin.New()
+
+    app := &Application{
+        Config:   cfg,
+        Database: db,
+        Router:   router,
+        Logger:   logger,
+    }
+
+    // Setup middleware and routes
+    app.setupMiddleware()
+    app.setupRoutes()
+
+    return app, nil
+}
+
+// setupMiddleware configures all middleware similar to FastAPI's middleware stack
+func (app *Application) setupMiddleware() {
+    // Recovery middleware (FastAPI's exception handling)
+    app.Router.Use(gin.Recovery())
+
+    // Request logging with correlation IDs
+    app.Router.Use(middleware.RequestLogger(app.Logger))
+
+    // CORS middleware (FastAPI's CORS configuration)
+    app.Router.Use(middleware.CORSMiddleware(app.Config))
+
+    // Rate limiting middleware
+    app.Router.Use(middleware.RateLimitMiddleware())
+
+    // Global error handling middleware
+    app.Router.Use(middleware.ErrorHandler(app.Logger))
+}
+
+// setupRoutes configures all routes and route groups
+// This mirrors FastAPI's router organization and dependency injection
+func (app *Application) setupRoutes() {
+    // Health check endpoint (FastAPI's health check pattern)
+    app.Router.GET("/health", handlers.HealthCheck(app.Database, app.Logger))
+
+    // API v1 route group (FastAPI's router grouping)
+    v1 := app.Router.Group("/api")
+    {
+        // Tasks route group with JWT protection
+        tasksGroup := v1.Group("/tasks")
+        tasksGroup.Use(middleware.JWTAuthMiddleware(app.Config.JWTSecret))
+        {
+            tasksHandler := handlers.NewTasksHandler(app.Database, app.Logger)
+            tasksGroup.GET("", tasksHandler.GetTasks)
+            tasksGroup.POST("", tasksHandler.CreateTask)
+            tasksGroup.GET("/:id", tasksHandler.GetTask)
+            tasksGroup.PUT("/:id", tasksHandler.UpdateTask)
+            tasksGroup.DELETE("/:id", tasksHandler.DeleteTask)
+        }
+
+        // Users route group with mixed protection
+        usersGroup := v1.Group("/users")
+        {
+            usersHandler := handlers.NewUsersHandler(app.Database, app.Logger)
+            // Public routes
+            usersGroup.POST("/register", usersHandler.Register)
+            usersGroup.POST("/login", usersHandler.Login)
+            
+            // Protected routes
+            protected := usersGroup.Group("")
+            protected.Use(middleware.JWTAuthMiddleware(app.Config.JWTSecret))
+            {
+                protected.GET("/profile", usersHandler.GetProfile)
+                protected.PUT("/profile", usersHandler.UpdateProfile)
+            }
+        }
+    }
+}
+
+// Start starts the HTTP server with graceful shutdown
+// This implements FastAPI's server lifecycle management
+func (app *Application) Start() error {
+    // Create HTTP server with timeouts
+    server := &http.Server{
+        Addr:         fmt.Sprintf(":%s", app.Config.Port),
+        Handler:      app.Router,
+        ReadTimeout:  time.Duration(app.Config.ReadTimeout) * time.Second,
+        WriteTimeout: time.Duration(app.Config.WriteTimeout) * time.Second,
+        IdleTimeout:  time.Duration(app.Config.IdleTimeout) * time.Second,
+    }
+
+    // Start server in goroutine
+    go func() {
+        app.Logger.WithFields(logrus.Fields{
+            "port":        app.Config.Port,
+            "environment": app.Config.Environment,
+            "title":       "Task Management API",
+            "version":     "1.0.0",
+        }).Info("Starting HTTP server")
+
+        if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            app.Logger.WithError(err).Fatal("Failed to start server")
+        }
+    }()
+
+    // Wait for interrupt signal for graceful shutdown
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    <-quit
+
+    app.Logger.Info("Shutting down server...")
+
+    // Create shutdown context with timeout
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    // Shutdown server
+    if err := server.Shutdown(ctx); err != nil {
+        app.Logger.WithError(err).Error("Server forced to shutdown")
+        return err
+    }
+
+    // Close database connections
+    app.Database.Close()
+
+    app.Logger.Info("Server exited")
+    return nil
+}
+
+func main() {
+    // Create application instance
+    app, err := NewApplication()
+    if err != nil {
+        log.Fatalf("Failed to create application: %v", err)
+    }
+
+    // Start application
+    if err := app.Start(); err != nil {
+        log.Fatalf("Failed to start application: %v", err)
+    }
+}
+```
+
+## config/config.go
+```go
+package config
+
+import (
+    "os"
+    "strconv"
+)
+
+// Config holds all application configuration
+// This mirrors FastAPI's Settings class for configuration management
+type Config struct {
+    // Server configuration
+    Port         string
+    Environment  string
+    ReadTimeout  int
+    WriteTimeout int
+    IdleTimeout  int
+
+    // Database configuration
+    DatabaseURL string
+
+    // JWT configuration
+    JWTSecret string
+
+    // CORS configuration
+    AllowedOrigins []string
+}
+
+// Load loads configuration from environment variables
+// Similar to FastAPI's Settings with environment variable loading
+func Load() *Config {
+    return &Config{
+        Port:         getEnv("PORT", "8080"),
+        Environment:  getEnv("ENVIRONMENT", "development"),
+        ReadTimeout:  getEnvAsInt("READ_TIMEOUT", 10),
+        WriteTimeout: getEnvAsInt("WRITE_TIMEOUT", 10),
+        IdleTimeout:  getEnvAsInt("IDLE_TIMEOUT", 60),
+        DatabaseURL:  getEnv("DATABASE_URL", "postgres://user:password@localhost/taskdb?sslmode=disable"),
+        JWTSecret:    getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
+        AllowedOrigins: []string{
+            getEnv("ALLOWED_ORIGIN", "http://localhost:3000"),
+        },
+    }
+}
+
+// getEnv gets environment variable with fallback
+func getEnv(key, fallback string) string {
+    if value := os.Getenv(key); value != "" {
+        return value
+    }
+    return fallback
+}
+
+// getEnvAsInt gets environment variable as integer with fallback
+func getEnvAsInt(key string, fallback int) int {
+    if value := os.Getenv(key); value != "" {
+        if intValue, err := strconv.Atoi(value); err == nil {
+            return intValue
+        }
+    }
+    return fallback
+}
+```
+
+## database/database.go
+```go
+package database
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/sirupsen/logrus"
+)
+
+// Database wraps the database connection pool
+// This provides FastAPI-style database dependency injection
+type Database struct {
+    Pool   *pgxpool.Pool
+    Logger *logrus.Logger
+}
+
+// NewDatabase creates a new database connection with retry logic
+// Implements connection pooling and retry logic similar to FastAPI's database setup
+func NewDatabase(databaseURL string, logger *logrus.Logger) (*Database, error) {
+    // Configure connection pool
+    config, err := pgxpool.ParseConfig(databaseURL)
+    if err != nil {
+        return nil, fmt.Errorf("failed to parse database URL: %w", err)
+    }
+
+    // Set pool configuration
+    config.MaxConns = 30
+    config.MinConns = 5
+    config.MaxConnLifetime = time.Hour
+    config.MaxConnIdleTime = time.Minute * 30
+
+    // Retry connection with exponential backoff
+    var pool *pgxpool.Pool
+    maxRetries := 5
+    baseDelay := time.Second
+
+    for i := 0; i < maxRetries; i++ {
+        pool, err = pgxpool.NewWithConfig(context.Background(), config)
+        if err == nil {
+            // Test connection
+            if err = pool.Ping(context.Background()); err == nil {
+                break
+            }
+            pool.Close()
+        }
+
+        if i == maxRetries-1 {
+            return nil, fmt.Errorf("failed to connect to database after %d retries: %w", maxRetries, err)
+        }
+
+        delay := baseDelay * time.Duration(1<<uint(i)) // Exponential backoff
+        logger.WithFields(logrus.Fields{
+            "attempt": i + 1,
+            "delay":   delay,
+            "error":   err,
+        }).Warn("Database connection failed, retrying...")
+
+        time.Sleep(delay)
+    }
+
+    logger.Info("Database connection established successfully")
+
+    return &Database{
+        Pool:   pool,
+        Logger: logger,
+    }, nil
+}
+
+// Close closes the database connection pool
+func (db *Database) Close() {
+    if db.Pool != nil {
+        db.Pool.Close()
+        db.Logger.Info("Database connection pool closed")
+    }
+}
+
+// HealthCheck checks database connectivity
+func (db *Database) HealthCheck(ctx context.Context) error {
+    return db.Pool.Ping(ctx)
+}
+```
+
+## middleware/cors.go
+```go
+package middleware
+
+import (
+    "task-management-api/config"
+
+    "github.com/gin-contrib/cors"
+    "github.com/gin-gonic/gin"
+)
+
+// CORSMiddleware configures CORS similar to FastAPI's CORS middleware
+func CORSMiddleware(cfg *config.Config) gin.HandlerFunc {
+    corsConfig := cors.Config{
+        AllowOrigins:     cfg.AllowedOrigins,
+        AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+        AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+        ExposeHeaders:    []string{"Content-Length"},
+        AllowCredentials: true,
+    }
+
+    return cors.New(corsConfig)
+}
+```
+
+## middleware/auth.go
+```go
+package middleware
+
+import (
+    "net/http"
+    "strings"
+
+    "github.com/gin-gonic/gin"
+    "github.com/golang-jwt/jwt/v4"
+)
+
+// JWTAuthMiddleware provides JWT authentication similar to FastAPI's Depends(get_current_user)
+func JWTAuthMiddleware(jwtSecret string) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        authHeader := c.GetHeader("Authorization")
+        if authHeader == "" {
+            c.JSON(http.StatusUnauthorized, gin.H{
+                "error": "Authorization header required",
+                "code":  "MISSING_AUTH_HEADER",
+            })
+            c.Abort()
+            return
+        }
+
+        // Extract token from "Bearer <token>"
+        tokenParts := strings.Split(authHeader, " ")
+        if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+            c.JSON(http.StatusUnauthorized, gin.H{
+                "error": "Invalid authorization header format",
+                "code":  "INVALID_AUTH_FORMAT",
+            })
+            c.Abort()
+            return
+        }
+
+        tokenString := tokenParts[1]
+
+        // Parse and validate token
+        token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+                return nil, jwt.ErrSignatureInvalid
+            }
+            return []byte(jwtSecret), nil
+        })
+
+        if err != nil || !token.Valid {
+            c.JSON(http.StatusUnauthorized, gin.H{
+                "error": "Invalid or expired token",
+                "code":  "INVALID_TOKEN",
+            })
+            c.Abort()
+            return
+        }
+
+        // Extract claims and set user context
+        if claims, ok := token.Claims.(jwt.MapClaims); ok {
+            c.Set("user_id", claims["user_id"])
+            c.Set("username", claims["username"])
+        }
+
+        c.Next()
+    }
+}
+```
+
+## middleware/logging.go
+```go
+package middleware
+
+import (
+    "time"
+
+    "github.com/gin-gonic/gin"
+    "github.com/google/uuid"

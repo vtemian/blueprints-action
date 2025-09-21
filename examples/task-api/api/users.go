@@ -1,459 +1,467 @@
-I'll create a complete, production-ready Go module for user management and authentication. Here's the implementation:
+I'll provide you with a complete, production-ready user management and authentication API module. Here's the implementation:
 
-## Project Structure
-```
-api/
-└── users/
-    ├── go.mod
-    ├── handlers.go
-    ├── models.go
-    ├── middleware.go
-    ├── repository.go
-    └── routes.go
-```
+## 1. models/user.go
 
-## go.mod
 ```go
-module api/users
-
-go 1.21
-
-require (
-    github.com/gin-gonic/gin v1.9.1
-    github.com/golang-jwt/jwt/v4 v4.5.0
-    github.com/go-playground/validator/v10 v10.15.5
-    golang.org/x/crypto v0.14.0
-    github.com/lib/pq v1.10.9
-    github.com/google/uuid v1.4.0
-)
-```
-
-## models.go
-```go
-package users
+package models
 
 import (
-    "time"
-    "github.com/google/uuid"
+	"time"
+	"gorm.io/gorm"
 )
 
 // User represents the user model in the database
 type User struct {
-    ID        uuid.UUID  `json:"id" db:"id"`
-    Email     string     `json:"email" db:"email"`
-    Password  string     `json:"-" db:"password_hash"` // Never include in JSON responses
-    FirstName string     `json:"first_name" db:"first_name"`
-    LastName  string     `json:"last_name" db:"last_name"`
-    CreatedAt time.Time  `json:"created_at" db:"created_at"`
-    UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
-    LastLogin *time.Time `json:"last_login,omitempty" db:"last_login"`
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	Email     string         `json:"email" gorm:"uniqueIndex;not null;size:255"`
+	Password  string         `json:"-" gorm:"not null;size:255"` // Never include in JSON responses
+	FirstName string         `json:"first_name" gorm:"not null;size:100"`
+	LastName  string         `json:"last_name" gorm:"not null;size:100"`
+	IsActive  bool           `json:"is_active" gorm:"default:true"`
+	LastLogin *time.Time     `json:"last_login"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
-// RegisterRequest represents the registration request payload
-type RegisterRequest struct {
-    Email     string `json:"email" validate:"required,email,max=255"`
-    Password  string `json:"password" validate:"required,min=8,max=128"`
-    FirstName string `json:"first_name" validate:"required,min=1,max=100"`
-    LastName  string `json:"last_name" validate:"required,min=1,max=100"`
+// TableName specifies the table name for GORM
+func (User) TableName() string {
+	return "users"
 }
 
-// LoginRequest represents the login request payload
-type LoginRequest struct {
-    Email    string `json:"email" validate:"required,email"`
-    Password string `json:"password" validate:"required"`
-}
-
-// UpdateProfileRequest represents the profile update request payload
-type UpdateProfileRequest struct {
-    Email     string `json:"email" validate:"required,email,max=255"`
-    FirstName string `json:"first_name" validate:"required,min=1,max=100"`
-    LastName  string `json:"last_name" validate:"required,min=1,max=100"`
-}
-
-// ChangePasswordRequest represents the password change request payload
-type ChangePasswordRequest struct {
-    CurrentPassword string `json:"current_password" validate:"required"`
-    NewPassword     string `json:"new_password" validate:"required,min=8,max=128"`
-}
-
-// AuthResponse represents the authentication response
-type AuthResponse struct {
-    User  *User  `json:"user"`
-    Token string `json:"token"`
-}
-
-// ErrorResponse represents an error response
-type ErrorResponse struct {
-    Error   string                 `json:"error"`
-    Message string                 `json:"message,omitempty"`
-    Details map[string]interface{} `json:"details,omitempty"`
-}
-
-// SuccessResponse represents a success response
-type SuccessResponse struct {
-    Message string      `json:"message"`
-    Data    interface{} `json:"data,omitempty"`
+// BeforeCreate is a GORM hook that runs before creating a user
+func (u *User) BeforeCreate(tx *gorm.DB) error {
+	// Additional validation or data manipulation can be added here
+	return nil
 }
 ```
 
-## repository.go
+## 2. dto/user_dto.go
+
 ```go
-package users
+package dto
+
+import "time"
+
+// RegisterRequest represents the user registration request
+type RegisterRequest struct {
+	Email     string `json:"email" binding:"required,email" validate:"email"`
+	Password  string `json:"password" binding:"required,min=8"`
+	FirstName string `json:"first_name" binding:"required,min=2,max=100"`
+	LastName  string `json:"last_name" binding:"required,min=2,max=100"`
+}
+
+// LoginRequest represents the user login request
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required"`
+}
+
+// UpdateProfileRequest represents the profile update request
+type UpdateProfileRequest struct {
+	Email     string `json:"email" binding:"omitempty,email"`
+	FirstName string `json:"first_name" binding:"omitempty,min=2,max=100"`
+	LastName  string `json:"last_name" binding:"omitempty,min=2,max=100"`
+}
+
+// ChangePasswordRequest represents the password change request
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required,min=8"`
+}
+
+// UserResponse represents the user data returned in API responses
+type UserResponse struct {
+	ID        uint       `json:"id"`
+	Email     string     `json:"email"`
+	FirstName string     `json:"first_name"`
+	LastName  string     `json:"last_name"`
+	IsActive  bool       `json:"is_active"`
+	LastLogin *time.Time `json:"last_login"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// LoginResponse represents the login response with token
+type LoginResponse struct {
+	User  UserResponse `json:"user"`
+	Token string       `json:"token"`
+}
+
+// ErrorResponse represents error response structure
+type ErrorResponse struct {
+	Error   string            `json:"error"`
+	Message string            `json:"message"`
+	Details map[string]string `json:"details,omitempty"`
+}
+
+// SuccessResponse represents success response structure
+type SuccessResponse struct {
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+```
+
+## 3. repositories/user_repository.go
+
+```go
+package repositories
 
 import (
-    "database/sql"
-    "fmt"
-    "time"
-    "github.com/google/uuid"
-    "github.com/lib/pq"
+	"errors"
+	"time"
+
+	"gorm.io/gorm"
+	"your-app/models"
 )
 
-// UserRepository defines the interface for user data operations
-type UserRepository interface {
-    Create(user *User) error
-    GetByEmail(email string) (*User, error)
-    GetByID(id uuid.UUID) (*User, error)
-    Update(user *User) error
-    UpdatePassword(userID uuid.UUID, hashedPassword string) error
-    UpdateLastLogin(userID uuid.UUID) error
-    EmailExists(email string) (bool, error)
+// UserRepositoryInterface defines the contract for user repository
+type UserRepositoryInterface interface {
+	Create(user *models.User) error
+	GetByEmail(email string) (*models.User, error)
+	GetByID(id uint) (*models.User, error)
+	Update(user *models.User) error
+	UpdateLastLogin(userID uint) error
+	EmailExists(email string) (bool, error)
 }
 
-// PostgreSQLUserRepository implements UserRepository for PostgreSQL
-type PostgreSQLUserRepository struct {
-    db *sql.DB
+// UserRepository implements UserRepositoryInterface
+type UserRepository struct {
+	db *gorm.DB
 }
 
-// NewPostgreSQLUserRepository creates a new PostgreSQL user repository
-func NewPostgreSQLUserRepository(db *sql.DB) *PostgreSQLUserRepository {
-    return &PostgreSQLUserRepository{db: db}
+// NewUserRepository creates a new user repository instance
+func NewUserRepository(db *gorm.DB) UserRepositoryInterface {
+	return &UserRepository{db: db}
 }
 
-// Create inserts a new user into the database
-func (r *PostgreSQLUserRepository) Create(user *User) error {
-    query := `
-        INSERT INTO users (id, email, password_hash, first_name, last_name, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, created_at, updated_at`
-    
-    user.ID = uuid.New()
-    now := time.Now()
-    user.CreatedAt = now
-    user.UpdatedAt = now
-    
-    err := r.db.QueryRow(
-        query,
-        user.ID,
-        user.Email,
-        user.Password,
-        user.FirstName,
-        user.LastName,
-        user.CreatedAt,
-        user.UpdatedAt,
-    ).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
-    
-    if err != nil {
-        if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
-            return fmt.Errorf("email already exists")
-        }
-        return fmt.Errorf("failed to create user: %w", err)
-    }
-    
-    return nil
+// Create creates a new user in the database
+func (r *UserRepository) Create(user *models.User) error {
+	if err := r.db.Create(user).Error; err != nil {
+		// Check for unique constraint violation
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return errors.New("email already exists")
+		}
+		return err
+	}
+	return nil
 }
 
 // GetByEmail retrieves a user by email
-func (r *PostgreSQLUserRepository) GetByEmail(email string) (*User, error) {
-    query := `
-        SELECT id, email, password_hash, first_name, last_name, created_at, updated_at, last_login
-        FROM users WHERE email = $1`
-    
-    user := &User{}
-    err := r.db.QueryRow(query, email).Scan(
-        &user.ID,
-        &user.Email,
-        &user.Password,
-        &user.FirstName,
-        &user.LastName,
-        &user.CreatedAt,
-        &user.UpdatedAt,
-        &user.LastLogin,
-    )
-    
-    if err != nil {
-        if err == sql.ErrNoRows {
-            return nil, fmt.Errorf("user not found")
-        }
-        return nil, fmt.Errorf("failed to get user by email: %w", err)
-    }
-    
-    return user, nil
+func (r *UserRepository) GetByEmail(email string) (*models.User, error) {
+	var user models.User
+	err := r.db.Where("email = ? AND is_active = ?", email, true).First(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("user not found")
+		}
+		return nil, err
+	}
+	return &user, nil
 }
 
 // GetByID retrieves a user by ID
-func (r *PostgreSQLUserRepository) GetByID(id uuid.UUID) (*User, error) {
-    query := `
-        SELECT id, email, password_hash, first_name, last_name, created_at, updated_at, last_login
-        FROM users WHERE id = $1`
-    
-    user := &User{}
-    err := r.db.QueryRow(query, id).Scan(
-        &user.ID,
-        &user.Email,
-        &user.Password,
-        &user.FirstName,
-        &user.LastName,
-        &user.CreatedAt,
-        &user.UpdatedAt,
-        &user.LastLogin,
-    )
-    
-    if err != nil {
-        if err == sql.ErrNoRows {
-            return nil, fmt.Errorf("user not found")
-        }
-        return nil, fmt.Errorf("failed to get user by ID: %w", err)
-    }
-    
-    return user, nil
+func (r *UserRepository) GetByID(id uint) (*models.User, error) {
+	var user models.User
+	err := r.db.Where("id = ? AND is_active = ?", id, true).First(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("user not found")
+		}
+		return nil, err
+	}
+	return &user, nil
 }
 
 // Update updates user information
-func (r *PostgreSQLUserRepository) Update(user *User) error {
-    query := `
-        UPDATE users 
-        SET email = $2, first_name = $3, last_name = $4, updated_at = $5
-        WHERE id = $1
-        RETURNING updated_at`
-    
-    user.UpdatedAt = time.Now()
-    
-    err := r.db.QueryRow(
-        query,
-        user.ID,
-        user.Email,
-        user.FirstName,
-        user.LastName,
-        user.UpdatedAt,
-    ).Scan(&user.UpdatedAt)
-    
-    if err != nil {
-        if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
-            return fmt.Errorf("email already exists")
-        }
-        return fmt.Errorf("failed to update user: %w", err)
-    }
-    
-    return nil
+func (r *UserRepository) Update(user *models.User) error {
+	err := r.db.Save(user).Error
+	if err != nil {
+		// Check for unique constraint violation
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return errors.New("email already exists")
+		}
+		return err
+	}
+	return nil
 }
 
-// UpdatePassword updates user password
-func (r *PostgreSQLUserRepository) UpdatePassword(userID uuid.UUID, hashedPassword string) error {
-    query := `UPDATE users SET password_hash = $2, updated_at = $3 WHERE id = $1`
-    
-    _, err := r.db.Exec(query, userID, hashedPassword, time.Now())
-    if err != nil {
-        return fmt.Errorf("failed to update password: %w", err)
-    }
-    
-    return nil
+// UpdateLastLogin updates the user's last login timestamp
+func (r *UserRepository) UpdateLastLogin(userID uint) error {
+	now := time.Now()
+	return r.db.Model(&models.User{}).Where("id = ?", userID).Update("last_login", now).Error
 }
 
-// UpdateLastLogin updates the last login timestamp
-func (r *PostgreSQLUserRepository) UpdateLastLogin(userID uuid.UUID) error {
-    query := `UPDATE users SET last_login = $2 WHERE id = $1`
-    
-    now := time.Now()
-    _, err := r.db.Exec(query, userID, now)
-    if err != nil {
-        return fmt.Errorf("failed to update last login: %w", err)
-    }
-    
-    return nil
-}
-
-// EmailExists checks if an email already exists
-func (r *PostgreSQLUserRepository) EmailExists(email string) (bool, error) {
-    query := `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`
-    
-    var exists bool
-    err := r.db.QueryRow(query, email).Scan(&exists)
-    if err != nil {
-        return false, fmt.Errorf("failed to check email existence: %w", err)
-    }
-    
-    return exists, nil
+// EmailExists checks if an email already exists in the database
+func (r *UserRepository) EmailExists(email string) (bool, error) {
+	var count int64
+	err := r.db.Model(&models.User{}).Where("email = ?", email).Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 ```
 
-## middleware.go
+## 4. services/user_service.go
+
 ```go
-package users
+package services
 
 import (
-    "net/http"
-    "strings"
-    "time"
-    
-    "github.com/gin-gonic/gin"
-    "github.com/golang-jwt/jwt/v4"
-    "github.com/google/uuid"
+	"errors"
+	"regexp"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"github.com/golang-jwt/jwt/v5"
+	"your-app/dto"
+	"your-app/models"
+	"your-app/repositories"
 )
 
-// JWTClaims represents the JWT claims
-type JWTClaims struct {
-    UserID uuid.UUID `json:"user_id"`
-    Email  string    `json:"email"`
-    jwt.RegisteredClaims
+// UserServiceInterface defines the contract for user service
+type UserServiceInterface interface {
+	Register(req *dto.RegisterRequest) (*dto.UserResponse, error)
+	Login(req *dto.LoginRequest) (*dto.LoginResponse, error)
+	GetProfile(userID uint) (*dto.UserResponse, error)
+	UpdateProfile(userID uint, req *dto.UpdateProfileRequest) (*dto.UserResponse, error)
+	ChangePassword(userID uint, req *dto.ChangePasswordRequest) error
+	ValidateToken(tokenString string) (*jwt.Token, error)
+	GenerateToken(userID uint) (string, error)
 }
 
-// JWTService handles JWT operations
-type JWTService struct {
-    secretKey []byte
+// UserService implements UserServiceInterface
+type UserService struct {
+	userRepo  repositories.UserRepositoryInterface
+	jwtSecret []byte
 }
 
-// NewJWTService creates a new JWT service
-func NewJWTService(secretKey string) *JWTService {
-    return &JWTService{
-        secretKey: []byte(secretKey),
-    }
-}
-
-// GenerateToken generates a new JWT token
-func (j *JWTService) GenerateToken(user *User) (string, error) {
-    claims := JWTClaims{
-        UserID: user.ID,
-        Email:  user.Email,
-        RegisteredClaims: jwt.RegisteredClaims{
-            ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-            IssuedAt:  jwt.NewNumericDate(time.Now()),
-            NotBefore: jwt.NewNumericDate(time.Now()),
-            Issuer:    "user-api",
-            Subject:   user.ID.String(),
-        },
-    }
-    
-    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-    return token.SignedString(j.secretKey)
-}
-
-// ValidateToken validates a JWT token and returns the claims
-func (j *JWTService) ValidateToken(tokenString string) (*JWTClaims, error) {
-    token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
-        if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-            return nil, jwt.ErrSignatureInvalid
-        }
-        return j.secretKey, nil
-    })
-    
-    if err != nil {
-        return nil, err
-    }
-    
-    if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
-        return claims, nil
-    }
-    
-    return nil, jwt.ErrTokenInvalid
-}
-
-// AuthMiddleware creates a middleware for JWT authentication
-func AuthMiddleware(jwtService *JWTService, userRepo UserRepository) gin.HandlerFunc {
-    return func(c *gin.Context) {
-        authHeader := c.GetHeader("Authorization")
-        if authHeader == "" {
-            c.JSON(http.StatusUnauthorized, ErrorResponse{
-                Error:   "unauthorized",
-                Message: "Authorization header is required",
-            })
-            c.Abort()
-            return
-        }
-        
-        tokenParts := strings.Split(authHeader, " ")
-        if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-            c.JSON(http.StatusUnauthorized, ErrorResponse{
-                Error:   "unauthorized",
-                Message: "Invalid authorization header format",
-            })
-            c.Abort()
-            return
-        }
-        
-        claims, err := jwtService.ValidateToken(tokenParts[1])
-        if err != nil {
-            c.JSON(http.StatusUnauthorized, ErrorResponse{
-                Error:   "unauthorized",
-                Message: "Invalid or expired token",
-            })
-            c.Abort()
-            return
-        }
-        
-        // Verify user still exists
-        user, err := userRepo.GetByID(claims.UserID)
-        if err != nil {
-            c.JSON(http.StatusUnauthorized, ErrorResponse{
-                Error:   "unauthorized",
-                Message: "User not found",
-            })
-            c.Abort()
-            return
-        }
-        
-        // Set user in context
-        c.Set("user", user)
-        c.Set("user_id", claims.UserID)
-        c.Next()
-    }
-}
-```
-
-## handlers.go
-```go
-package users
-
-import (
-    "net/http"
-    "strings"
-    
-    "github.com/gin-gonic/gin"
-    "github.com/go-playground/validator/v10"
-    "github.com/google/uuid"
-    "golang.org/x/crypto/bcrypt"
-)
-
-// UserHandler handles user-related HTTP requests
-type UserHandler struct {
-    userRepo   UserRepository
-    jwtService *JWTService
-    validator  *validator.Validate
-}
-
-// NewUserHandler creates a new user handler
-func NewUserHandler(userRepo UserRepository, jwtService *JWTService) *UserHandler {
-    return &UserHandler{
-        userRepo:   userRepo,
-        jwtService: jwtService,
-        validator:  validator.New(),
-    }
+// NewUserService creates a new user service instance
+func NewUserService(userRepo repositories.UserRepositoryInterface, jwtSecret string) UserServiceInterface {
+	return &UserService{
+		userRepo:  userRepo,
+		jwtSecret: []byte(jwtSecret),
+	}
 }
 
 // Register handles user registration
-func (h *UserHandler) Register(c *gin.Context) {
-    var req RegisterRequest
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, ErrorResponse{
-            Error:   "invalid_request",
-            Message: "Invalid JSON payload",
-            Details: map[string]interface{}{"error": err.Error()},
-        })
-        return
-    }
-    
-    // Validate request
-    if err := h.validator.Struct(req); err != nil {
-        validationErrors := make(map[string]interface{})
-        for _, err := range err.(validator.ValidationErrors) {
-            field := strings.ToLower(err.Field())
-            switch err.Tag
+func (s *UserService) Register(req *dto.RegisterRequest) (*dto.UserResponse, error) {
+	// Validate email format
+	if !s.isValidEmail(req.Email) {
+		return nil, errors.New("invalid email format")
+	}
+
+	// Check if email already exists
+	exists, err := s.userRepo.EmailExists(req.Email)
+	if err != nil {
+		return nil, errors.New("failed to check email existence")
+	}
+	if exists {
+		return nil, errors.New("email already registered")
+	}
+
+	// Hash password
+	hashedPassword, err := s.hashPassword(req.Password)
+	if err != nil {
+		return nil, errors.New("failed to process password")
+	}
+
+	// Create user model
+	user := &models.User{
+		Email:     req.Email,
+		Password:  hashedPassword,
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		IsActive:  true,
+	}
+
+	// Save user to database
+	if err := s.userRepo.Create(user); err != nil {
+		return nil, err
+	}
+
+	// Convert to response DTO
+	return s.userToResponse(user), nil
+}
+
+// Login handles user authentication
+func (s *UserService) Login(req *dto.LoginRequest) (*dto.LoginResponse, error) {
+	// Get user by email
+	user, err := s.userRepo.GetByEmail(req.Email)
+	if err != nil {
+		return nil, errors.New("invalid credentials")
+	}
+
+	// Verify password
+	if !s.checkPasswordHash(req.Password, user.Password) {
+		return nil, errors.New("invalid credentials")
+	}
+
+	// Update last login
+	if err := s.userRepo.UpdateLastLogin(user.ID); err != nil {
+		// Log error but don't fail the login
+		// In production, you might want to use a proper logger
+	}
+
+	// Generate JWT token
+	token, err := s.GenerateToken(user.ID)
+	if err != nil {
+		return nil, errors.New("failed to generate token")
+	}
+
+	// Update user with current timestamp for response
+	now := time.Now()
+	user.LastLogin = &now
+
+	return &dto.LoginResponse{
+		User:  *s.userToResponse(user),
+		Token: token,
+	}, nil
+}
+
+// GetProfile retrieves user profile
+func (s *UserService) GetProfile(userID uint) (*dto.UserResponse, error) {
+	user, err := s.userRepo.GetByID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.userToResponse(user), nil
+}
+
+// UpdateProfile updates user profile
+func (s *UserService) UpdateProfile(userID uint, req *dto.UpdateProfileRequest) (*dto.UserResponse, error) {
+	user, err := s.userRepo.GetByID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update fields if provided
+	if req.Email != "" {
+		if !s.isValidEmail(req.Email) {
+			return nil, errors.New("invalid email format")
+		}
+		
+		// Check if new email already exists (excluding current user)
+		if req.Email != user.Email {
+			exists, err := s.userRepo.EmailExists(req.Email)
+			if err != nil {
+				return nil, errors.New("failed to validate email")
+			}
+			if exists {
+				return nil, errors.New("email already in use")
+			}
+		}
+		user.Email = req.Email
+	}
+
+	if req.FirstName != "" {
+		user.FirstName = req.FirstName
+	}
+
+	if req.LastName != "" {
+		user.LastName = req.LastName
+	}
+
+	// Save updated user
+	if err := s.userRepo.Update(user); err != nil {
+		return nil, err
+	}
+
+	return s.userToResponse(user), nil
+}
+
+// ChangePassword handles password change
+func (s *UserService) ChangePassword(userID uint, req *dto.ChangePasswordRequest) error {
+	user, err := s.userRepo.GetByID(userID)
+	if err != nil {
+		return err
+	}
+
+	// Verify current password
+	if !s.checkPasswordHash(req.CurrentPassword, user.Password) {
+		return errors.New("current password is incorrect")
+	}
+
+	// Hash new password
+	hashedPassword, err := s.hashPassword(req.NewPassword)
+	if err != nil {
+		return errors.New("failed to process new password")
+	}
+
+	// Update password
+	user.Password = hashedPassword
+	return s.userRepo.Update(user)
+}
+
+// GenerateToken generates a JWT token for the user
+func (s *UserService) GenerateToken(userID uint) (string, error) {
+	claims := jwt.MapClaims{
+		"user_id": userID,
+		"exp":     time.Now().Add(time.Hour * 24).Unix(), // 24 hours
+		"iat":     time.Now().Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(s.jwtSecret)
+}
+
+// ValidateToken validates a JWT token
+func (s *UserService) ValidateToken(tokenString string) (*jwt.Token, error) {
+	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("invalid token signing method")
+		}
+		return s.jwtSecret, nil
+	})
+}
+
+// Helper methods
+
+func (s *UserService) hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+	return string(bytes), err
+}
+
+func (s *UserService) checkPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
+func (s *UserService) isValidEmail(email string) bool {
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	return emailRegex.MatchString(email)
+}
+
+func (s *UserService) userToResponse(user *models.User) *dto.UserResponse {
+	return &dto.UserResponse{
+		ID:        user.ID,
+		Email:     user.Email,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		IsActive:  user.IsActive,
+		LastLogin: user.LastLogin,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	}
+}
+```
+
+## 5. middleware/auth.go
+
+```go
+package middleware
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"your-app/dto"
+	"your-app/services"
+)
+
+// AuthMiddleware creates JWT authentication middleware
+func
