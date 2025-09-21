@@ -1,123 +1,105 @@
 """
-Authentication and Authorization Module for FastAPI
+Authentication and authorization utilities for FastAPI application.
 
-This module provides comprehensive JWT-based authentication and authorization
-functionality with secure password handling and proper error management.
+This module provides JWT token management, password hashing/verification,
+and FastAPI security dependencies for protected routes.
 """
 
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from fastapi.security import OAuth2PasswordBearer
-from fastapi import HTTPException, Depends, status
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
-import os
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from models.user import User
 
 
-# Configuration Constants
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = 24
-
-# Environment variable validation
+# Configuration constants
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise ValueError(
-        "SECRET_KEY environment variable is required for JWT token generation. "
+        "SECRET_KEY environment variable is required for JWT token signing. "
         "Please set SECRET_KEY in your environment variables."
     )
 
-# Password hashing context with bcrypt and 12 salt rounds
-pwd_context = CryptContext(
-    schemes=["bcrypt"], 
-    deprecated="auto",
-    bcrypt__rounds=12
-)
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_HOURS = 24
 
-# OAuth2 scheme for token extraction
+# Security configurations
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
-# Credentials exception for reuse
-credentials_exception = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED,
-    detail="Could not validate credentials",
-    headers={"WWW-Authenticate": "Bearer"},
-)
 
 
 def create_access_token(data: Dict[str, Any]) -> str:
     """
-    Create a JWT access token with the provided data.
+    Generate a JWT access token with 24-hour expiration.
     
     Args:
-        data: Dictionary containing the data to encode in the token
+        data: Dictionary containing the payload data to encode in the token
         
     Returns:
         str: Encoded JWT token
         
     Raises:
-        HTTPException: If token creation fails
+        Exception: If token creation fails
     """
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+    to_encode.update({"exp": expire})
+    
     try:
-        to_encode = data.copy()
-        expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-        to_encode.update({"exp": expire})
-        
-        # Ensure 'sub' field exists for JWT standard compliance
-        if "sub" not in to_encode:
-            raise ValueError("Token data must include 'sub' field")
-            
         encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         return encoded_jwt
-        
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create access token: {str(e)}"
-        )
+        raise Exception(f"Failed to create access token: {str(e)}")
 
 
-def verify_token(token: str) -> Optional[str]:
+def verify_token(token: str) -> Dict[str, Any]:
     """
-    Verify and decode a JWT token.
+    Decode and validate a JWT token.
     
     Args:
         token: JWT token string to verify
         
     Returns:
-        Optional[str]: Username from token if valid, None if invalid
+        Dict[str, Any]: Decoded token payload
+        
+    Raises:
+        HTTPException: If token is invalid, expired, or malformed
     """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
     try:
-        # Decode and verify the token
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        
-        if username is None:
-            return None
-            
-        # Check if token has expired (jwt.decode handles this, but explicit check for clarity)
-        exp = payload.get("exp")
-        if exp is None:
-            return None
-            
-        # Convert exp to datetime and check
-        if datetime.utcnow() > datetime.fromtimestamp(exp):
-            return None
-            
-        return username
-        
-    except JWTError as e:
-        # Log the specific JWT error for debugging (in production, use proper logging)
-        print(f"JWT Error: {str(e)}")
-        return None
-    except Exception as e:
-        # Handle any other unexpected errors
-        print(f"Token verification error: {str(e)}")
-        return None
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.JWTClaimsError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token claims",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.JWTError:
+        raise credentials_exception
+    except Exception:
+        raise credentials_exception
 
 
 def get_password_hash(password: str) -> str:
     """
-    Hash a plain text password using bcrypt.
+    Hash a password using bcrypt with 12 salt rounds.
     
     Args:
         password: Plain text password to hash
@@ -126,24 +108,17 @@ def get_password_hash(password: str) -> str:
         str: Hashed password
         
     Raises:
-        HTTPException: If password hashing fails
+        Exception: If password hashing fails
     """
     try:
-        if not password:
-            raise ValueError("Password cannot be empty")
-            
         return pwd_context.hash(password)
-        
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to hash password: {str(e)}"
-        )
+        raise Exception(f"Failed to hash password: {str(e)}")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verify a plain text password against a hashed password.
+    Verify a plain password against its hash.
     
     Args:
         plain_password: Plain text password to verify
@@ -153,208 +128,126 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         bool: True if password matches, False otherwise
     """
     try:
-        if not plain_password or not hashed_password:
-            return False
-            
         return pwd_context.verify(plain_password, hashed_password)
-        
-    except Exception as e:
-        # Log error but don't expose details for security
-        print(f"Password verification error: {str(e)}")
+    except Exception:
         return False
 
 
-# Database dependency (to be implemented based on your database setup)
-def get_database():
+def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     """
-    Database dependency - implement based on your database setup.
-    This is a placeholder that should be replaced with your actual database connection.
-    """
-    # Example: return SessionLocal() for SQLAlchemy
-    # or return your database connection/session
-    pass
-
-
-def get_user_by_username(username: str, db=None):
-    """
-    Retrieve user from database by username.
-    
-    This is a placeholder function that should be implemented based on your
-    database setup and User model.
-    
-    Args:
-        username: Username to search for
-        db: Database session/connection
-        
-    Returns:
-        User object if found, None otherwise
-    """
-    # Placeholder implementation - replace with your actual database query
-    # Example for SQLAlchemy:
-    # return db.query(User).filter(User.username == username).first()
-    
-    # For demonstration purposes, this should be replaced with actual database logic
-    from typing import NamedTuple
-    
-    class User(NamedTuple):
-        username: str
-        email: str
-        is_active: bool
-        hashed_password: str
-    
-    # This is just a placeholder - implement your actual user retrieval logic
-    return None
-
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """
-    Get the current authenticated user from JWT token.
+    Extract and return user information from JWT token.
     
     Args:
         token: JWT token from Authorization header
         
     Returns:
-        User: Current authenticated user object
+        User: User object extracted from token
         
     Raises:
         HTTPException: If token is invalid or user not found
     """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
     try:
-        # Verify the token and extract username
-        username = verify_token(token)
-        if username is None:
+        payload = verify_token(token)
+        user_id: Optional[str] = payload.get("sub")
+        
+        if user_id is None:
             raise credentials_exception
             
-        # Get database session (implement based on your setup)
-        db = get_database()  # Replace with your database dependency
+        # Create user object from token payload
+        # In a real application, you might want to fetch from database
+        user_data = {
+            "id": user_id,
+            "email": payload.get("email"),
+            "username": payload.get("username"),
+            "is_active": payload.get("is_active", True),
+        }
         
-        # Retrieve user from database
-        user = get_user_by_username(username, db)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-            
+        user = User(**user_data)
         return user
         
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
         raise
-    except Exception as e:
-        # Handle any unexpected errors
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Authentication failed: {str(e)}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    except Exception:
+        raise credentials_exception
 
 
-async def get_current_active_user(current_user = Depends(get_current_user)):
+def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
     """
-    Get the current authenticated and active user.
+    FastAPI dependency to verify that the current user is active.
     
     Args:
-        current_user: Current user from get_current_user dependency
+        current_user: User object from get_current_user dependency
         
     Returns:
-        User: Current active user object
+        User: Active user object
         
     Raises:
         HTTPException: If user is inactive
     """
-    if not getattr(current_user, 'is_active', False):
+    if not getattr(current_user, 'is_active', True):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user account"
+            detail="Inactive user"
         )
     return current_user
 
 
-# Utility function for token validation in routes
-def validate_token_format(authorization: str) -> str:
+# Additional utility functions for enhanced security
+
+def create_user_token_data(user: User) -> Dict[str, Any]:
     """
-    Validate and extract token from Authorization header.
+    Create token payload data from user object.
     
     Args:
-        authorization: Authorization header value
+        user: User object to create token data for
         
     Returns:
-        str: Extracted token
-        
-    Raises:
-        HTTPException: If token format is invalid
+        Dict[str, Any]: Token payload data
     """
-    if not authorization:
-        raise credentials_exception
-        
-    try:
-        scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise credentials_exception
-        return token
-    except ValueError:
-        raise credentials_exception
-
-
-# Example usage and testing functions (remove in production)
-def create_test_token(username: str) -> str:
-    """
-    Create a test token for development/testing purposes.
-    Remove this function in production.
-    """
-    return create_access_token(data={"sub": username})
-
-
-# Security utilities
-def is_token_expired(token: str) -> bool:
-    """
-    Check if a token is expired without raising exceptions.
-    
-    Args:
-        token: JWT token to check
-        
-    Returns:
-        bool: True if expired or invalid, False if valid
-    """
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        exp = payload.get("exp")
-        if exp is None:
-            return True
-        return datetime.utcnow() > datetime.fromtimestamp(exp)
-    except JWTError:
-        return True
-
-
-# Configuration validation function
-def validate_auth_config() -> Dict[str, Any]:
-    """
-    Validate authentication configuration and return status.
-    
-    Returns:
-        Dict containing configuration status
-    """
-    config_status = {
-        "secret_key_set": bool(SECRET_KEY),
-        "algorithm": ALGORITHM,
-        "token_expire_hours": ACCESS_TOKEN_EXPIRE_HOURS,
-        "bcrypt_rounds": pwd_context.bcrypt__rounds,
-        "oauth2_token_url": oauth2_scheme.tokenUrl
+    return {
+        "sub": str(user.id),
+        "email": getattr(user, 'email', None),
+        "username": getattr(user, 'username', None),
+        "is_active": getattr(user, 'is_active', True),
     }
+
+
+def validate_token_format(token: str) -> bool:
+    """
+    Validate basic JWT token format without decoding.
     
-    return config_status
+    Args:
+        token: Token string to validate
+        
+    Returns:
+        bool: True if token format is valid, False otherwise
+    """
+    if not token or not isinstance(token, str):
+        return False
+    
+    # JWT tokens have 3 parts separated by dots
+    parts = token.split('.')
+    return len(parts) == 3 and all(part for part in parts)
 
 
-# Export main functions for easy importing
-__all__ = [
-    "create_access_token",
-    "verify_token", 
-    "get_password_hash",
-    "verify_password",
-    "get_current_user",
-    "get_current_active_user",
-    "oauth2_scheme",
-    "credentials_exception"
-]
+# Exception classes for better error handling
+
+class AuthenticationError(Exception):
+    """Custom exception for authentication errors."""
+    pass
+
+
+class TokenError(AuthenticationError):
+    """Custom exception for token-related errors."""
+    pass
+
+
+class PasswordError(AuthenticationError):
+    """Custom exception for password-related errors."""
+    pass

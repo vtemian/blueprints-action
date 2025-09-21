@@ -1,32 +1,34 @@
 """
-Task model definition for SQLAlchemy ORM.
-Module: models.task
+Task model for managing user tasks with status tracking and priority levels.
+
+This module defines the Task SQLAlchemy model with comprehensive field validation,
+automatic timestamp management, and utility methods for task lifecycle management.
 """
 
-from datetime import datetime
 import uuid
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
 from sqlalchemy import (
-    Column, String, Text, DateTime, ForeignKey, Index, Enum as SQLEnum
+    Column, String, Text, DateTime, ForeignKey, Enum as SQLEnum, 
+    Index, Boolean, func
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
 
 from core.database import Base
 
 
 class TaskStatus(Enum):
-    """Task status enumeration."""
+    """Enumeration for task status values."""
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
 
 
 class TaskPriority(Enum):
-    """Task priority enumeration."""
+    """Enumeration for task priority levels."""
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -34,19 +36,23 @@ class TaskPriority(Enum):
 
 class Task(Base):
     """
-    Task model representing user tasks with status tracking and due dates.
+    Task model for managing user tasks with status tracking and priority levels.
+    
+    This model provides comprehensive task management functionality including
+    status tracking, priority levels, due dates, and automatic timestamp management.
     
     Attributes:
-        id: Unique identifier for the task
-        title: Task title (required)
-        description: Detailed task description (optional)
-        status: Current task status (pending, in_progress, completed)
-        priority: Task priority level (low, medium, high)
-        user_id: Foreign key reference to the owning user
-        due_date: Optional deadline for task completion
-        completed_at: Timestamp when task was marked complete
-        created_at: Task creation timestamp
-        updated_at: Last modification timestamp
+        id (UUID): Primary key using UUID4
+        title (str): Task title, required, max 200 characters
+        description (str, optional): Detailed task description
+        status (TaskStatus): Current task status (pending, in_progress, completed)
+        priority (TaskPriority): Task priority level (low, medium, high)
+        due_date (datetime, optional): When the task is due
+        completed_at (datetime, optional): When the task was completed
+        created_at (datetime): When the task was created (auto-generated)
+        updated_at (datetime): When the task was last updated (auto-updated)
+        user_id (UUID): Foreign key reference to the User model
+        user: Relationship to the User model
     """
     
     __tablename__ = "tasks"
@@ -56,32 +62,65 @@ class Task(Base):
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
-        nullable=False
+        nullable=False,
+        doc="Unique identifier for the task"
     )
     
     # Core task fields
     title = Column(
         String(200),
         nullable=False,
-        index=True
+        doc="Task title, required field with 200 character limit"
     )
     
     description = Column(
         Text,
-        nullable=True
+        nullable=True,
+        doc="Optional detailed description of the task"
     )
     
+    # Status and priority enums
     status = Column(
         SQLEnum(TaskStatus),
         nullable=False,
         default=TaskStatus.PENDING,
-        index=True
+        doc="Current status of the task"
     )
     
     priority = Column(
         SQLEnum(TaskPriority),
         nullable=False,
-        default=TaskPriority.MEDIUM
+        default=TaskPriority.MEDIUM,
+        doc="Priority level of the task"
+    )
+    
+    # Date fields
+    due_date = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="Optional due date for the task"
+    )
+    
+    completed_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="Timestamp when the task was completed"
+    )
+    
+    # Automatic timestamp fields
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="Timestamp when the task was created"
+    )
+    
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        doc="Timestamp when the task was last updated"
     )
     
     # Foreign key relationship
@@ -89,108 +128,102 @@ class Task(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
-        index=True
-    )
-    
-    # Timestamp fields
-    due_date = Column(
-        DateTime(timezone=True),
-        nullable=True,
-        index=True
-    )
-    
-    completed_at = Column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-    
-    created_at = Column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now()
-    )
-    
-    updated_at = Column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now()
+        doc="Reference to the user who owns this task"
     )
     
     # Relationships
     user = relationship(
         "User",
-        back_populates="tasks"
+        back_populates="tasks",
+        doc="Relationship to the User model"
     )
     
-    # Database indexes
+    # Database indexes for performance optimization
     __table_args__ = (
-        Index("ix_tasks_user_status", "user_id", "status"),
-        Index("ix_tasks_due_date_status", "due_date", "status"),
-        Index("ix_tasks_priority_status", "priority", "status"),
+        Index("idx_tasks_user_id", "user_id"),
+        Index("idx_tasks_status", "status"),
+        Index("idx_tasks_due_date", "due_date"),
+        Index("idx_tasks_priority", "priority"),
+        Index("idx_tasks_created_at", "created_at"),
+        Index("idx_tasks_user_status", "user_id", "status"),  # Composite index
     )
     
     def mark_complete(self) -> None:
         """
-        Mark the task as completed and set completion timestamp.
+        Mark the task as completed and set the completion timestamp.
         
-        Sets the task status to COMPLETED and records the completion time.
-        Only updates completed_at if the status actually changes to completed.
+        Updates the task status to 'completed' and sets the completed_at
+        field to the current UTC timestamp.
         """
-        if self.status != TaskStatus.COMPLETED:
-            self.status = TaskStatus.COMPLETED
-            self.completed_at = datetime.utcnow().replace(microsecond=0)
+        self.status = TaskStatus.COMPLETED
+        self.completed_at = datetime.utcnow()
     
     def is_overdue(self) -> bool:
         """
-        Check if the task is overdue based on due_date.
+        Check if the task is overdue.
         
         Returns:
-            bool: True if task has a due_date and it's in the past,
-                  False if no due_date or due_date is in the future
+            bool: True if the task has a due_date and it's in the past,
+                  False if no due_date is set or the due_date is in the future.
         """
         if self.due_date is None:
             return False
         
+        # Handle timezone-aware comparison
         current_time = datetime.utcnow()
-        # Handle timezone-aware comparison safely
         if self.due_date.tzinfo is not None:
-            current_time = current_time.replace(tzinfo=self.due_date.tzinfo)
+            # If due_date is timezone-aware, make current_time timezone-aware too
+            from datetime import timezone
+            current_time = current_time.replace(tzinfo=timezone.utc)
         
-        return current_time > self.due_date
+        return self.due_date < current_time
     
-    @property
     def is_completed(self) -> bool:
-        """Check if task is completed."""
-        return self.status == TaskStatus.COMPLETED
-    
-    @property
-    def days_until_due(self) -> Optional[int]:
         """
-        Calculate days until due date.
+        Check if the task is completed.
         
         Returns:
-            int: Number of days until due (negative if overdue)
-            None: If no due date is set
+            bool: True if the task status is completed, False otherwise.
+        """
+        return self.status == TaskStatus.COMPLETED
+    
+    def days_until_due(self) -> Optional[int]:
+        """
+        Calculate the number of days until the task is due.
+        
+        Returns:
+            Optional[int]: Number of days until due date, None if no due date is set.
+                          Negative values indicate overdue tasks.
         """
         if self.due_date is None:
             return None
         
         current_time = datetime.utcnow()
         if self.due_date.tzinfo is not None:
-            current_time = current_time.replace(tzinfo=self.due_date.tzinfo)
+            from datetime import timezone
+            current_time = current_time.replace(tzinfo=timezone.utc)
         
-        delta = self.due_date - current_time
-        return delta.days
+        time_diff = self.due_date - current_time
+        return time_diff.days
     
     def __repr__(self) -> str:
-        """String representation for debugging."""
+        """
+        String representation of the Task instance for debugging.
+        
+        Returns:
+            str: Human-readable representation of the task.
+        """
         return (
-            f"<Task(id={self.id}, title='{self.title}', "
-            f"status={self.status.value}, priority={self.priority.value}, "
-            f"user_id={self.user_id})>"
+            f"<Task(id='{self.id}', title='{self.title}', "
+            f"status='{self.status.value}', priority='{self.priority.value}', "
+            f"user_id='{self.user_id}')>"
         )
     
     def __str__(self) -> str:
-        """Human-readable string representation."""
+        """
+        User-friendly string representation of the Task.
+        
+        Returns:
+            str: User-friendly representation showing title and status.
+        """
         return f"{self.title} ({self.status.value})"
