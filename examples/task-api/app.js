@@ -1,395 +1,348 @@
+/**
+ * Task Management API - Express.js Application
+ * Production-ready Express server with authentication, database integration, and comprehensive error handling
+ * @version 1.0.0
+ */
+
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 import morgan from 'morgan';
-import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
 // Import custom modules
-import tasksRouter from '@api/tasks';
-import usersRouter from '@api/users';
-import { initializeDatabase, getConnection, createTables } from '@core/database';
-import { verifyToken } from '@core/auth';
+import { initializeDatabase, getConnectionStatus, closeDatabase } from './core/database.js';
+import { jwtAuthMiddleware, isAuthEndpoint } from './core/auth.js';
+import taskRoutes from './api/tasks.js';
+import userRoutes from './api/users.js';
 
 // Load environment variables
 dotenv.config();
 
-class TaskManagementAPI {
-  constructor() {
-    this.app = express();
-    this.port = process.env.PORT || 3000;
-    this.corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:3000';
-    this.jwtSecret = process.env.JWT_SECRET || 'your-secret-key';
-    this.databaseUrl = process.env.DATABASE_URL || 'sqlite://./database.db';
-    
-    // Application metadata
-    this.appInfo = {
-      title: 'Task Management API',
-      version: '1.0.0',
-      description: 'A comprehensive task management API with user authentication'
-    };
-  }
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-  /**
-   * Configure CORS middleware with specific origin and credentials support
-   */
-  configureCORS() {
-    const corsOptions = {
-      origin: this.corsOrigin,
-      credentials: true,
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-      exposedHeaders: ['X-Total-Count', 'X-Page-Count']
-    };
+/**
+ * Express application instance
+ */
+const app = express();
 
-    this.app.use(cors(corsOptions));
-    console.log(`✓ CORS configured for origin: ${this.corsOrigin}`);
-  }
+// Application configuration
+const APP_CONFIG = {
+    title: 'Task Management API',
+    version: '1.0.0',
+    port: process.env.PORT || 3000,
+    environment: process.env.NODE_ENV || 'development',
+    corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:3000'
+};
 
-  /**
-   * Configure request logging middleware
-   */
-  configureLogging() {
-    const logFormat = process.env.NODE_ENV === 'production' 
-      ? 'combined' 
-      : 'dev';
-    
-    this.app.use(morgan(logFormat));
-    console.log('✓ Request logging middleware configured');
-  }
-
-  /**
-   * Configure rate limiting middleware
-   */
-  configureRateLimit() {
-    const limiter = rateLimit({
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      max: process.env.NODE_ENV === 'production' ? 100 : 1000, // requests per window
-      message: {
-        error: 'Too many requests from this IP',
+/**
+ * Rate limiting configuration for production readiness
+ */
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: APP_CONFIG.environment === 'production' ? 100 : 1000, // Limit each IP
+    message: {
+        error: 'Too many requests from this IP, please try again later.',
         retryAfter: '15 minutes'
-      },
-      standardHeaders: true,
-      legacyHeaders: false,
-    });
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
-    this.app.use('/api', limiter);
-    console.log('✓ Rate limiting configured');
-  }
+/**
+ * CORS configuration middleware
+ */
+const corsOptions = {
+    origin: APP_CONFIG.corsOrigin,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['X-Total-Count', 'X-Page-Count']
+};
 
-  /**
-   * Configure basic middleware (JSON parsing, URL encoding)
-   */
-  configureBasicMiddleware() {
-    this.app.use(express.json({ limit: '10mb' }));
-    this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-    console.log('✓ Basic middleware configured');
-  }
-
-  /**
-   * JWT Authentication middleware for protected routes
-   */
-  configureJWTMiddleware() {
-    const jwtMiddleware = async (req, res, next) => {
-      try {
-        // Skip authentication for public routes
-        const publicRoutes = [
-          '/health',
-          '/api/users/register',
-          '/api/users/login',
-          '/api/users/refresh-token'
-        ];
-
-        if (publicRoutes.includes(req.path)) {
-          return next();
-        }
-
-        const authHeader = req.headers.authorization;
-        
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-          return res.status(401).json({
-            error: 'Access denied',
-            message: 'No token provided or invalid token format'
-          });
-        }
-
-        const token = authHeader.substring(7); // Remove 'Bearer ' prefix
-        
-        try {
-          const decoded = jwt.verify(token, this.jwtSecret);
-          req.user = decoded;
-          next();
-        } catch (jwtError) {
-          if (jwtError.name === 'TokenExpiredError') {
-            return res.status(401).json({
-              error: 'Token expired',
-              message: 'Please refresh your token or login again'
-            });
-          } else if (jwtError.name === 'JsonWebTokenError') {
-            return res.status(401).json({
-              error: 'Invalid token',
-              message: 'Token is malformed or invalid'
-            });
-          } else {
-            throw jwtError;
-          }
-        }
-      } catch (error) {
-        console.error('JWT Middleware Error:', error);
-        return res.status(500).json({
-          error: 'Authentication error',
-          message: 'Internal server error during authentication'
-        });
-      }
-    };
-
-    // Apply JWT middleware to all routes except public ones
-    this.app.use(jwtMiddleware);
-    console.log('✓ JWT authentication middleware configured');
-  }
-
-  /**
-   * Configure health check endpoint with database connectivity test
-   */
-  configureHealthCheck() {
-    this.app.get('/health', async (req, res) => {
-      try {
-        // Test database connection
-        const connection = await getConnection();
-        await connection.query('SELECT 1');
-        
-        const healthStatus = {
-          status: 'healthy',
-          database: 'connected',
-          timestamp: new Date().toISOString(),
-          version: this.appInfo.version,
-          uptime: process.uptime()
-        };
-
-        res.status(200).json(healthStatus);
-      } catch (error) {
-        console.error('Health check failed:', error);
-        
-        const healthStatus = {
-          status: 'unhealthy',
-          database: 'disconnected',
-          timestamp: new Date().toISOString(),
-          version: this.appInfo.version,
-          error: error.message
-        };
-
-        res.status(503).json(healthStatus);
-      }
-    });
-
-    console.log('✓ Health check endpoint configured at /health');
-  }
-
-  /**
-   * Mount API routers with proper prefixes
-   */
-  configureRoutes() {
-    try {
-      // Mount routers with API prefix
-      this.app.use('/api/tasks', tasksRouter);
-      this.app.use('/api/users', usersRouter);
-
-      // API info endpoint
-      this.app.get('/api', (req, res) => {
-        res.json({
-          ...this.appInfo,
-          endpoints: {
-            health: '/health',
-            tasks: '/api/tasks',
-            users: '/api/users'
-          },
-          documentation: '/api/docs'
-        });
-      });
-
-      // 404 handler for undefined routes
-      this.app.use('*', (req, res) => {
-        res.status(404).json({
-          error: 'Route not found',
-          message: `The requested route ${req.originalUrl} does not exist`,
-          availableEndpoints: ['/health', '/api', '/api/tasks', '/api/users']
-        });
-      });
-
-      console.log('✓ API routes configured');
-      console.log('  - /api/tasks (Task management endpoints)');
-      console.log('  - /api/users (User management endpoints)');
-    } catch (error) {
-      console.error('Error configuring routes:', error);
-      throw error;
+/**
+ * Custom JWT authentication middleware wrapper
+ * Skips authentication for health endpoint and auth endpoints
+ */
+const conditionalAuthMiddleware = (req, res, next) => {
+    // Skip authentication for health endpoint
+    if (req.path === '/health') {
+        return next();
     }
-  }
+    
+    // Skip authentication for auth endpoints
+    if (isAuthEndpoint(req.path)) {
+        return next();
+    }
+    
+    // Apply JWT authentication for all other routes
+    return jwtAuthMiddleware(req, res, next);
+};
 
-  /**
-   * Configure global error handling middleware
-   */
-  configureErrorHandling() {
-    this.app.use((error, req, res, next) => {
-      console.error('Global Error Handler:', error);
+/**
+ * Request logging configuration
+ */
+const morganFormat = APP_CONFIG.environment === 'production' 
+    ? 'combined' 
+    : ':method :url :status :res[content-length] - :response-time ms';
 
-      // Handle specific error types
-      if (error.name === 'ValidationError') {
-        return res.status(400).json({
-          error: 'Validation Error',
-          message: error.message,
-          details: error.details || null
+// Middleware configuration (in exact order as specified)
+app.use(helmet()); // Security headers
+app.use(limiter); // Rate limiting
+app.use(morgan(morganFormat)); // Request logging
+
+// 1. CORS middleware
+app.use(cors(corsOptions));
+
+// 2. JSON body parser middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// 3. JWT authentication middleware (conditional)
+app.use(conditionalAuthMiddleware);
+
+/**
+ * Health check endpoint
+ * Returns application status and database connection status
+ */
+app.get('/health', async (req, res) => {
+    try {
+        const dbStatus = await getConnectionStatus();
+        
+        res.status(200).json({
+            status: 'healthy',
+            database: dbStatus,
+            timestamp: new Date().toISOString(),
+            version: APP_CONFIG.version,
+            environment: APP_CONFIG.environment
         });
-      }
+    } catch (error) {
+        console.error('Health check failed:', error);
+        res.status(503).json({
+            status: 'unhealthy',
+            database: 'disconnected',
+            error: 'Database connection failed',
+            timestamp: new Date().toISOString()
+        });
+    }
+});
 
-      if (error.name === 'UnauthorizedError') {
+// API Routes mounting
+app.use('/api/tasks', taskRoutes);
+app.use('/api/users', userRoutes);
+
+/**
+ * Root endpoint
+ */
+app.get('/', (req, res) => {
+    res.json({
+        message: `Welcome to ${APP_CONFIG.title}`,
+        version: APP_CONFIG.version,
+        documentation: '/api/docs',
+        health: '/health'
+    });
+});
+
+/**
+ * 404 handler for undefined routes
+ */
+app.use('*', (req, res) => {
+    res.status(404).json({
+        error: 'Route not found',
+        message: `The requested endpoint ${req.method} ${req.originalUrl} does not exist`,
+        availableEndpoints: [
+            'GET /health',
+            'GET /api/tasks',
+            'GET /api/users'
+        ]
+    });
+});
+
+/**
+ * Global error handler middleware
+ * Handles all unhandled exceptions and errors
+ */
+app.use((error, req, res, next) => {
+    console.error('Global error handler:', {
+        error: error.message,
+        stack: error.stack,
+        url: req.url,
+        method: req.method,
+        timestamp: new Date().toISOString()
+    });
+
+    // Authentication errors
+    if (error.name === 'UnauthorizedError' || error.status === 401) {
         return res.status(401).json({
-          error: 'Unauthorized',
-          message: 'Invalid or expired token'
+            error: 'Authentication failed',
+            message: 'Invalid or expired token',
+            code: 'AUTH_ERROR'
         });
-      }
+    }
 
-      // Default server error
-      const statusCode = error.statusCode || 500;
-      const message = process.env.NODE_ENV === 'production' 
+    // JWT specific errors
+    if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({
+            error: 'Invalid token',
+            message: 'The provided token is malformed',
+            code: 'INVALID_TOKEN'
+        });
+    }
+
+    if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({
+            error: 'Token expired',
+            message: 'The provided token has expired',
+            code: 'TOKEN_EXPIRED'
+        });
+    }
+
+    // Database errors
+    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+        return res.status(503).json({
+            error: 'Database connection failed',
+            message: 'Unable to connect to the database',
+            code: 'DB_CONNECTION_ERROR'
+        });
+    }
+
+    // Validation errors
+    if (error.name === 'ValidationError') {
+        return res.status(400).json({
+            error: 'Validation failed',
+            message: error.message,
+            code: 'VALIDATION_ERROR'
+        });
+    }
+
+    // Default server error
+    const statusCode = error.status || error.statusCode || 500;
+    const message = APP_CONFIG.environment === 'production' 
         ? 'Internal server error' 
         : error.message;
 
-      res.status(statusCode).json({
-        error: 'Server Error',
+    res.status(statusCode).json({
+        error: 'Server error',
         message: message,
-        ...(process.env.NODE_ENV !== 'production' && { stack: error.stack })
-      });
+        code: 'INTERNAL_ERROR',
+        ...(APP_CONFIG.environment !== 'production' && { stack: error.stack })
     });
+});
 
-    console.log('✓ Global error handling configured');
-  }
-
-  /**
-   * Initialize database connection and create tables
-   */
-  async initializeDatabase() {
-    try {
-      console.log('🔄 Initializing database connection...');
-      
-      // Initialize database connection pool
-      await initializeDatabase(this.databaseUrl);
-      console.log('✓ Database connection pool initialized');
-
-      // Create tables if they don't exist
-      console.log('🔄 Creating database tables...');
-      await createTables();
-      console.log('✓ Database tables created/verified');
-
-      // Test connection
-      const connection = await getConnection();
-      await connection.query('SELECT 1');
-      console.log('✓ Database connection test successful');
-
-    } catch (error) {
-      console.error('❌ Database initialization failed:', error);
-      throw new Error(`Database initialization failed: ${error.message}`);
-    }
-  }
-
-  /**
-   * Configure all middleware in the correct order
-   */
-  configureMiddleware() {
-    console.log('🔄 Configuring middleware...');
-    
-    // Order is critical: CORS → logging → rate limiting → basic → auth → routes
-    this.configureCORS();
-    this.configureLogging();
-    this.configureRateLimit();
-    this.configureBasicMiddleware();
-    this.configureHealthCheck(); // Before JWT to keep it public
-    this.configureJWTMiddleware();
-    this.configureRoutes();
-    this.configureErrorHandling();
-    
-    console.log('✓ All middleware configured successfully');
-  }
-
-  /**
-   * Start the server with graceful startup sequence
-   */
-  async startServer() {
-    try {
-      console.log(`🚀 Starting ${this.appInfo.title} v${this.appInfo.version}...`);
-      
-      // Step 1: Initialize database
-      await this.initializeDatabase();
-      
-      // Step 2: Configure middleware
-      this.configureMiddleware();
-      
-      // Step 3: Start HTTP server
-      const server = this.app.listen(this.port, () => {
-        console.log('✅ Server started successfully!');
-        console.log(`📍 Server running on port ${this.port}`);
-        console.log(`🌐 API available at: http://localhost:${this.port}/api`);
-        console.log(`❤️  Health check: http://localhost:${this.port}/health`);
-        console.log(`🔒 CORS enabled for: ${this.corsOrigin}`);
-      });
-
-      // Graceful shutdown handling
-      this.setupGracefulShutdown(server);
-
-      return server;
-    } catch (error) {
-      console.error('❌ Failed to start server:', error);
-      process.exit(1);
-    }
-  }
-
-  /**
-   * Setup graceful shutdown handlers
-   */
-  setupGracefulShutdown(server) {
-    const gracefulShutdown = async (signal) => {
-      console.log(`\n🔄 Received ${signal}. Starting graceful shutdown...`);
-      
-      server.close(async () => {
-        console.log('✓ HTTP server closed');
-        
+/**
+ * Database initialization with retry logic
+ * @param {number} retries - Number of retry attempts
+ * @param {number} delay - Delay between retries in milliseconds
+ */
+async function initializeDatabaseWithRetry(retries = 3, delay = 5000) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-          // Close database connections
-          const connection = await getConnection();
-          if (connection && connection.end) {
-            await connection.end();
-            console.log('✓ Database connections closed');
-          }
+            console.log(`🔄 Database connection attempt ${attempt}/${retries}...`);
+            await initializeDatabase();
+            console.log('✅ Database connected and initialized successfully');
+            return;
         } catch (error) {
-          console.error('Error closing database connections:', error);
+            console.error(`❌ Database connection attempt ${attempt} failed:`, error.message);
+            
+            if (attempt === retries) {
+                throw new Error(`Failed to connect to database after ${retries} attempts: ${error.message}`);
+            }
+            
+            console.log(`⏳ Retrying in ${delay / 1000} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
         }
+    }
+}
+
+/**
+ * Graceful shutdown handler
+ * Closes database connections and stops the server gracefully
+ */
+async function gracefulShutdown(signal) {
+    console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
+    
+    try {
+        // Close database connections
+        await closeDatabase();
+        console.log('✅ Database connections closed');
         
-        console.log('✅ Graceful shutdown completed');
-        process.exit(0);
-      });
-
-      // Force shutdown after 10 seconds
-      setTimeout(() => {
-        console.error('❌ Forced shutdown after timeout');
+        // Close server
+        if (server) {
+            server.close(() => {
+                console.log('✅ HTTP server closed');
+                console.log('👋 Graceful shutdown completed');
+                process.exit(0);
+            });
+        } else {
+            process.exit(0);
+        }
+    } catch (error) {
+        console.error('❌ Error during graceful shutdown:', error);
         process.exit(1);
-      }, 10000);
-    };
-
-    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  }
+    }
 }
 
-// Create and start the application
-const api = new TaskManagementAPI();
+/**
+ * Application startup function
+ */
+async function startApplication() {
+    try {
+        console.log(`🚀 Starting ${APP_CONFIG.title} v${APP_CONFIG.version}`);
+        console.log(`📊 Environment: ${APP_CONFIG.environment}`);
+        
+        // Initialize database with retry logic
+        await initializeDatabaseWithRetry();
+        
+        // Start HTTP server
+        const server = app.listen(APP_CONFIG.port, () => {
+            console.log(`🌐 Server running on port ${APP_CONFIG.port}`);
+            console.log(`🔗 Health check: http://localhost:${APP_CONFIG.port}/health`);
+            console.log(`📚 API Base URL: http://localhost:${APP_CONFIG.port}/api`);
+            console.log(`🔒 CORS enabled for: ${APP_CONFIG.corsOrigin}`);
+            console.log('✅ Application started successfully');
+        });
 
-// Start server if this file is run directly
+        // Set server timeout
+        server.timeout = 30000; // 30 seconds
+
+        // Store server reference for graceful shutdown
+        global.server = server;
+
+        return server;
+        
+    } catch (error) {
+        console.error('❌ Failed to start application:', error.message);
+        console.error('Stack trace:', error.stack);
+        process.exit(1);
+    }
+}
+
+// Process event listeners for graceful shutdown
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    console.error('💥 Uncaught Exception:', error);
+    gracefulShutdown('UNCAUGHT_EXCEPTION');
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+    gracefulShutdown('UNHANDLED_REJECTION');
+});
+
+// Start the application
+let server;
 if (import.meta.url === `file://${process.argv[1]}`) {
-  api.startServer().catch(error => {
-    console.error('Failed to start application:', error);
-    process.exit(1);
-  });
+    // Only start server if this file is run directly
+    server = await startApplication();
 }
 
-// Export for testing or programmatic use
-export default api;
-export { TaskManagementAPI };
+export default app;
+export { APP_CONFIG, startApplication };

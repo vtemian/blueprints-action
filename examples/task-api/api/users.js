@@ -1,494 +1,569 @@
+I'll provide a complete implementation of the user management and authentication API module. Here's the full code structure:
+
+## Package.json
+
+```json
+{
+  "name": "user-auth-api",
+  "version": "1.0.0",
+  "description": "User management and authentication API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "bcrypt": "^5.1.1",
+    "express-validator": "^7.0.1",
+    "express-rate-limit": "^6.10.0",
+    "helmet": "^7.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
+```
+
+## .env
+
+```env
+NODE_ENV=development
+PORT=3000
+JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+JWT_EXPIRES_IN=7d
+BCRYPT_SALT_ROUNDS=12
+```
+
+## server.js
+
+```javascript
 /**
- * User Management and Authentication API Module
- * Provides comprehensive user registration, authentication, and profile management
+ * Main server file for User Authentication API
+ * @author Your Name
+ * @version 1.0.0
  */
 
 const express = require('express');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const { body, validationResult } = require('express-validator');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
 
-const router = express.Router();
+const userRoutes = require('./routes/users');
+const { errorHandler, notFound } = require('./middleware/errorMiddleware');
 
-// Configuration constants
-const SALT_ROUNDS = 12;
-const JWT_EXPIRATION = '24h';
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const app = express();
 
-// Email validation regex
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Security middleware
+app.use(helmet());
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
+  credentials: true
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again later.'
+  }
+});
+
+app.use(limiter);
+
+// Logging middleware
+app.use(morgan('combined', {
+  skip: (req, res) => {
+    // Don't log sensitive endpoints in production
+    return process.env.NODE_ENV === 'production' && 
+           (req.url.includes('/login') || req.url.includes('/register'));
+  }
+}));
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Routes
+app.use('/api/users', userRoutes);
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Server is running',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Error handling middleware
+app.use(notFound);
+app.use(errorHandler);
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+});
+
+module.exports = app;
+```
+
+## models/User.js
+
+```javascript
+/**
+ * User model with in-memory storage simulation
+ * In production, this would be replaced with actual database models
+ * @module models/User
+ */
 
 /**
- * Authentication middleware to protect routes
- * Validates JWT bearer tokens and attaches user info to request
+ * In-memory user storage (replace with actual database in production)
  */
-const authenticateToken = async (req, res, next) => {
+let users = [];
+let nextId = 1;
+
+/**
+ * User class representing user entity
+ */
+class User {
+  /**
+   * Create a new user
+   * @param {Object} userData - User data
+   * @param {string} userData.name - User's full name
+   * @param {string} userData.email - User's email address
+   * @param {string} userData.password - User's hashed password
+   */
+  constructor({ name, email, password }) {
+    this.id = nextId++;
+    this.name = name;
+    this.email = email.toLowerCase();
+    this.password = password;
+    this.createdAt = new Date();
+    this.updatedAt = new Date();
+    this.lastLogin = null;
+  }
+
+  /**
+   * Convert user to JSON, excluding sensitive fields
+   * @param {boolean} includeSensitive - Whether to include sensitive data
+   * @returns {Object} User object without sensitive data
+   */
+  toJSON(includeSensitive = false) {
+    const userObj = { ...this };
+    if (!includeSensitive) {
+      delete userObj.password;
+    }
+    return userObj;
+  }
+
+  /**
+   * Update user data
+   * @param {Object} updateData - Data to update
+   */
+  update(updateData) {
+    Object.assign(this, updateData);
+    this.updatedAt = new Date();
+  }
+}
+
+/**
+ * User repository methods
+ */
+const UserModel = {
+  /**
+   * Find user by email
+   * @param {string} email - User email
+   * @returns {User|null} User object or null
+   */
+  findByEmail: async (email) => {
+    return users.find(user => user.email === email.toLowerCase()) || null;
+  },
+
+  /**
+   * Find user by ID
+   * @param {number} id - User ID
+   * @returns {User|null} User object or null
+   */
+  findById: async (id) => {
+    return users.find(user => user.id === parseInt(id)) || null;
+  },
+
+  /**
+   * Create new user
+   * @param {Object} userData - User data
+   * @returns {User} Created user object
+   */
+  create: async (userData) => {
+    const user = new User(userData);
+    users.push(user);
+    return user;
+  },
+
+  /**
+   * Update user by ID
+   * @param {number} id - User ID
+   * @param {Object} updateData - Data to update
+   * @returns {User|null} Updated user or null
+   */
+  updateById: async (id, updateData) => {
+    const user = await UserModel.findById(id);
+    if (user) {
+      user.update(updateData);
+      return user;
+    }
+    return null;
+  },
+
+  /**
+   * Delete user by ID
+   * @param {number} id - User ID
+   * @returns {boolean} Success status
+   */
+  deleteById: async (id) => {
+    const index = users.findIndex(user => user.id === parseInt(id));
+    if (index !== -1) {
+      users.splice(index, 1);
+      return true;
+    }
+    return false;
+  }
+};
+
+module.exports = { User, UserModel };
+```
+
+## utils/errors.js
+
+```javascript
+/**
+ * Custom error classes for the application
+ * @module utils/errors
+ */
+
+/**
+ * Base application error class
+ */
+class AppError extends Error {
+  /**
+   * Create an application error
+   * @param {string} message - Error message
+   * @param {number} statusCode - HTTP status code
+   * @param {boolean} isOperational - Whether error is operational
+   */
+  constructor(message, statusCode, isOperational = true) {
+    super(message);
+    this.statusCode = statusCode;
+    this.isOperational = isOperational;
+    this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
+
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+/**
+ * Validation error class
+ */
+class ValidationError extends AppError {
+  /**
+   * Create a validation error
+   * @param {string} message - Error message
+   * @param {Array} errors - Validation errors array
+   */
+  constructor(message, errors = []) {
+    super(message, 400);
+    this.errors = errors;
+  }
+}
+
+/**
+ * Authentication error class
+ */
+class AuthenticationError extends AppError {
+  /**
+   * Create an authentication error
+   * @param {string} message - Error message
+   */
+  constructor(message = 'Authentication failed') {
+    super(message, 401);
+  }
+}
+
+/**
+ * Authorization error class
+ */
+class AuthorizationError extends AppError {
+  /**
+   * Create an authorization error
+   * @param {string} message - Error message
+   */
+  constructor(message = 'Access denied') {
+    super(message, 403);
+  }
+}
+
+/**
+ * Not found error class
+ */
+class NotFoundError extends AppError {
+  /**
+   * Create a not found error
+   * @param {string} message - Error message
+   */
+  constructor(message = 'Resource not found') {
+    super(message, 404);
+  }
+}
+
+/**
+ * Conflict error class
+ */
+class ConflictError extends AppError {
+  /**
+   * Create a conflict error
+   * @param {string} message - Error message
+   */
+  constructor(message = 'Resource conflict') {
+    super(message, 409);
+  }
+}
+
+module.exports = {
+  AppError,
+  ValidationError,
+  AuthenticationError,
+  AuthorizationError,
+  NotFoundError,
+  ConflictError
+};
+```
+
+## middleware/errorMiddleware.js
+
+```javascript
+/**
+ * Error handling middleware
+ * @module middleware/errorMiddleware
+ */
+
+const { AppError } = require('../utils/errors');
+
+/**
+ * Handle 404 not found errors
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ */
+const notFound = (req, res, next) => {
+  const error = new AppError(`Not found - ${req.originalUrl}`, 404);
+  next(error);
+};
+
+/**
+ * Global error handler middleware
+ * @param {Error} err - Error object
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ */
+const errorHandler = (err, req, res, next) => {
+  let error = { ...err };
+  error.message = err.message;
+
+  // Log error (exclude sensitive information)
+  if (process.env.NODE_ENV === 'development') {
+    console.error(err);
+  }
+
+  // Mongoose bad ObjectId
+  if (err.name === 'CastError') {
+    const message = 'Resource not found';
+    error = new AppError(message, 404);
+  }
+
+  // Mongoose duplicate key
+  if (err.code === 11000) {
+    const message = 'Duplicate field value entered';
+    error = new AppError(message, 409);
+  }
+
+  // Mongoose validation error
+  if (err.name === 'ValidationError') {
+    const message = Object.values(err.errors).map(val => val.message);
+    error = new AppError(message, 400);
+  }
+
+  // JWT errors
+  if (err.name === 'JsonWebTokenError') {
+    const message = 'Invalid token';
+    error = new AppError(message, 401);
+  }
+
+  if (err.name === 'TokenExpiredError') {
+    const message = 'Token expired';
+    error = new AppError(message, 401);
+  }
+
+  const response = {
+    success: false,
+    message: error.message || 'Server Error'
+  };
+
+  // Include validation errors if present
+  if (error.errors) {
+    response.errors = error.errors;
+  }
+
+  // Don't leak error details in production
+  if (process.env.NODE_ENV === 'development') {
+    response.stack = err.stack;
+  }
+
+  res.status(error.statusCode || 500).json(response);
+};
+
+module.exports = {
+  notFound,
+  errorHandler
+};
+```
+
+## middleware/auth.js
+
+```javascript
+/**
+ * Authentication middleware
+ * @module middleware/auth
+ */
+
+const jwt = require('jsonwebtoken');
+const { UserModel } = require('../models/User');
+const { AuthenticationError } = require('../utils/errors');
+
+/**
+ * JWT authentication middleware
+ * Verifies JWT token and adds user to request object
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ */
+const authenticate = async (req, res, next) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    let token;
+
+    // Check for token in Authorization header
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
+    }
+
+    // Check for token in cookies (if using cookie-based auth)
+    if (!token && req.cookies && req.cookies.token) {
+      token = req.cookies.token;
+    }
 
     if (!token) {
-      return res.status(401).json({
-        error: 'Access token required',
-        code: 'TOKEN_MISSING'
-      });
+      throw new AuthenticationError('Access denied. No token provided.');
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET);
-    
-    // Fetch user from database (placeholder)
-    const user = await getUserById(decoded.userId);
-    
-    if (!user) {
-      return res.status(401).json({
-        error: 'Invalid token - user not found',
-        code: 'USER_NOT_FOUND'
-      });
+    try {
+      // Verify token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      
+      // Get user from database
+      const user = await UserModel.findById(decoded.id);
+      
+      if (!user) {
+        throw new AuthenticationError('Token is valid but user no longer exists.');
+      }
+
+      // Add user to request object (exclude password)
+      req.user = user.toJSON();
+      next();
+    } catch (jwtError) {
+      if (jwtError.name === 'TokenExpiredError') {
+        throw new AuthenticationError('Token has expired.');
+      } else if (jwtError.name === 'JsonWebTokenError') {
+        throw new AuthenticationError('Invalid token.');
+      } else {
+        throw jwtError;
+      }
+    }
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Generate JWT token for user
+ * @param {number} userId - User ID
+ * @returns {string} JWT token
+ */
+const generateToken = (userId) => {
+  return jwt.sign(
+    { id: userId },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+      issuer: 'user-auth-api',
+      audience: 'user-auth-api-users'
+    }
+  );
+};
+
+/**
+ * Optional authentication middleware
+ * Similar to authenticate but doesn't throw error if no token
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ */
+const optionalAuth = async (req, res, next) => {
+  try {
+    let token;
+
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
     }
 
-    req.user = user;
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await UserModel.findById(decoded.id);
+        
+        if (user) {
+          req.user = user.toJSON();
+        }
+      } catch (jwtError) {
+        // Silently fail for optional auth
+        console.log('Optional auth failed:', jwtError.message);
+      }
+    }
+
     next();
   } catch (error) {
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        error: 'Invalid token',
-        code: 'TOKEN_INVALID'
-      });
-    }
-    
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        error: 'Token expired',
-        code: 'TOKEN_EXPIRED'
-      });
-    }
-
-    console.error('Authentication middleware error:', error);
-    return res.status(500).json({
-      error: 'Authentication service error',
-      code: 'AUTH_SERVICE_ERROR'
-    });
+    next(error);
   }
 };
 
-/**
- * Input validation middleware
- */
-const validateInput = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      error: 'Validation failed',
-      code: 'VALIDATION_ERROR',
-      details: errors.array()
-    });
-  }
-  next();
+module.exports = {
+  authenticate,
+  generateToken,
+  optionalAuth
 };
+```
 
+## middleware/validation.js
+
+```javascript
 /**
- * POST /register
- * Register a new user account
- */
-router.post('/register', [
-  body('email')
-    .isEmail()
-    .withMessage('Valid email is required')
-    .normalizeEmail(),
-  body('password')
-    .isLength({ min: 8 })
-    .withMessage('Password must be at least 8 characters long'),
-  body('name')
-    .trim()
-    .isLength({ min: 1 })
-    .withMessage('Name is required')
-], validateInput, async (req, res) => {
-  try {
-    const { email, password, name } = req.body;
-
-    // Check if user already exists
-    const existingUser = await getUserByEmail(email);
-    if (existingUser) {
-      return res.status(409).json({
-        error: 'Email already registered',
-        code: 'EMAIL_EXISTS'
-      });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-
-    // Create user in database
-    const newUser = await createUser({
-      email,
-      password: hashedPassword,
-      name,
-      createdAt: new Date(),
-      lastLogin: null
-    });
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: newUser.id },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRATION }
-    );
-
-    // Return user data without password
-    const { password: _, ...userResponse } = newUser;
-
-    res.status(201).json({
-      message: 'User registered successfully',
-      user: userResponse,
-      token
-    });
-
-  } catch (error) {
-    console.error('Registration error:', error);
-    
-    if (error.code === 'DB_CONNECTION_ERROR') {
-      return res.status(500).json({
-        error: 'Database connection failed',
-        code: 'DB_CONNECTION_ERROR'
-      });
-    }
-
-    res.status(500).json({
-      error: 'Registration failed',
-      code: 'REGISTRATION_ERROR'
-    });
-  }
-});
-
-/**
- * POST /login
- * Authenticate user and return JWT token
- */
-router.post('/login', [
-  body('email')
-    .isEmail()
-    .withMessage('Valid email is required')
-    .normalizeEmail(),
-  body('password')
-    .isLength({ min: 1 })
-    .withMessage('Password is required')
-], validateInput, async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    // Find user by email
-    const user = await getUserByEmail(email);
-    if (!user) {
-      return res.status(401).json({
-        error: 'Invalid email or password',
-        code: 'INVALID_CREDENTIALS'
-      });
-    }
-
-    // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({
-        error: 'Invalid email or password',
-        code: 'INVALID_CREDENTIALS'
-      });
-    }
-
-    // Update last login timestamp
-    await updateUserLastLogin(user.id, new Date());
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user.id },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRATION }
-    );
-
-    // Return user data without password
-    const { password: _, ...userResponse } = user;
-    userResponse.lastLogin = new Date();
-
-    res.json({
-      message: 'Login successful',
-      user: userResponse,
-      token
-    });
-
-  } catch (error) {
-    console.error('Login error:', error);
-    
-    if (error.code === 'DB_CONNECTION_ERROR') {
-      return res.status(500).json({
-        error: 'Database connection failed',
-        code: 'DB_CONNECTION_ERROR'
-      });
-    }
-
-    res.status(500).json({
-      error: 'Login failed',
-      code: 'LOGIN_ERROR'
-    });
-  }
-});
-
-/**
- * GET /me
- * Get current user profile information
- */
-router.get('/me', authenticateToken, async (req, res) => {
-  try {
-    // User is already attached to request by authenticateToken middleware
-    const { password, ...userResponse } = req.user;
-
-    res.json({
-      user: userResponse
-    });
-
-  } catch (error) {
-    console.error('Get profile error:', error);
-    res.status(500).json({
-      error: 'Failed to retrieve profile',
-      code: 'PROFILE_RETRIEVAL_ERROR'
-    });
-  }
-});
-
-/**
- * PUT /me
- * Update current user profile information
- */
-router.put('/me', authenticateToken, [
-  body('email')
-    .optional()
-    .isEmail()
-    .withMessage('Valid email is required')
-    .normalizeEmail(),
-  body('name')
-    .optional()
-    .trim()
-    .isLength({ min: 1 })
-    .withMessage('Name cannot be empty'),
-  body('currentPassword')
-    .if(body('email').exists())
-    .isLength({ min: 1 })
-    .withMessage('Current password required for email changes')
-], validateInput, async (req, res) => {
-  try {
-    const { email, name, currentPassword } = req.body;
-    const userId = req.user.id;
-
-    // If email is being changed, verify current password
-    if (email && email !== req.user.email) {
-      if (!currentPassword) {
-        return res.status(400).json({
-          error: 'Current password required for email changes',
-          code: 'PASSWORD_REQUIRED'
-        });
-      }
-
-      const isPasswordValid = await bcrypt.compare(currentPassword, req.user.password);
-      if (!isPasswordValid) {
-        return res.status(401).json({
-          error: 'Current password is incorrect',
-          code: 'INVALID_PASSWORD'
-        });
-      }
-
-      // Check if new email is already taken
-      const existingUser = await getUserByEmail(email);
-      if (existingUser && existingUser.id !== userId) {
-        return res.status(409).json({
-          error: 'Email already in use',
-          code: 'EMAIL_EXISTS'
-        });
-      }
-    }
-
-    // Prepare update data
-    const updateData = {};
-    if (email) updateData.email = email;
-    if (name) updateData.name = name;
-    updateData.updatedAt = new Date();
-
-    // Update user in database
-    const updatedUser = await updateUser(userId, updateData);
-
-    // Return updated user data without password
-    const { password, ...userResponse } = updatedUser;
-
-    res.json({
-      message: 'Profile updated successfully',
-      user: userResponse
-    });
-
-  } catch (error) {
-    console.error('Profile update error:', error);
-    
-    if (error.code === 'DB_CONNECTION_ERROR') {
-      return res.status(500).json({
-        error: 'Database connection failed',
-        code: 'DB_CONNECTION_ERROR'
-      });
-    }
-
-    res.status(500).json({
-      error: 'Profile update failed',
-      code: 'PROFILE_UPDATE_ERROR'
-    });
-  }
-});
-
-/**
- * POST /change-password
- * Change user password with current password verification
- */
-router.post('/change-password', authenticateToken, [
-  body('currentPassword')
-    .isLength({ min: 1 })
-    .withMessage('Current password is required'),
-  body('newPassword')
-    .isLength({ min: 8 })
-    .withMessage('New password must be at least 8 characters long')
-], validateInput, async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body;
-    const userId = req.user.id;
-
-    // Verify current password
-    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, req.user.password);
-    if (!isCurrentPasswordValid) {
-      return res.status(401).json({
-        error: 'Current password is incorrect',
-        code: 'INVALID_CURRENT_PASSWORD'
-      });
-    }
-
-    // Check if new password is different from current
-    const isSamePassword = await bcrypt.compare(newPassword, req.user.password);
-    if (isSamePassword) {
-      return res.status(400).json({
-        error: 'New password must be different from current password',
-        code: 'SAME_PASSWORD'
-      });
-    }
-
-    // Hash new password
-    const hashedNewPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
-
-    // Update password in database
-    await updateUser(userId, {
-      password: hashedNewPassword,
-      updatedAt: new Date()
-    });
-
-    res.json({
-      message: 'Password changed successfully'
-    });
-
-  } catch (error) {
-    console.error('Password change error:', error);
-    
-    if (error.code === 'DB_CONNECTION_ERROR') {
-      return res.status(500).json({
-        error: 'Database connection failed',
-        code: 'DB_CONNECTION_ERROR'
-      });
-    }
-
-    res.status(500).json({
-      error: 'Password change failed',
-      code: 'PASSWORD_CHANGE_ERROR'
-    });
-  }
-});
-
-// Database operation placeholders
-// These should be replaced with actual database implementations
-
-/**
- * Get user by email from database
- * @param {string} email - User email
- * @returns {Promise<Object|null>} User object or null
- */
-async function getUserByEmail(email) {
-  try {
-    // Placeholder for database query
-    // Example: return await db.users.findOne({ email });
-    console.log(`Database query: getUserByEmail(${email})`);
-    return null; // Replace with actual implementation
-  } catch (error) {
-    error.code = 'DB_CONNECTION_ERROR';
-    throw error;
-  }
-}
-
-/**
- * Get user by ID from database
- * @param {string} userId - User ID
- * @returns {Promise<Object|null>} User object or null
- */
-async function getUserById(userId) {
-  try {
-    // Placeholder for database query
-    // Example: return await db.users.findById(userId);
-    console.log(`Database query: getUserById(${userId})`);
-    return null; // Replace with actual implementation
-  } catch (error) {
-    error.code = 'DB_CONNECTION_ERROR';
-    throw error;
-  }
-}
-
-/**
- * Create new user in database
- * @param {Object} userData - User data object
- * @returns {Promise<Object>} Created user object
- */
-async function createUser(userData) {
-  try {
-    // Placeholder for database insertion
-    // Example: return await db.users.create(userData);
-    console.log('Database query: createUser', userData);
-    return { id: 'generated-id', ...userData }; // Replace with actual implementation
-  } catch (error) {
-    error.code = 'DB_CONNECTION_ERROR';
-    throw error;
-  }
-}
-
-/**
- * Update user in database
- * @param {string} userId - User ID
- * @param {Object} updateData - Data to update
- * @returns {Promise<Object>} Updated user object
- */
-async function updateUser(userId, updateData) {
-  try {
-    // Placeholder for database update
-    // Example: return await db.users.findByIdAndUpdate(userId, updateData, { new: true });
-    console.log(`Database query: updateUser(${userId})`, updateData);
-    return { id: userId, ...updateData }; // Replace with actual implementation
-  } catch (error) {
-    error.code = 'DB_CONNECTION_ERROR';
-    throw error;
-  }
-}
-
-/**
- * Update user's last login timestamp
- * @param {string} userId - User ID
- * @param {Date} timestamp - Login timestamp
- * @returns {Promise<void>}
- */
-async function updateUserLastLogin(userId, timestamp) {
-  try {
-    // Placeholder for database update
-    // Example: await db.users.findByIdAndUpdate(userId, { lastLogin: timestamp });
-    console.log(`Database query: updateUserLastLogin(${userId}, ${timestamp})`);
-  } catch (error) {
-    error.code = 'DB_CONNECTION_ERROR';
-    throw error;
-  }
-}
-
-module.exports = router;
+ * Validation middleware using express-validator
+ * @module middleware/
