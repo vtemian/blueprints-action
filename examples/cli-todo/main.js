@@ -2,158 +2,189 @@
 
 /**
  * Todo CLI Application Entry Point
- * Main controller for command-line todo list management
+ * Handles command-line argument parsing, routing, and error management
  */
 
-import process from 'process';
-import app from '@app';
-import * as commands from '@commands';
+const process = require('process');
 
-/**
- * Valid CLI commands mapping
- */
-const VALID_COMMANDS = {
-  'add': commands.add,
-  'list': commands.list,
-  'done': commands.done,
-  'remove': commands.remove,
-  'help': commands.help
-};
+// Import local modules with error handling
+let app, commands;
 
-/**
- * Routes command to appropriate handler function
- * @param {string} command - The command to execute
- * @param {string[]} args - Arguments to pass to the command
- * @returns {Promise<void>}
- */
-async function routeCommand(command, args) {
-  // Normalize command to lowercase
-  const normalizedCommand = command?.toLowerCase();
-  
-  // Check if command exists in valid commands
-  if (!normalizedCommand || !VALID_COMMANDS[normalizedCommand]) {
-    console.error('Invalid command');
-    await commands.help();
-    process.exit(1);
-  }
-
-  // Get the command handler function
-  const commandHandler = VALID_COMMANDS[normalizedCommand];
-  
-  try {
-    // Execute the command with provided arguments
-    await commandHandler(args);
-  } catch (error) {
-    // Handle specific error types
-    if (error.code === 'MISSING_ARGS') {
-      console.error(`Error: ${error.message}`);
-      console.error(`Usage: ${error.usage || 'See help for usage information'}`);
-      process.exit(1);
-    } else if (error.code === 'ENOENT') {
-      console.error('Error: Todo file not found. Use "add" command to create your first todo.');
-      process.exit(1);
-    } else if (error.code === 'EACCES') {
-      console.error('Error: Permission denied. Check file permissions.');
-      process.exit(1);
-    } else if (error.code === 'ENOSPC') {
-      console.error('Error: No space left on device.');
-      process.exit(1);
-    } else {
-      // Handle unexpected errors
-      console.error('An unexpected error occurred:', error.message);
-      if (process.env.NODE_ENV === 'development') {
-        console.error('Stack trace:', error.stack);
-      }
-      process.exit(1);
-    }
-  }
+try {
+  app = require('./app.js');
+  commands = require('./commands.js');
+} catch (error) {
+  console.error('Error: Failed to load required modules.');
+  console.error('Please ensure app.js and commands.js exist in the same directory.');
+  process.exit(1);
 }
 
 /**
- * Validates command line arguments
- * @param {string[]} argv - Process arguments array
- * @returns {Object} Parsed command and arguments
- */
-function parseArguments(argv) {
-  // Extract command from argv[2] (first argument after node and script)
-  const command = argv[2];
-  
-  // Extract remaining arguments starting from argv[3]
-  const args = argv.slice(3);
-  
-  return { command, args };
-}
-
-/**
- * Main CLI application function
- * Handles the complete flow of command parsing, routing, and execution
+ * Main CLI entry point
+ * Parses command-line arguments and routes to appropriate command handlers
  */
 async function main() {
   try {
-    // Initialize the application
-    await app.initialize?.();
-    
-    // Parse command line arguments
-    const { command, args } = parseArguments(process.argv);
-    
-    // Handle no command provided - show help
-    if (!command) {
-      await commands.help();
-      process.exit(0);
+    // Parse command-line arguments (skip node and script path)
+    const args = process.argv.slice(2);
+    const command = args[0];
+    const commandArgs = args.slice(1);
+
+    // Validate that commands module is properly loaded
+    if (!commands || typeof commands !== 'object') {
+      console.error('Error: Commands module is not properly configured.');
+      process.exit(1);
     }
-    
-    // Route and execute the command
-    await routeCommand(command, args);
-    
+
+    // Route commands to appropriate handlers
+    switch (command) {
+      case 'add':
+        await handleCommand('add', commandArgs, commands.add);
+        break;
+
+      case 'list':
+        await handleCommand('list', commandArgs, commands.list);
+        break;
+
+      case 'done':
+        await handleCommand('done', commandArgs, commands.done);
+        break;
+
+      case 'remove':
+        await handleCommand('remove', commandArgs, commands.remove);
+        break;
+
+      case 'help':
+      case undefined:
+        await handleCommand('help', commandArgs, commands.help);
+        break;
+
+      default:
+        console.error(`Error: Unknown command '${command}'`);
+        console.error('Use "help" to see available commands.');
+        if (typeof commands.help === 'function') {
+          await commands.help();
+        }
+        process.exit(1);
+    }
+
     // Successful execution
     process.exit(0);
-    
+
   } catch (error) {
-    // Handle initialization or unexpected errors
-    console.error('Failed to start Todo CLI application:', error.message);
-    
-    if (process.env.NODE_ENV === 'development') {
-      console.error('Stack trace:', error.stack);
-    }
-    
-    process.exit(1);
+    handleError(error);
   }
 }
 
 /**
- * Handle uncaught exceptions and unhandled rejections
+ * Handle individual command execution with error management
+ * @param {string} commandName - Name of the command being executed
+ * @param {Array} args - Arguments passed to the command
+ * @param {Function} handler - Command handler function
  */
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error.message);
-  process.exit(1);
-});
+async function handleCommand(commandName, args, handler) {
+  try {
+    // Validate that handler exists and is a function
+    if (typeof handler !== 'function') {
+      console.error(`Error: Command '${commandName}' is not available.`);
+      console.error('Please check your commands.js file.');
+      process.exit(1);
+    }
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-});
+    // Execute command handler (support both sync and async)
+    const result = handler(args);
+    
+    // Handle async command handlers
+    if (result && typeof result.then === 'function') {
+      await result;
+    }
+
+  } catch (error) {
+    // Handle specific command errors
+    if (error.code === 'MISSING_ARGS') {
+      console.error(`Error: ${error.message}`);
+      console.error(`Usage: ${commandName} ${error.usage || '<arguments>'}`);
+      process.exit(1);
+    }
+    
+    if (error.code === 'FILE_ERROR') {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+
+    // Re-throw for main error handler
+    throw error;
+  }
+}
 
 /**
- * Handle graceful shutdown on SIGINT (Ctrl+C)
+ * Global error handler for unhandled errors
+ * @param {Error} error - The error object
+ */
+function handleError(error) {
+  // Handle different types of errors
+  if (error.code === 'ENOENT') {
+    console.error('Error: Todo data file not found or inaccessible.');
+  } else if (error.code === 'EACCES') {
+    console.error('Error: Permission denied accessing todo data file.');
+  } else if (error.code === 'EMFILE' || error.code === 'ENFILE') {
+    console.error('Error: Too many open files. Please try again.');
+  } else {
+    console.error('Error: An unexpected error occurred.');
+    
+    // In development, show full error details
+    if (process.env.NODE_ENV === 'development') {
+      console.error(error.stack || error.message);
+    } else {
+      console.error(error.message || 'Unknown error');
+    }
+  }
+  
+  process.exit(1);
+}
+
+/**
+ * Handle process termination signals gracefully
  */
 process.on('SIGINT', () => {
-  console.log('\nTodo CLI application interrupted. Goodbye!');
+  console.log('\nTodo CLI terminated by user.');
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('\nTodo CLI terminated.');
   process.exit(0);
 });
 
 /**
- * Handle graceful shutdown on SIGTERM
+ * Handle unhandled promise rejections
  */
-process.on('SIGTERM', () => {
-  console.log('Todo CLI application terminated. Goodbye!');
-  process.exit(0);
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Error: Unhandled promise rejection.');
+  if (process.env.NODE_ENV === 'development') {
+    console.error('Promise:', promise);
+    console.error('Reason:', reason);
+  }
+  process.exit(1);
 });
 
-// Execute main function if this module is run directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+/**
+ * Handle uncaught exceptions
+ */
+process.on('uncaughtException', (error) => {
+  console.error('Error: Uncaught exception occurred.');
+  if (process.env.NODE_ENV === 'development') {
+    console.error(error.stack);
+  } else {
+    console.error(error.message);
+  }
+  process.exit(1);
+});
+
+// Execute main function only if this file is run directly
+if (require.main === module) {
   main();
 }
 
 // Export main function for testing purposes
-export default main;
-export { routeCommand, parseArguments, VALID_COMMANDS };
+module.exports = { main, handleCommand, handleError };
