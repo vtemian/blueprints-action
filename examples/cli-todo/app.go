@@ -1,6 +1,3 @@
-// Package app provides todo storage and core operations functionality.
-// It manages todos in a JSON file located at ~/.todos.json with support
-// for CRUD operations, filtering, and atomic file operations.
 package app
 
 import (
@@ -8,12 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
-
-	"utils"
 )
 
-// Todo represents a single todo item with all its properties.
+// Todo represents a single todo item with all required fields
 type Todo struct {
 	ID       int    `json:"id"`
 	Text     string `json:"text"`
@@ -22,41 +18,64 @@ type Todo struct {
 	Priority string `json:"priority"`
 }
 
-// validPriorities defines the allowed priority values.
+const (
+	todosFileName       = ".todos.json"
+	todosBackupFileName = ".todos.json.backup"
+)
+
 var validPriorities = map[string]bool{
 	"low":    true,
 	"medium": true,
 	"high":   true,
 }
 
-// getTodosFilePath returns the full path to the todos file in the user's home directory.
+// getTodosFilePath returns the full path to the todos file in the user's home directory
 func getTodosFilePath() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get user home directory: %w", err)
 	}
-	return filepath.Join(homeDir, ".todos.json"), nil
+	return filepath.Join(homeDir, todosFileName), nil
 }
 
-// createEmptyTodosFile creates an empty todos file with an empty JSON array.
-func createEmptyTodosFile(filePath string) error {
-	emptyTodos := []Todo{}
-	data, err := json.MarshalIndent(emptyTodos, "", "  ")
+// getBackupFilePath returns the full path to the backup todos file
+func getBackupFilePath() (string, error) {
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("failed to marshal empty todos: %w", err)
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
 	}
+	return filepath.Join(homeDir, todosBackupFileName), nil
+}
 
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
-		return fmt.Errorf("failed to create empty todos file: %w", err)
+// validatePriority checks if the given priority is valid
+func validatePriority(priority string) error {
+	if priority == "" {
+		return fmt.Errorf("priority cannot be empty")
 	}
-
+	if !validPriorities[strings.ToLower(priority)] {
+		return fmt.Errorf("invalid priority '%s': must be 'low', 'medium', or 'high'", priority)
+	}
 	return nil
 }
 
-// backupCorruptedFile creates a backup of the corrupted todos file.
+// getNextID returns the next available ID for a new todo
+func getNextID(todos []Todo) int {
+	maxID := 0
+	for _, todo := range todos {
+		if todo.ID > maxID {
+			maxID = todo.ID
+		}
+	}
+	return maxID + 1
+}
+
+// backupCorruptedFile creates a backup of the corrupted todos file
 func backupCorruptedFile(filePath string) error {
-	backupPath := filePath + ".backup"
-	
+	backupPath, err := getBackupFilePath()
+	if err != nil {
+		return fmt.Errorf("failed to get backup file path: %w", err)
+	}
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read corrupted file for backup: %w", err)
@@ -69,189 +88,113 @@ func backupCorruptedFile(filePath string) error {
 	return nil
 }
 
-// validatePriority checks if the given priority is valid.
-func validatePriority(priority string) error {
-	if !validPriorities[priority] {
-		return fmt.Errorf("invalid priority '%s': must be one of 'low', 'medium', 'high'", priority)
-	}
-	return nil
-}
-
-// getNextID returns the next available ID for a new todo.
-func getNextID(todos []Todo) int {
-	maxID := 0
-	for _, todo := range todos {
-		if todo.ID > maxID {
-			maxID = todo.ID
-		}
-	}
-	return maxID + 1
-}
-
-// validateTodos performs validation on loaded todos to ensure data integrity.
-func validateTodos(todos []Todo) error {
-	idMap := make(map[int]bool)
-	
-	for _, todo := range todos {
-		// Check for duplicate IDs
-		if idMap[todo.ID] {
-			return fmt.Errorf("duplicate todo ID found: %d", todo.ID)
-		}
-		idMap[todo.ID] = true
-
-		// Validate priority
-		if err := validatePriority(todo.Priority); err != nil {
-			return fmt.Errorf("todo ID %d has %w", todo.ID, err)
-		}
-
-		// Validate created timestamp
-		if _, err := time.Parse(time.RFC3339, todo.Created); err != nil {
-			return fmt.Errorf("todo ID %d has invalid created timestamp: %w", todo.ID, err)
-		}
-	}
-
-	return nil
-}
-
-// LoadTodos reads todos from the ~/.todos.json file.
-// If the file doesn't exist, it creates an empty one.
-// If the file is corrupted, it backs it up and creates a new empty file.
+// LoadTodos reads todos from the JSON file in the user's home directory.
+// If the file doesn't exist, it returns an empty slice.
+// If the file is corrupted, it backs up the file and returns an empty slice.
 func LoadTodos() ([]Todo, error) {
 	filePath, err := getTodosFilePath()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get todos file path: %w", err)
+		return nil, err
 	}
 
-	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		if err := createEmptyTodosFile(filePath); err != nil {
-			return nil, fmt.Errorf("failed to create todos file: %w", err)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist, return empty slice
+			return []Todo{}, nil
 		}
+		if os.IsPermission(err) {
+			return nil, fmt.Errorf("permission denied reading todos file '%s': check file permissions", filePath)
+		}
+		return nil, fmt.Errorf("failed to read todos file '%s': %w", filePath, err)
+	}
+
+	// Handle empty file
+	if len(data) == 0 {
 		return []Todo{}, nil
 	}
 
-	// Read file
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read todos file: %w", err)
-	}
-
-	// Parse JSON
 	var todos []Todo
 	if err := json.Unmarshal(data, &todos); err != nil {
 		// Handle corrupted JSON
-		if backupErr := backupCorruptedFile(filePath); backupErr != nil {
-			return nil, fmt.Errorf("failed to backup corrupted file and JSON parse error: %v, backup error: %w", err, backupErr)
+		var syntaxErr *json.SyntaxError
+		if json.As(err, &syntaxErr) {
+			// Backup the corrupted file
+			if backupErr := backupCorruptedFile(filePath); backupErr != nil {
+				return nil, fmt.Errorf("corrupted JSON file and failed to create backup: %w", backupErr)
+			}
+			// Remove the corrupted file
+			if removeErr := os.Remove(filePath); removeErr != nil {
+				return nil, fmt.Errorf("corrupted JSON file backed up but failed to remove original: %w", removeErr)
+			}
+			// Return empty slice after handling corruption
+			return []Todo{}, nil
 		}
-
-		if createErr := createEmptyTodosFile(filePath); createErr != nil {
-			return nil, fmt.Errorf("failed to recreate todos file after corruption: %w", createErr)
-		}
-
-		return []Todo{}, fmt.Errorf("corrupted todos file backed up and recreated: %w", err)
-	}
-
-	// Validate loaded todos
-	if err := validateTodos(todos); err != nil {
-		// Handle invalid data
-		if backupErr := backupCorruptedFile(filePath); backupErr != nil {
-			return nil, fmt.Errorf("failed to backup invalid file and validation error: %v, backup error: %w", err, backupErr)
-		}
-
-		if createErr := createEmptyTodosFile(filePath); createErr != nil {
-			return nil, fmt.Errorf("failed to recreate todos file after validation failure: %w", createErr)
-		}
-
-		return []Todo{}, fmt.Errorf("invalid todos file backed up and recreated: %w", err)
+		return nil, fmt.Errorf("failed to parse todos JSON: %w", err)
 	}
 
 	return todos, nil
 }
 
-// SaveTodos writes todos to the ~/.todos.json file using atomic writes.
-// It writes to a temporary file first, then renames it to ensure data integrity.
+// SaveTodos writes the todos slice to the JSON file in the user's home directory.
+// It creates the file if it doesn't exist and handles permission errors gracefully.
 func SaveTodos(todos []Todo) error {
+	if todos == nil {
+		todos = []Todo{}
+	}
+
 	filePath, err := getTodosFilePath()
 	if err != nil {
-		return fmt.Errorf("failed to get todos file path: %w", err)
+		return err
 	}
 
-	// Validate todos before saving
-	if err := validateTodos(todos); err != nil {
-		return fmt.Errorf("validation failed before saving: %w", err)
-	}
-
-	// Marshal todos to JSON
 	data, err := json.MarshalIndent(todos, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal todos to JSON: %w", err)
 	}
 
-	// Create temporary file for atomic write
-	tempPath := filePath + ".tmp"
-	
-	// Write to temporary file
-	if err := os.WriteFile(tempPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write to temporary file: %w", err)
-	}
-
-	// Atomic rename
-	if err := os.Rename(tempPath, filePath); err != nil {
-		// Clean up temporary file on failure
-		os.Remove(tempPath)
-		return fmt.Errorf("failed to rename temporary file: %w", err)
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		if os.IsPermission(err) {
+			return fmt.Errorf("permission denied writing to todos file '%s': check directory and file permissions", filePath)
+		}
+		return fmt.Errorf("failed to write todos file '%s': %w", filePath, err)
 	}
 
 	return nil
 }
 
-// AddTodo creates a new todo with the given text and optional priority.
-// If no priority is provided, it defaults to "medium".
-// Returns the created todo with generated ID and timestamp.
-func AddTodo(text string, priority ...string) (*Todo, error) {
-	// Validate input
+// AddTodo creates a new todo with the given text and priority.
+// It automatically assigns an ID and sets the creation timestamp.
+// The priority must be one of: "low", "medium", "high" (case-insensitive).
+func AddTodo(text string, priority string) (Todo, error) {
+	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil, fmt.Errorf("todo text cannot be empty")
+		return Todo{}, fmt.Errorf("todo text cannot be empty")
 	}
 
-	// Set default priority
-	todoPriority := "medium"
-	if len(priority) > 0 {
-		todoPriority = priority[0]
+	priority = strings.ToLower(strings.TrimSpace(priority))
+	if err := validatePriority(priority); err != nil {
+		return Todo{}, err
 	}
 
-	// Validate priority
-	if err := validatePriority(todoPriority); err != nil {
-		return nil, fmt.Errorf("failed to add todo: %w", err)
-	}
-
-	// Load existing todos to get next ID
+	// Load existing todos to get the next ID
 	todos, err := LoadTodos()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load todos for ID generation: %w", err)
+		return Todo{}, fmt.Errorf("failed to load existing todos: %w", err)
 	}
 
-	// Create new todo
-	newTodo := &Todo{
+	todo := Todo{
 		ID:       getNextID(todos),
 		Text:     text,
 		Done:     false,
 		Created:  time.Now().Format(time.RFC3339),
-		Priority: todoPriority,
+		Priority: priority,
 	}
 
-	// Add to todos slice
-	todos = append(todos, *newTodo)
-
-	// Save updated todos
-	if err := SaveTodos(todos); err != nil {
-		return nil, fmt.Errorf("failed to save new todo: %w", err)
-	}
-
-	return newTodo, nil
+	return todo, nil
 }
 
-// GetTodo finds and returns a todo by its ID.
+// GetTodo finds and returns a pointer to the todo with the specified ID.
 // Returns an error if the todo is not found.
 func GetTodo(todos []Todo, id int) (*Todo, error) {
 	if id <= 0 {
@@ -267,8 +210,8 @@ func GetTodo(todos []Todo, id int) (*Todo, error) {
 	return nil, fmt.Errorf("todo with ID %d not found", id)
 }
 
-// UpdateTodo updates a todo's fields based on the provided changes map.
-// Supported fields: "text", "done", "priority".
+// UpdateTodo updates the specified todo with the given changes.
+// Only "text", "done", and "priority" fields can be updated.
 // The changes map should contain field names as keys and new values as values.
 func UpdateTodo(todos []Todo, id int, changes map[string]interface{}) error {
 	if id <= 0 {
@@ -279,100 +222,77 @@ func UpdateTodo(todos []Todo, id int, changes map[string]interface{}) error {
 		return fmt.Errorf("no changes provided")
 	}
 
-	// Find todo index
-	todoIndex := -1
-	for i, todo := range todos {
-		if todo.ID == id {
-			todoIndex = i
-			break
-		}
+	todo, err := GetTodo(todos, id)
+	if err != nil {
+		return err
 	}
 
-	if todoIndex == -1 {
-		return fmt.Errorf("todo with ID %d not found", id)
-	}
-
-	// Apply changes
+	// Validate and apply changes
 	for field, value := range changes {
 		switch field {
 		case "text":
-			if text, ok := value.(string); ok {
-				if text == "" {
-					return fmt.Errorf("todo text cannot be empty")
-				}
-				todos[todoIndex].Text = text
-			} else {
-				return fmt.Errorf("invalid type for field 'text': expected string")
+			text, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("text field must be a string")
 			}
+			text = strings.TrimSpace(text)
+			if text == "" {
+				return fmt.Errorf("todo text cannot be empty")
+			}
+			todo.Text = text
 
 		case "done":
-			if done, ok := value.(bool); ok {
-				todos[todoIndex].Done = done
-			} else {
-				return fmt.Errorf("invalid type for field 'done': expected bool")
+			done, ok := value.(bool)
+			if !ok {
+				return fmt.Errorf("done field must be a boolean")
 			}
+			todo.Done = done
 
 		case "priority":
-			if priority, ok := value.(string); ok {
-				if err := validatePriority(priority); err != nil {
-					return fmt.Errorf("failed to update priority: %w", err)
-				}
-				todos[todoIndex].Priority = priority
-			} else {
-				return fmt.Errorf("invalid type for field 'priority': expected string")
+			priority, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("priority field must be a string")
 			}
+			priority = strings.ToLower(strings.TrimSpace(priority))
+			if err := validatePriority(priority); err != nil {
+				return err
+			}
+			todo.Priority = priority
 
 		default:
-			return fmt.Errorf("unsupported field: %s", field)
+			return fmt.Errorf("field '%s' cannot be updated", field)
 		}
-	}
-
-	// Save updated todos
-	if err := SaveTodos(todos); err != nil {
-		return fmt.Errorf("failed to save updated todo: %w", err)
 	}
 
 	return nil
 }
 
-// DeleteTodo removes a todo by its ID and returns the updated todos slice.
-// Returns an error if the todo is not found.
+// DeleteTodo removes the todo with the specified ID from the slice.
+// Returns the updated slice and an error if the todo is not found.
 func DeleteTodo(todos []Todo, id int) ([]Todo, error) {
 	if id <= 0 {
-		return nil, fmt.Errorf("invalid todo ID: %d", id)
+		return todos, fmt.Errorf("invalid todo ID: %d", id)
 	}
 
-	// Find todo index
-	todoIndex := -1
 	for i, todo := range todos {
 		if todo.ID == id {
-			todoIndex = i
-			break
+			// Remove the todo by slicing around it
+			return append(todos[:i], todos[i+1:]...), nil
 		}
 	}
 
-	if todoIndex == -1 {
-		return nil, fmt.Errorf("todo with ID %d not found", id)
-	}
-
-	// Remove todo from slice
-	updatedTodos := make([]Todo, 0, len(todos)-1)
-	updatedTodos = append(updatedTodos, todos[:todoIndex]...)
-	updatedTodos = append(updatedTodos, todos[todoIndex+1:]...)
-
-	// Save updated todos
-	if err := SaveTodos(updatedTodos); err != nil {
-		return nil, fmt.Errorf("failed to save after deletion: %w", err)
-	}
-
-	return updatedTodos, nil
+	return todos, fmt.Errorf("todo with ID %d not found", id)
 }
 
-// FilterTodos filters todos based on optional criteria.
-// If done is nil, todos with any completion status are included.
-// If priority is nil, todos with any priority are included.
-// Returns a new slice containing only the todos that match the criteria.
+// FilterTodos returns a filtered slice of todos based on the provided criteria.
+// Use nil for parameters you don't want to filter by.
+// done: filter by completion status (nil = no filter, true = completed only, false = incomplete only)
+// priority: filter by priority level (nil = no filter, otherwise filter by exact match)
 func FilterTodos(todos []Todo, done *bool, priority *string) []Todo {
+	if todos == nil {
+		return []Todo{}
+	}
+
 	var filtered []Todo
 
 	for _, todo := range todos {
@@ -382,8 +302,11 @@ func FilterTodos(todos []Todo, done *bool, priority *string) []Todo {
 		}
 
 		// Check priority filter
-		if priority != nil && todo.Priority != *priority {
-			continue
+		if priority != nil {
+			filterPriority := strings.ToLower(strings.TrimSpace(*priority))
+			if todo.Priority != filterPriority {
+				continue
+			}
 		}
 
 		filtered = append(filtered, todo)

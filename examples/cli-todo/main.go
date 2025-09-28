@@ -2,76 +2,114 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 
 	"./app"
 	"./commands"
 )
 
-// main is the entry point for the CLI Todo application.
-// It parses command-line arguments and routes them to appropriate handlers.
 func main() {
-	// Ensure we have at least the program name in os.Args
-	if len(os.Args) < 1 {
-		log.Fatal("Error: Unable to determine program name")
-	}
-
 	// Initialize the application
-	if err := app.Init(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing application: %v\n", err)
+	if err := app.Initialize(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to initialize application: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Determine the command to execute
-	var command string
-	if len(os.Args) < 2 {
-		command = "help"
-	} else {
-		command = os.Args[1]
+	// Parse command line arguments
+	args := os.Args[1:] // Skip program name
+
+	// Handle empty arguments - show help
+	if len(args) == 0 {
+		if err := commands.Help(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to display help: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
-	// Route commands to their respective handlers
+	// Route commands based on first argument
+	command := args[0]
+	commandArgs := args[1:] // Remaining arguments for the command
+
+	if err := routeCommand(command, commandArgs); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		// Show help for invalid commands
+		if command != "help" {
+			fmt.Fprintf(os.Stderr, "\n")
+			commands.Help()
+		}
+		os.Exit(1)
+	}
+
+	os.Exit(0)
+}
+
+// routeCommand handles command routing and execution
+func routeCommand(command string, args []string) error {
 	switch command {
 	case "add":
-		if err := commands.Add(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error adding todo: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleAdd(args)
 	case "list":
-		if err := commands.List(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error listing todos: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleList(args)
 	case "done":
-		if err := commands.Done(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error marking todo as done: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleDone(args)
 	case "remove":
-		if err := commands.Remove(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error removing todo: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleRemove(args)
 	case "help":
-		if err := commands.Help(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
-			os.Exit(1)
-		}
-
+		return commands.Help()
 	default:
-		// Handle invalid commands
-		fmt.Fprintf(os.Stderr, "Error: Unknown command '%s'\n", command)
-		if err := commands.Help([]string{}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
-		}
-		os.Exit(1)
+		return fmt.Errorf("unknown command '%s'", command)
 	}
+}
 
-	// Successful execution
-	os.Exit(0)
+// handleAdd processes the add command
+func handleAdd(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("add command requires a task description")
+	}
+	
+	// Join all arguments to form the task description
+	taskDescription := ""
+	for i, arg := range args {
+		if i > 0 {
+			taskDescription += " "
+		}
+		taskDescription += arg
+	}
+	
+	return commands.Add(taskDescription)
+}
+
+// handleList processes the list command
+func handleList(args []string) error {
+	// List command doesn't require arguments, but we can add filters later
+	return commands.List()
+}
+
+// handleDone processes the done command
+func handleDone(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("done command requires a task ID")
+	}
+	
+	if len(args) > 1 {
+		return fmt.Errorf("done command accepts only one task ID")
+	}
+	
+	taskID := args[0]
+	return commands.Done(taskID)
+}
+
+// handleRemove processes the remove command
+func handleRemove(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("remove command requires a task ID")
+	}
+	
+	if len(args) > 1 {
+		return fmt.Errorf("remove command accepts only one task ID")
+	}
+	
+	taskID := args[0]
+	return commands.Remove(taskID)
 }
