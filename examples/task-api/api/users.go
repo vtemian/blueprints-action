@@ -1,467 +1,471 @@
-I'll provide you with a complete, production-ready user management and authentication API module. Here's the implementation:
+I'll create a production-ready Go user management and authentication API module. Here's the complete implementation:
 
-## 1. models/user.go
+## Project Structure
+```
+api/
+└── users/
+    ├── handlers.go
+    ├── models.go
+    ├── middleware.go
+    ├── validation.go
+    └── errors.go
+```
+
+## 1. Package Models (`api/users/models.go`)
 
 ```go
-package models
+package users
 
 import (
 	"time"
-	"gorm.io/gorm"
+	"database/sql/driver"
+	"encoding/json"
 )
 
-// User represents the user model in the database
+// User represents the user database model
 type User struct {
-	ID        uint           `json:"id" gorm:"primaryKey"`
-	Email     string         `json:"email" gorm:"uniqueIndex;not null;size:255"`
-	Password  string         `json:"-" gorm:"not null;size:255"` // Never include in JSON responses
-	FirstName string         `json:"first_name" gorm:"not null;size:100"`
-	LastName  string         `json:"last_name" gorm:"not null;size:100"`
-	IsActive  bool           `json:"is_active" gorm:"default:true"`
-	LastLogin *time.Time     `json:"last_login"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	Email     string    `json:"email" gorm:"uniqueIndex;not null"`
+	Password  string    `json:"-" gorm:"not null"` // Never include in JSON responses
+	FirstName string    `json:"first_name" gorm:"not null"`
+	LastName  string    `json:"last_name" gorm:"not null"`
+	LastLogin *time.Time `json:"last_login"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// TableName specifies the table name for GORM
-func (User) TableName() string {
-	return "users"
-}
-
-// BeforeCreate is a GORM hook that runs before creating a user
-func (u *User) BeforeCreate(tx *gorm.DB) error {
-	// Additional validation or data manipulation can be added here
-	return nil
-}
-```
-
-## 2. dto/user_dto.go
-
-```go
-package dto
-
-import "time"
-
-// RegisterRequest represents the user registration request
+// RegisterRequest represents user registration payload
 type RegisterRequest struct {
-	Email     string `json:"email" binding:"required,email" validate:"email"`
-	Password  string `json:"password" binding:"required,min=8"`
-	FirstName string `json:"first_name" binding:"required,min=2,max=100"`
-	LastName  string `json:"last_name" binding:"required,min=2,max=100"`
+	Email     string `json:"email" validate:"required,email"`
+	Password  string `json:"password" validate:"required,min=8"`
+	FirstName string `json:"first_name" validate:"required,min=2,max=50"`
+	LastName  string `json:"last_name" validate:"required,min=2,max=50"`
 }
 
-// LoginRequest represents the user login request
+// LoginRequest represents user login payload
 type LoginRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
 }
 
-// UpdateProfileRequest represents the profile update request
+// UpdateProfileRequest represents profile update payload
 type UpdateProfileRequest struct {
-	Email     string `json:"email" binding:"omitempty,email"`
-	FirstName string `json:"first_name" binding:"omitempty,min=2,max=100"`
-	LastName  string `json:"last_name" binding:"omitempty,min=2,max=100"`
+	FirstName string `json:"first_name" validate:"required,min=2,max=50"`
+	LastName  string `json:"last_name" validate:"required,min=2,max=50"`
+	Email     string `json:"email" validate:"required,email"`
 }
 
-// ChangePasswordRequest represents the password change request
+// ChangePasswordRequest represents password change payload
 type ChangePasswordRequest struct {
-	CurrentPassword string `json:"current_password" binding:"required"`
-	NewPassword     string `json:"new_password" binding:"required,min=8"`
+	CurrentPassword string `json:"current_password" validate:"required"`
+	NewPassword     string `json:"new_password" validate:"required,min=8"`
 }
 
-// UserResponse represents the user data returned in API responses
+// UserResponse represents user data in API responses
 type UserResponse struct {
 	ID        uint       `json:"id"`
 	Email     string     `json:"email"`
 	FirstName string     `json:"first_name"`
 	LastName  string     `json:"last_name"`
-	IsActive  bool       `json:"is_active"`
 	LastLogin *time.Time `json:"last_login"`
 	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
 }
 
-// LoginResponse represents the login response with token
+// LoginResponse represents login API response
 type LoginResponse struct {
 	User  UserResponse `json:"user"`
 	Token string       `json:"token"`
 }
 
-// ErrorResponse represents error response structure
-type ErrorResponse struct {
-	Error   string            `json:"error"`
-	Message string            `json:"message"`
-	Details map[string]string `json:"details,omitempty"`
-}
-
-// SuccessResponse represents success response structure
-type SuccessResponse struct {
-	Message string      `json:"message"`
+// APIResponse represents standard API response structure
+type APIResponse struct {
+	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	Message string      `json:"message,omitempty"`
+}
+
+// ToResponse converts User model to UserResponse
+func (u *User) ToResponse() UserResponse {
+	return UserResponse{
+		ID:        u.ID,
+		Email:     u.Email,
+		FirstName: u.FirstName,
+		LastName:  u.LastName,
+		LastLogin: u.LastLogin,
+		CreatedAt: u.CreatedAt,
+	}
 }
 ```
 
-## 3. repositories/user_repository.go
+## 2. Custom Errors (`api/users/errors.go`)
 
 ```go
-package repositories
+package users
 
 import (
 	"errors"
-	"time"
-
-	"gorm.io/gorm"
-	"your-app/models"
+	"fmt"
 )
 
-// UserRepositoryInterface defines the contract for user repository
-type UserRepositoryInterface interface {
-	Create(user *models.User) error
-	GetByEmail(email string) (*models.User, error)
-	GetByID(id uint) (*models.User, error)
-	Update(user *models.User) error
-	UpdateLastLogin(userID uint) error
-	EmailExists(email string) (bool, error)
+// Custom error types
+var (
+	ErrUserNotFound      = errors.New("user not found")
+	ErrInvalidCredentials = errors.New("invalid email or password")
+	ErrEmailAlreadyExists = errors.New("email already exists")
+	ErrInvalidToken      = errors.New("invalid or expired token")
+	ErrUnauthorized      = errors.New("unauthorized access")
+	ErrInvalidPassword   = errors.New("invalid current password")
+	ErrSamePassword      = errors.New("new password must be different from current password")
+)
+
+// UserError represents a user-related error with HTTP status code
+type UserError struct {
+	Code    int
+	Message string
+	Err     error
 }
 
-// UserRepository implements UserRepositoryInterface
-type UserRepository struct {
-	db *gorm.DB
-}
-
-// NewUserRepository creates a new user repository instance
-func NewUserRepository(db *gorm.DB) UserRepositoryInterface {
-	return &UserRepository{db: db}
-}
-
-// Create creates a new user in the database
-func (r *UserRepository) Create(user *models.User) error {
-	if err := r.db.Create(user).Error; err != nil {
-		// Check for unique constraint violation
-		if errors.Is(err, gorm.ErrDuplicatedKey) {
-			return errors.New("email already exists")
-		}
-		return err
+func (e *UserError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.Message, e.Err)
 	}
-	return nil
+	return e.Message
 }
 
-// GetByEmail retrieves a user by email
-func (r *UserRepository) GetByEmail(email string) (*models.User, error) {
-	var user models.User
-	err := r.db.Where("email = ? AND is_active = ?", email, true).First(&user).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("user not found")
-		}
-		return nil, err
+// NewUserError creates a new UserError
+func NewUserError(code int, message string, err error) *UserError {
+	return &UserError{
+		Code:    code,
+		Message: message,
+		Err:     err,
 	}
-	return &user, nil
 }
 
-// GetByID retrieves a user by ID
-func (r *UserRepository) GetByID(id uint) (*models.User, error) {
-	var user models.User
-	err := r.db.Where("id = ? AND is_active = ?", id, true).First(&user).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("user not found")
-		}
-		return nil, err
-	}
-	return &user, nil
+// Common error constructors
+func NewBadRequestError(message string, err error) *UserError {
+	return NewUserError(400, message, err)
 }
 
-// Update updates user information
-func (r *UserRepository) Update(user *models.User) error {
-	err := r.db.Save(user).Error
-	if err != nil {
-		// Check for unique constraint violation
-		if errors.Is(err, gorm.ErrDuplicatedKey) {
-			return errors.New("email already exists")
-		}
-		return err
-	}
-	return nil
+func NewUnauthorizedError(message string, err error) *UserError {
+	return NewUserError(401, message, err)
 }
 
-// UpdateLastLogin updates the user's last login timestamp
-func (r *UserRepository) UpdateLastLogin(userID uint) error {
-	now := time.Now()
-	return r.db.Model(&models.User{}).Where("id = ?", userID).Update("last_login", now).Error
+func NewNotFoundError(message string, err error) *UserError {
+	return NewUserError(404, message, err)
 }
 
-// EmailExists checks if an email already exists in the database
-func (r *UserRepository) EmailExists(email string) (bool, error) {
-	var count int64
-	err := r.db.Model(&models.User{}).Where("email = ?", email).Count(&count).Error
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
+func NewConflictError(message string, err error) *UserError {
+	return NewUserError(409, message, err)
+}
+
+func NewInternalServerError(message string, err error) *UserError {
+	return NewUserError(500, message, err)
 }
 ```
 
-## 4. services/user_service.go
+## 3. Validation (`api/users/validation.go`)
 
 ```go
-package services
+package users
 
 import (
-	"errors"
 	"regexp"
-	"time"
+	"strings"
+	"unicode"
 
-	"golang.org/x/crypto/bcrypt"
-	"github.com/golang-jwt/jwt/v5"
-	"your-app/dto"
-	"your-app/models"
-	"your-app/repositories"
+	"github.com/go-playground/validator/v10"
 )
 
-// UserServiceInterface defines the contract for user service
-type UserServiceInterface interface {
-	Register(req *dto.RegisterRequest) (*dto.UserResponse, error)
-	Login(req *dto.LoginRequest) (*dto.LoginResponse, error)
-	GetProfile(userID uint) (*dto.UserResponse, error)
-	UpdateProfile(userID uint, req *dto.UpdateProfileRequest) (*dto.UserResponse, error)
-	ChangePassword(userID uint, req *dto.ChangePasswordRequest) error
-	ValidateToken(tokenString string) (*jwt.Token, error)
-	GenerateToken(userID uint) (string, error)
+var (
+	emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	validate   = validator.New()
+)
+
+// ValidateStruct validates a struct using validator tags
+func ValidateStruct(s interface{}) error {
+	return validate.Struct(s)
 }
 
-// UserService implements UserServiceInterface
-type UserService struct {
-	userRepo  repositories.UserRepositoryInterface
-	jwtSecret []byte
+// ValidateEmail validates email format
+func ValidateEmail(email string) bool {
+	return emailRegex.MatchString(strings.TrimSpace(email))
 }
 
-// NewUserService creates a new user service instance
-func NewUserService(userRepo repositories.UserRepositoryInterface, jwtSecret string) UserServiceInterface {
-	return &UserService{
-		userRepo:  userRepo,
-		jwtSecret: []byte(jwtSecret),
-	}
-}
-
-// Register handles user registration
-func (s *UserService) Register(req *dto.RegisterRequest) (*dto.UserResponse, error) {
-	// Validate email format
-	if !s.isValidEmail(req.Email) {
-		return nil, errors.New("invalid email format")
+// ValidatePassword validates password strength
+func ValidatePassword(password string) error {
+	if len(password) < 8 {
+		return errors.New("password must be at least 8 characters long")
 	}
 
-	// Check if email already exists
-	exists, err := s.userRepo.EmailExists(req.Email)
-	if err != nil {
-		return nil, errors.New("failed to check email existence")
-	}
-	if exists {
-		return nil, errors.New("email already registered")
-	}
+	var (
+		hasUpper   = false
+		hasLower   = false
+		hasNumber  = false
+		hasSpecial = false
+	)
 
-	// Hash password
-	hashedPassword, err := s.hashPassword(req.Password)
-	if err != nil {
-		return nil, errors.New("failed to process password")
-	}
-
-	// Create user model
-	user := &models.User{
-		Email:     req.Email,
-		Password:  hashedPassword,
-		FirstName: req.FirstName,
-		LastName:  req.LastName,
-		IsActive:  true,
-	}
-
-	// Save user to database
-	if err := s.userRepo.Create(user); err != nil {
-		return nil, err
-	}
-
-	// Convert to response DTO
-	return s.userToResponse(user), nil
-}
-
-// Login handles user authentication
-func (s *UserService) Login(req *dto.LoginRequest) (*dto.LoginResponse, error) {
-	// Get user by email
-	user, err := s.userRepo.GetByEmail(req.Email)
-	if err != nil {
-		return nil, errors.New("invalid credentials")
-	}
-
-	// Verify password
-	if !s.checkPasswordHash(req.Password, user.Password) {
-		return nil, errors.New("invalid credentials")
-	}
-
-	// Update last login
-	if err := s.userRepo.UpdateLastLogin(user.ID); err != nil {
-		// Log error but don't fail the login
-		// In production, you might want to use a proper logger
-	}
-
-	// Generate JWT token
-	token, err := s.GenerateToken(user.ID)
-	if err != nil {
-		return nil, errors.New("failed to generate token")
-	}
-
-	// Update user with current timestamp for response
-	now := time.Now()
-	user.LastLogin = &now
-
-	return &dto.LoginResponse{
-		User:  *s.userToResponse(user),
-		Token: token,
-	}, nil
-}
-
-// GetProfile retrieves user profile
-func (s *UserService) GetProfile(userID uint) (*dto.UserResponse, error) {
-	user, err := s.userRepo.GetByID(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	return s.userToResponse(user), nil
-}
-
-// UpdateProfile updates user profile
-func (s *UserService) UpdateProfile(userID uint, req *dto.UpdateProfileRequest) (*dto.UserResponse, error) {
-	user, err := s.userRepo.GetByID(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Update fields if provided
-	if req.Email != "" {
-		if !s.isValidEmail(req.Email) {
-			return nil, errors.New("invalid email format")
+	for _, char := range password {
+		switch {
+		case unicode.IsUpper(char):
+			hasUpper = true
+		case unicode.IsLower(char):
+			hasLower = true
+		case unicode.IsNumber(char):
+			hasNumber = true
+		case unicode.IsPunct(char) || unicode.IsSymbol(char):
+			hasSpecial = true
 		}
-		
-		// Check if new email already exists (excluding current user)
-		if req.Email != user.Email {
-			exists, err := s.userRepo.EmailExists(req.Email)
-			if err != nil {
-				return nil, errors.New("failed to validate email")
-			}
-			if exists {
-				return nil, errors.New("email already in use")
+	}
+
+	if !hasUpper {
+		return errors.New("password must contain at least one uppercase letter")
+	}
+	if !hasLower {
+		return errors.New("password must contain at least one lowercase letter")
+	}
+	if !hasNumber {
+		return errors.New("password must contain at least one number")
+	}
+	if !hasSpecial {
+		return errors.New("password must contain at least one special character")
+	}
+
+	return nil
+}
+
+// ValidationErrorResponse converts validation errors to user-friendly messages
+func ValidationErrorResponse(err error) map[string]string {
+	errors := make(map[string]string)
+	
+	if validationErrors, ok := err.(validator.ValidationErrors); ok {
+		for _, e := range validationErrors {
+			field := strings.ToLower(e.Field())
+			switch e.Tag() {
+			case "required":
+				errors[field] = field + " is required"
+			case "email":
+				errors[field] = "invalid email format"
+			case "min":
+				errors[field] = field + " must be at least " + e.Param() + " characters"
+			case "max":
+				errors[field] = field + " must be at most " + e.Param() + " characters"
+			default:
+				errors[field] = field + " is invalid"
 			}
 		}
-		user.Email = req.Email
 	}
+	
+	return errors
+}
+```
 
-	if req.FirstName != "" {
-		user.FirstName = req.FirstName
-	}
+## 4. Authentication Middleware (`api/users/middleware.go`)
 
-	if req.LastName != "" {
-		user.LastName = req.LastName
-	}
+```go
+package users
 
-	// Save updated user
-	if err := s.userRepo.Update(user); err != nil {
-		return nil, err
-	}
+import (
+	"context"
+	"net/http"
+	"strings"
+	"time"
 
-	return s.userToResponse(user), nil
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/mux"
+)
+
+// JWTClaims represents JWT token claims
+type JWTClaims struct {
+	UserID uint   `json:"user_id"`
+	Email  string `json:"email"`
+	jwt.RegisteredClaims
 }
 
-// ChangePassword handles password change
-func (s *UserService) ChangePassword(userID uint, req *dto.ChangePasswordRequest) error {
-	user, err := s.userRepo.GetByID(userID)
-	if err != nil {
-		return err
-	}
-
-	// Verify current password
-	if !s.checkPasswordHash(req.CurrentPassword, user.Password) {
-		return errors.New("current password is incorrect")
-	}
-
-	// Hash new password
-	hashedPassword, err := s.hashPassword(req.NewPassword)
-	if err != nil {
-		return errors.New("failed to process new password")
-	}
-
-	// Update password
-	user.Password = hashedPassword
-	return s.userRepo.Update(user)
+// AuthService handles JWT operations
+type AuthService struct {
+	secretKey []byte
 }
 
-// GenerateToken generates a JWT token for the user
-func (s *UserService) GenerateToken(userID uint) (string, error) {
-	claims := jwt.MapClaims{
-		"user_id": userID,
-		"exp":     time.Now().Add(time.Hour * 24).Unix(), // 24 hours
-		"iat":     time.Now().Unix(),
+// NewAuthService creates a new AuthService
+func NewAuthService(secretKey string) *AuthService {
+	return &AuthService{
+		secretKey: []byte(secretKey),
+	}
+}
+
+// GenerateToken generates a JWT token for a user
+func (a *AuthService) GenerateToken(user *User) (string, error) {
+	claims := JWTClaims{
+		UserID: user.ID,
+		Email:  user.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
+			Issuer:    "user-api",
+		},
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(s.jwtSecret)
+	return token.SignedString(a.secretKey)
 }
 
-// ValidateToken validates a JWT token
-func (s *UserService) ValidateToken(tokenString string) (*jwt.Token, error) {
-	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+// ValidateToken validates and parses a JWT token
+func (a *AuthService) ValidateToken(tokenString string) (*JWTClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("invalid token signing method")
+			return nil, ErrInvalidToken
 		}
-		return s.jwtSecret, nil
+		return a.secretKey, nil
+	})
+
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+
+	if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
+		return claims, nil
+	}
+
+	return nil, ErrInvalidToken
+}
+
+// AuthMiddleware validates JWT tokens and adds user context
+func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			h.sendErrorResponse(w, http.StatusUnauthorized, "Authorization header required", nil)
+			return
+		}
+
+		bearerToken := strings.Split(authHeader, " ")
+		if len(bearerToken) != 2 || bearerToken[0] != "Bearer" {
+			h.sendErrorResponse(w, http.StatusUnauthorized, "Invalid authorization header format", nil)
+			return
+		}
+
+		claims, err := h.authService.ValidateToken(bearerToken[1])
+		if err != nil {
+			h.sendErrorResponse(w, http.StatusUnauthorized, "Invalid token", err)
+			return
+		}
+
+		// Add user ID to request context
+		ctx := context.WithValue(r.Context(), "userID", claims.UserID)
+		ctx = context.WithValue(ctx, "userEmail", claims.Email)
+		
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// Helper methods
-
-func (s *UserService) hashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 12)
-	return string(bytes), err
+// GetUserIDFromContext extracts user ID from request context
+func GetUserIDFromContext(ctx context.Context) (uint, bool) {
+	userID, ok := ctx.Value("userID").(uint)
+	return userID, ok
 }
 
-func (s *UserService) checkPasswordHash(password, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	return err == nil
-}
-
-func (s *UserService) isValidEmail(email string) bool {
-	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-	return emailRegex.MatchString(email)
-}
-
-func (s *UserService) userToResponse(user *models.User) *dto.UserResponse {
-	return &dto.UserResponse{
-		ID:        user.ID,
-		Email:     user.Email,
-		FirstName: user.FirstName,
-		LastName:  user.LastName,
-		IsActive:  user.IsActive,
-		LastLogin: user.LastLogin,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-	}
+// GetUserEmailFromContext extracts user email from request context
+func GetUserEmailFromContext(ctx context.Context) (string, bool) {
+	email, ok := ctx.Value("userEmail").(string)
+	return email, ok
 }
 ```
 
-## 5. middleware/auth.go
+## 5. Main Handlers (`api/users/handlers.go`)
 
 ```go
-package middleware
+package users
 
 import (
+	"encoding/json"
+	"log"
 	"net/http"
-	"strings"
+	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-	"your-app/dto"
-	"your-app/services"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+	"github.com/gorilla/mux"
 )
 
-// AuthMiddleware creates JWT authentication middleware
-func
+// Handler handles user-related HTTP requests
+type Handler struct {
+	db          *gorm.DB
+	authService *AuthService
+	logger      *log.Logger
+}
+
+// NewHandler creates a new user handler
+func NewHandler(db *gorm.DB, authService *AuthService, logger *log.Logger) *Handler {
+	return &Handler{
+		db:          db,
+		authService: authService,
+		logger:      logger,
+	}
+}
+
+// RegisterRoutes registers all user routes
+func (h *Handler) RegisterRoutes(router *mux.Router) {
+	// Public routes
+	router.HandleFunc("/api/users/register", h.Register).Methods("POST")
+	router.HandleFunc("/api/users/login", h.Login).Methods("POST")
+	
+	// Protected routes
+	protected := router.PathPrefix("/api/users").Subrouter()
+	protected.Use(h.AuthMiddleware)
+	protected.HandleFunc("/me", h.GetProfile).Methods("GET")
+	protected.HandleFunc("/me", h.UpdateProfile).Methods("PUT")
+	protected.HandleFunc("/change-password", h.ChangePassword).Methods("POST")
+}
+
+// Register handles user registration
+func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+		return
+	}
+
+	// Validate request
+	if err := ValidateStruct(req); err != nil {
+		validationErrors := ValidationErrorResponse(err)
+		h.sendValidationErrorResponse(w, "Validation failed", validationErrors)
+		return
+	}
+
+	// Additional password validation
+	if err := ValidatePassword(req.Password); err != nil {
+		h.sendErrorResponse(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
+	// Check if user already exists
+	var existingUser User
+	if err := h.db.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
+		h.sendErrorResponse(w, http.StatusConflict, "Email already exists", nil)
+		return
+	}
+
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 14)
+	if err != nil {
+		h.logger.Printf("Password hashing error: %v", err)
+		h.sendErrorResponse(w, http.StatusInternalServerError, "Internal server error", nil)
+		return
+	}
+
+	// Create user
+	user := User{
+		Email:     req.Email,
+		Password:  string(hashedPassword),
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	if err := h.db.Create(&user).Error; err != nil {
+		h.logger.Printf("Database error during user creation: %v", err)
+		h.sendErrorResponse(w, http.StatusInternalServerError, "Failed to create user", nil)
+		return

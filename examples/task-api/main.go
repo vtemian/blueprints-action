@@ -1,7 +1,8 @@
-Here's a complete, production-ready Go application entry point that serves as the equivalent of a FastAPI launcher:
+Here's a production-ready Go HTTP server entry point using the Gin framework:
+
+## main.go
 
 ```go
-// main.go
 package main
 
 import (
@@ -15,36 +16,46 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/your-project/app" // Replace with your actual module path
+
+	"your-module-name/app"
 )
 
-// Config holds the application configuration
+const (
+	defaultPort         = "8000"
+	defaultHost         = "0.0.0.0"
+	shutdownTimeout     = 30 * time.Second
+	readHeaderTimeout   = 10 * time.Second
+	readTimeout         = 30 * time.Second
+	writeTimeout        = 30 * time.Second
+	idleTimeout         = 60 * time.Second
+)
+
+// Config holds server configuration
 type Config struct {
-	Host         string
-	Port         int
-	Environment  string
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
+	Host string
+	Port string
+	Env  string
 }
 
-// loadConfig loads configuration from environment variables with sensible defaults
+// loadConfig loads configuration from environment variables with defaults
 func loadConfig() *Config {
 	config := &Config{
-		Host:         getEnv("HOST", "0.0.0.0"),
-		Port:         getEnvAsInt("PORT", 8000),
-		Environment:  getEnv("ENVIRONMENT", "development"),
-		ReadTimeout:  getEnvAsDuration("READ_TIMEOUT", 10*time.Second),
-		WriteTimeout: getEnvAsDuration("WRITE_TIMEOUT", 10*time.Second),
-		IdleTimeout:  getEnvAsDuration("IDLE_TIMEOUT", 60*time.Second),
+		Host: getEnv("HOST", defaultHost),
+		Port: getEnv("PORT", defaultPort),
+		Env:  getEnv("GIN_MODE", "debug"),
+	}
+
+	// Validate port
+	if port, err := strconv.Atoi(config.Port); err != nil || port < 1 || port > 65535 {
+		slog.Error("Invalid port number", "port", config.Port)
+		os.Exit(1)
 	}
 
 	return config
 }
 
-// getEnv gets an environment variable with a fallback default value
+// getEnv gets environment variable with fallback to default value
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -52,207 +63,145 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// getEnvAsInt gets an environment variable as integer with a fallback default value
-func getEnvAsInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
-	}
-	return defaultValue
-}
-
-// getEnvAsDuration gets an environment variable as duration with a fallback default value
-func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if duration, err := time.ParseDuration(value); err == nil {
-			return duration
-		}
-	}
-	return defaultValue
-}
-
-// setupLogger configures structured logging based on environment
-func setupLogger(environment string) *slog.Logger {
+// setupLogger configures structured logging
+func setupLogger(env string) {
 	var logger *slog.Logger
-
-	if environment == "production" {
-		// JSON logging for production
+	
+	if env == "release" {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 			Level: slog.LevelInfo,
 		}))
 	} else {
-		// Text logging for development
 		logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 			Level: slog.LevelDebug,
 		}))
 	}
-
+	
 	slog.SetDefault(logger)
-	return logger
-}
-
-// setupGin configures the Gin router based on environment
-func setupGin(environment string) *gin.Engine {
-	if environment == "production" {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
-	router := gin.New()
-
-	// Add recovery middleware
-	router.Use(gin.Recovery())
-
-	// Add custom logging middleware
-	router.Use(ginLogger())
-
-	// Configure CORS
-	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowOrigins = []string{"*"} // Configure appropriately for production
-	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
-	corsConfig.AllowCredentials = true
-
-	router.Use(cors.New(corsConfig))
-
-	return router
-}
-
-// ginLogger creates a custom Gin logging middleware using slog
-func ginLogger() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		path := c.Request.URL.Path
-		raw := c.Request.URL.RawQuery
-
-		// Process request
-		c.Next()
-
-		// Calculate latency
-		latency := time.Since(start)
-
-		// Get client IP
-		clientIP := c.ClientIP()
-
-		// Get status code
-		statusCode := c.Writer.Status()
-
-		// Get method
-		method := c.Request.Method
-
-		// Build full path
-		if raw != "" {
-			path = path + "?" + raw
-		}
-
-		// Log the request
-		slog.Info("HTTP Request",
-			"method", method,
-			"path", path,
-			"status", statusCode,
-			"latency", latency,
-			"client_ip", clientIP,
-			"user_agent", c.Request.UserAgent(),
-		)
-	}
 }
 
 // createServer creates and configures the HTTP server
-func createServer(router *gin.Engine, config *Config) *http.Server {
-	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
+func createServer(config *Config) *http.Server {
+	// Set Gin mode based on environment
+	gin.SetMode(config.Env)
 
+	// Create Gin router
+	router := gin.New()
+
+	// Add middleware
+	router.Use(gin.Logger())
+	router.Use(gin.Recovery())
+
+	// Add CORS middleware for development
+	if config.Env != "release" {
+		router.Use(func(c *gin.Context) {
+			c.Header("Access-Control-Allow-Origin", "*")
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			
+			if c.Request.Method == "OPTIONS" {
+				c.AbortWithStatus(http.StatusNoContent)
+				return
+			}
+			
+			c.Next()
+		})
+	}
+
+	// Health check endpoint
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "healthy",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"version":   getEnv("APP_VERSION", "dev"),
+		})
+	})
+
+	// Register application routes
+	app.RegisterRoutes(router)
+
+	// Create HTTP server with timeouts
 	server := &http.Server{
-		Addr:         address,
-		Handler:      router,
-		ReadTimeout:  config.ReadTimeout,
-		WriteTimeout: config.WriteTimeout,
-		IdleTimeout:  config.IdleTimeout,
+		Addr:              fmt.Sprintf("%s:%s", config.Host, config.Port),
+		Handler:           router,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	return server
 }
 
-// gracefulShutdown handles graceful shutdown of the HTTP server
-func gracefulShutdown(server *http.Server, logger *slog.Logger) {
-	// Create a channel to receive OS signals
+// gracefulShutdown handles server shutdown gracefully
+func gracefulShutdown(server *http.Server) {
+	// Create channel to listen for interrupt signals
 	quit := make(chan os.Signal, 1)
-	
-	// Register the channel to receive specific signals
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Block until a signal is received
+	// Block until signal is received
 	sig := <-quit
-	logger.Info("Received shutdown signal", "signal", sig.String())
+	slog.Info("Received shutdown signal", "signal", sig.String())
 
-	// Create a context with timeout for graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Create context with timeout for shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	// Attempt graceful shutdown
-	logger.Info("Shutting down server...")
+	slog.Info("Shutting down server gracefully", "timeout", shutdownTimeout.String())
+	
 	if err := server.Shutdown(ctx); err != nil {
-		logger.Error("Server forced to shutdown", "error", err)
+		slog.Error("Server forced to shutdown", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("Server exited gracefully")
+	slog.Info("Server shutdown complete")
 }
 
-// main is the application entry point
 func main() {
 	// Load configuration
 	config := loadConfig()
 
 	// Setup logging
-	logger := setupLogger(config.Environment)
+	setupLogger(config.Env)
 
-	logger.Info("Starting application",
-		"environment", config.Environment,
-		"host", config.Host,
-		"port", config.Port,
+	slog.Info("Starting server", 
+		"host", config.Host, 
+		"port", config.Port, 
+		"env", config.Env,
 	)
 
-	// Setup Gin router
-	router := setupGin(config.Environment)
+	// Create server
+	server := createServer(config)
 
-	// Initialize application routes from the app package
-	if err := app.InitializeRoutes(router); err != nil {
-		logger.Error("Failed to initialize routes", "error", err)
+	// Start graceful shutdown handler in goroutine
+	go gracefulShutdown(server)
+
+	// Start server
+	slog.Info("Server listening", "address", server.Addr)
+	
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("Failed to start server", "error", err)
 		os.Exit(1)
 	}
-
-	// Add health check endpoint
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":      "healthy",
-			"timestamp":   time.Now().UTC(),
-			"environment": config.Environment,
-		})
-	})
-
-	// Create HTTP server
-	server := createServer(router, config)
-
-	// Start server in a goroutine
-	go func() {
-		logger.Info("Server starting", "address", server.Addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Failed to start server", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	logger.Info("Server started successfully", "address", server.Addr)
-
-	// Handle graceful shutdown
-	gracefulShutdown(server, logger)
 }
 ```
 
-And here's the corresponding `app/routes.go` file that would be imported:
+## Supporting Files
 
+### go.mod
 ```go
-// app/routes.go
+module your-module-name
+
+go 1.21
+
+require (
+    github.com/gin-gonic/gin v1.9.1
+)
+```
+
+### app/routes.go (example app package)
+```go
 package app
 
 import (
@@ -261,124 +210,87 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// InitializeRoutes sets up all application routes
-func InitializeRoutes(router *gin.Engine) error {
-	// API version 1 routes
+// RegisterRoutes registers all application routes
+func RegisterRoutes(router *gin.Engine) {
+	// API version group
 	v1 := router.Group("/api/v1")
 	{
-		// Example routes - replace with your actual routes
-		v1.GET("/users", getUsers)
-		v1.POST("/users", createUser)
-		v1.GET("/users/:id", getUserByID)
-		v1.PUT("/users/:id", updateUser)
-		v1.DELETE("/users/:id", deleteUser)
+		v1.GET("/ping", pingHandler)
+		// Add more routes here
 	}
 
-	// Root route
-	router.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "Welcome to the API",
-			"version": "1.0.0",
-		})
+	// Static routes or other route groups can be added here
+}
+
+// pingHandler handles ping requests
+func pingHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "pong",
 	})
-
-	return nil
-}
-
-// Example handler functions - replace with your actual handlers
-func getUsers(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"users": []string{}})
-}
-
-func createUser(c *gin.Context) {
-	c.JSON(http.StatusCreated, gin.H{"message": "User created"})
-}
-
-func getUserByID(c *gin.Context) {
-	id := c.Param("id")
-	c.JSON(http.StatusOK, gin.H{"user_id": id})
-}
-
-func updateUser(c *gin.Context) {
-	id := c.Param("id")
-	c.JSON(http.StatusOK, gin.H{"message": "User updated", "user_id": id})
-}
-
-func deleteUser(c *gin.Context) {
-	id := c.Param("id")
-	c.JSON(http.StatusOK, gin.H{"message": "User deleted", "user_id": id})
 }
 ```
 
-And the `go.mod` file:
+### Dockerfile (optional)
+```dockerfile
+FROM golang:1.21-alpine AS builder
 
-```go
-// go.mod
-module github.com/your-project
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
 
-go 1.21
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o main .
 
-require (
-    github.com/gin-contrib/cors v1.4.0
-    github.com/gin-gonic/gin v1.9.1
-)
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
 
-require (
-    github.com/bytedance/sonic v1.9.1 // indirect
-    github.com/chenzhuoyu/base64x v0.0.0-20221115062448-fe3a3abad311 // indirect
-    github.com/gabriel-vasile/mimetype v1.4.2 // indirect
-    github.com/gin-contrib/sse v0.1.0 // indirect
-    github.com/go-playground/locales v0.14.1 // indirect
-    github.com/go-playground/universal-translator v0.18.1 // indirect
-    github.com/go-playground/validator/v10 v10.14.0 // indirect
-    github.com/goccy/go-json v0.10.2 // indirect
-    github.com/json-iterator/go v1.1.12 // indirect
-    github.com/klauspost/cpuid/v2 v2.2.4 // indirect
-    github.com/leodido/go-urn v1.2.4 // indirect
-    github.com/mattn/go-isatty v0.0.19 // indirect
-    github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
-    github.com/modern-go/reflect2 v1.0.2 // indirect
-    github.com/pelletier/go-toml/v2 v2.0.8 // indirect
-    github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
-    github.com/ugorji/go/codec v1.2.11 // indirect
-    golang.org/x/arch v0.3.0 // indirect
-    golang.org/x/crypto v0.9.0 // indirect
-    golang.org/x/net v0.10.0 // indirect
-    golang.org/x/sys v0.8.0 // indirect
-    golang.org/x/text v0.9.0 // indirect
-    google.golang.org/protobuf v1.30.0 // indirect
-    gopkg.in/yaml.v3 v3.0.1 // indirect
-)
+COPY --from=builder /app/main .
+
+EXPOSE 8000
+
+CMD ["./main"]
 ```
 
-## Key Features:
+### docker-compose.yml (optional)
+```yaml
+version: '3.8'
 
-1. **Environment-based Configuration**: Supports development and production modes
-2. **Graceful Shutdown**: Handles SIGTERM and SIGINT signals properly
-3. **Structured Logging**: Uses Go's built-in `log/slog` package
-4. **CORS Support**: Configurable CORS middleware
-5. **Health Check**: Built-in `/health` endpoint
-6. **Timeout Configuration**: Proper HTTP server timeouts
-7. **Error Handling**: Comprehensive error handling throughout
-8. **Container Ready**: Binds to 0.0.0.0 for container compatibility
-9. **Modular Design**: Routes are organized in separate package
-10. **Production Ready**: Includes all necessary middleware and configurations
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - GIN_MODE=release
+      - HOST=0.0.0.0
+      - PORT=8000
+    restart: unless-stopped
+```
 
-## Usage:
+## Key Features
+
+1. **Environment Configuration**: Uses environment variables with sensible defaults
+2. **Graceful Shutdown**: Properly handles SIGINT/SIGTERM with configurable timeout
+3. **Structured Logging**: Uses Go's built-in `slog` package for structured logging
+4. **Production Ready**: Includes proper timeouts, error handling, and security considerations
+5. **Health Check**: Built-in health check endpoint at `/health`
+6. **CORS Support**: Development-friendly CORS middleware
+7. **Modular Design**: Routes are organized in a separate app package
+8. **Container Ready**: Configured for containerized deployments
+
+## Usage
 
 ```bash
-# Install dependencies
-go mod tidy
-
-# Run in development
+# Development
 go run main.go
 
-# Run in production
-ENVIRONMENT=production PORT=8080 go run main.go
+# Production build
+go build -o server main.go
+./server
 
-# Build for production
-go build -o app main.go
-./app
+# With environment variables
+HOST=127.0.0.1 PORT=3000 GIN_MODE=release ./server
 ```
 
-This implementation provides a robust, FastAPI-equivalent foundation for Go web applications with proper production considerations.
+This implementation provides a robust, production-ready HTTP server entry point that's equivalent to a FastAPI application with proper Go idioms and best practices.

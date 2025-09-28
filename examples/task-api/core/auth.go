@@ -1,20 +1,14 @@
-I'll create a complete authentication and authorization module following Go best practices. Here's the production-ready implementation:
-
-## core/auth/auth.go
-
-```go
-// Package auth provides authentication and authorization utilities for HTTP services.
-// It includes JWT token management, password hashing, and HTTP middleware for protected routes.
+// Package auth provides comprehensive authentication and authorization utilities
+// with JWT token management and secure password handling.
 package auth
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,412 +16,434 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Constants for configuration
 const (
-	// TokenExpirationHours defines the access token expiration time
 	TokenExpirationHours = 24
-	// BcryptCost defines the cost factor for bcrypt hashing
-	BcryptCost = 12
-	// AuthorizationHeader is the HTTP header name for authorization
-	AuthorizationHeader = "Authorization"
-	// BearerPrefix is the expected prefix for Bearer tokens
-	BearerPrefix = "Bearer "
+	BcryptCost          = 12
+	BearerPrefix        = "Bearer "
+	AuthHeaderKey       = "Authorization"
+	MinPasswordLength   = 8
+	MaxPasswordLength   = 128
 )
 
-// Custom error types for authentication failures
+// Custom error types for different failure modes
 var (
-	ErrInvalidToken     = errors.New("invalid token")
-	ErrExpiredToken     = errors.New("token has expired")
-	ErrMalformedToken   = errors.New("malformed token")
-	ErrMissingToken     = errors.New("missing authorization token")
-	ErrInvalidSignature = errors.New("invalid token signature")
-	ErrPasswordHashing  = errors.New("password hashing failed")
-	ErrUserNotFound     = errors.New("user not found")
-	ErrInactiveUser     = errors.New("user account is inactive")
-	ErrInvalidPassword  = errors.New("invalid password")
+	ErrInvalidToken     = fmt.Errorf("invalid token")
+	ErrExpiredToken     = fmt.Errorf("token has expired")
+	ErrMissingToken     = fmt.Errorf("missing authorization token")
+	ErrInvalidPassword  = fmt.Errorf("invalid password")
+	ErrPasswordTooShort = fmt.Errorf("password too short")
+	ErrPasswordTooLong  = fmt.Errorf("password too long")
+	ErrMissingSecret    = fmt.Errorf("JWT secret key not configured")
+	ErrUserNotFound     = fmt.Errorf("user not found")
 )
 
-// User represents a user in the system
-type User struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	IsActive bool   `json:"is_active"`
-}
-
-// Claims represents JWT claims structure
+// Claims represents the JWT claims structure
 type Claims struct {
-	UserID   int    `json:"user_id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
+	UserID   string                 `json:"user_id"`
+	Username string                 `json:"username"`
+	Email    string                 `json:"email"`
+	Role     string                 `json:"role"`
+	Data     map[string]interface{} `json:"data,omitempty"`
 	jwt.RegisteredClaims
 }
 
-// AuthResponse represents authentication response structure
-type AuthResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	Token   string `json:"token,omitempty"`
-	User    *User  `json:"user,omitempty"`
+// User represents a user in the system
+type User struct {
+	ID           string    `json:"id"`
+	Username     string    `json:"username"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"` // Never serialize password hash
+	Role         string    `json:"role"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	IsActive     bool      `json:"is_active"`
 }
 
-// ErrorResponse represents error response structure
-type ErrorResponse struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error"`
-	Code    int    `json:"code"`
+// AuthError represents authentication/authorization errors with HTTP status codes
+type AuthError struct {
+	Code    int
+	Message string
+	Err     error
 }
 
-// UserRepository interface for user data operations
-// This should be implemented by your data layer
-type UserRepository interface {
-	GetUserByID(ctx context.Context, id int) (*User, error)
-	GetUserByUsername(ctx context.Context, username string) (*User, error)
-	GetUserByEmail(ctx context.Context, email string) (*User, error)
+func (e *AuthError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.Message, e.Err)
+	}
+	return e.Message
 }
 
-// AuthService provides authentication and authorization services
-type AuthService struct {
-	jwtSecret  []byte
-	userRepo   UserRepository
-	logger     *log.Logger
+func (e *AuthError) Unwrap() error {
+	return e.Err
 }
 
-// NewAuthService creates a new authentication service instance
-func NewAuthService(userRepo UserRepository, logger *log.Logger) *AuthService {
-	secret := getJWTSecret()
-	if logger == nil {
-		logger = log.New(os.Stdout, "[AUTH] ", log.LstdFlags|log.Lshortfile)
+// NewAuthError creates a new AuthError with HTTP status code
+func NewAuthError(code int, message string, err error) *AuthError {
+	return &AuthError{
+		Code:    code,
+		Message: message,
+		Err:     err,
+	}
+}
+
+// TokenManager handles JWT token operations
+type TokenManager struct {
+	secretKey []byte
+}
+
+// NewTokenManager creates a new TokenManager instance
+func NewTokenManager() (*TokenManager, error) {
+	secretKey := os.Getenv("JWT_SECRET_KEY")
+	if secretKey == "" {
+		return nil, NewAuthError(http.StatusInternalServerError, "JWT secret not configured", ErrMissingSecret)
 	}
 	
-	return &AuthService{
-		jwtSecret: []byte(secret),
-		userRepo:  userRepo,
-		logger:    logger,
-	}
-}
-
-// getJWTSecret retrieves JWT secret from environment variable with fallback
-func getJWTSecret() string {
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		// In production, this should cause the application to fail to start
-		log.Println("WARNING: JWT_SECRET not set, using default (NOT FOR PRODUCTION)")
-		return "your-256-bit-secret-key-change-this-in-production"
-	}
-	return secret
+	return &TokenManager{
+		secretKey: []byte(secretKey),
+	}, nil
 }
 
 // CreateAccessToken generates a JWT access token with 24-hour expiration
-func (a *AuthService) CreateAccessToken(data map[string]interface{}) (string, error) {
-	// Validate required fields
-	userID, ok := data["user_id"]
-	if !ok {
-		return "", fmt.Errorf("user_id is required in token data")
+// Example usage:
+//   data := map[string]interface{}{
+//       "user_id": "123",
+//       "username": "john_doe",
+//       "email": "john@example.com",
+//       "role": "user",
+//   }
+//   token, err := CreateAccessToken(data)
+func CreateAccessToken(data map[string]interface{}) (string, error) {
+	tm, err := NewTokenManager()
+	if err != nil {
+		return "", err
 	}
-	
-	username, ok := data["username"].(string)
-	if !ok {
-		return "", fmt.Errorf("username is required and must be a string")
+
+	return tm.CreateToken(data)
+}
+
+// CreateToken generates a JWT token with the provided data
+func (tm *TokenManager) CreateToken(data map[string]interface{}) (string, error) {
+	if data == nil {
+		data = make(map[string]interface{})
 	}
-	
-	email, ok := data["email"].(string)
-	if !ok {
-		return "", fmt.Errorf("email is required and must be a string")
-	}
-	
-	// Convert user_id to int
-	var userIDInt int
-	switch v := userID.(type) {
-	case int:
-		userIDInt = v
-	case float64:
-		userIDInt = int(v)
-	case string:
-		var err error
-		userIDInt, err = strconv.Atoi(v)
-		if err != nil {
-			return "", fmt.Errorf("invalid user_id format: %w", err)
-		}
-	default:
-		return "", fmt.Errorf("user_id must be int, float64, or string")
-	}
-	
+
+	now := time.Now()
+	expirationTime := now.Add(TokenExpirationHours * time.Hour)
+
 	// Create claims
-	claims := Claims{
-		UserID:   userIDInt,
-		Username: username,
-		Email:    email,
+	claims := &Claims{
+		Data: data,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(TokenExpirationHours * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
-			Issuer:    "auth-service",
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			Issuer:    "core.auth",
 		},
 	}
-	
+
+	// Extract common fields from data if present
+	if userID, ok := data["user_id"].(string); ok {
+		claims.UserID = userID
+	}
+	if username, ok := data["username"].(string); ok {
+		claims.Username = username
+	}
+	if email, ok := data["email"].(string); ok {
+		claims.Email = email
+	}
+	if role, ok := data["role"].(string); ok {
+		claims.Role = role
+	}
+
 	// Create token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(a.jwtSecret)
+	tokenString, err := token.SignedString(tm.secretKey)
 	if err != nil {
-		a.logger.Printf("Failed to sign token for user %d: %v", userIDInt, err)
-		return "", fmt.Errorf("failed to create token: %w", err)
+		return "", NewAuthError(http.StatusInternalServerError, "failed to sign token", err)
 	}
-	
-	a.logger.Printf("Access token created for user %d (%s)", userIDInt, username)
+
 	return tokenString, nil
 }
 
 // VerifyToken validates and parses a JWT token
-func (a *AuthService) VerifyToken(tokenString string) (*jwt.Token, error) {
-	if tokenString == "" {
-		return nil, ErrMissingToken
+func VerifyToken(tokenString string) (*Claims, error) {
+	tm, err := NewTokenManager()
+	if err != nil {
+		return nil, err
 	}
-	
+
+	return tm.VerifyToken(tokenString)
+}
+
+// VerifyToken validates and parses a JWT token
+func (tm *TokenManager) VerifyToken(tokenString string) (*Claims, error) {
+	if tokenString == "" {
+		return nil, NewAuthError(http.StatusUnauthorized, "empty token", ErrInvalidToken)
+	}
+
+	// Parse token
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		// Verify signing method
+		// Validate signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return a.jwtSecret, nil
+		return tm.secretKey, nil
 	})
-	
+
 	if err != nil {
-		if errors.Is(err, jwt.ErrTokenExpired) {
-			return nil, ErrExpiredToken
+		if jwt.IsValidationError(err, jwt.ValidationErrorExpired) {
+			return nil, NewAuthError(http.StatusUnauthorized, "token expired", ErrExpiredToken)
 		}
-		if errors.Is(err, jwt.ErrTokenMalformed) {
-			return nil, ErrMalformedToken
-		}
-		if errors.Is(err, jwt.ErrSignatureInvalid) {
-			return nil, ErrInvalidSignature
-		}
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, NewAuthError(http.StatusUnauthorized, "invalid token", fmt.Errorf("%w: %v", ErrInvalidToken, err))
 	}
-	
-	if !token.Valid {
-		return nil, ErrInvalidToken
+
+	// Extract claims
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		return nil, NewAuthError(http.StatusUnauthorized, "invalid token claims", ErrInvalidToken)
 	}
-	
-	return token, nil
+
+	return claims, nil
 }
 
-// GetPasswordHash creates a bcrypt hash of the password with cost factor 12
+// GetPasswordHash generates a bcrypt hash of the password with cost factor 12
 func GetPasswordHash(password string) (string, error) {
-	if len(password) == 0 {
-		return "", fmt.Errorf("password cannot be empty")
+	if err := validatePassword(password); err != nil {
+		return "", NewAuthError(http.StatusBadRequest, "invalid password", err)
 	}
-	
-	if len(password) > 72 {
-		return "", fmt.Errorf("password too long (max 72 bytes for bcrypt)")
-	}
-	
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrPasswordHashing, err)
+		return "", NewAuthError(http.StatusInternalServerError, "failed to hash password", err)
 	}
-	
+
 	return string(hash), nil
 }
 
-// VerifyPassword compares a plain password with its bcrypt hash using constant-time comparison
+// VerifyPassword securely compares a plain password with its bcrypt hash
 func VerifyPassword(plainPassword, hashedPassword string) bool {
-	if len(plainPassword) == 0 || len(hashedPassword) == 0 {
+	if plainPassword == "" || hashedPassword == "" {
 		return false
 	}
-	
+
 	err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(plainPassword))
 	return err == nil
 }
 
+// validatePassword validates password requirements
+func validatePassword(password string) error {
+	if len(password) < MinPasswordLength {
+		return ErrPasswordTooShort
+	}
+	if len(password) > MaxPasswordLength {
+		return ErrPasswordTooLong
+	}
+	return nil
+}
+
 // GetCurrentUser extracts user information from a JWT token
-func (a *AuthService) GetCurrentUser(tokenString string) (*User, error) {
-	token, err := a.VerifyToken(tokenString)
+// This is a simplified implementation - in production, you might want to
+// fetch additional user data from a database
+func GetCurrentUser(tokenString string) (*User, error) {
+	claims, err := VerifyToken(tokenString)
 	if err != nil {
 		return nil, err
 	}
-	
-	claims, ok := token.Claims.(*Claims)
-	if !ok {
-		return nil, ErrInvalidToken
+
+	if claims.UserID == "" {
+		return nil, NewAuthError(http.StatusUnauthorized, "invalid user token", ErrUserNotFound)
 	}
-	
+
 	// Create user from claims
 	user := &User{
 		ID:       claims.UserID,
 		Username: claims.Username,
 		Email:    claims.Email,
-		IsActive: true, // Token existence implies active user, but verify with repo if needed
+		Role:     claims.Role,
+		IsActive: true, // Assume active if token is valid
 	}
-	
-	// Optionally verify user still exists and is active in database
-	if a.userRepo != nil {
-		ctx := context.Background()
-		dbUser, err := a.userRepo.GetUserByID(ctx, claims.UserID)
-		if err != nil {
-			a.logger.Printf("Failed to verify user %d from database: %v", claims.UserID, err)
-			return nil, ErrUserNotFound
-		}
-		
-		if !dbUser.IsActive {
-			a.logger.Printf("User %d (%s) is inactive", dbUser.ID, dbUser.Username)
-			return nil, ErrInactiveUser
-		}
-		
-		// Return database user data (more up-to-date)
-		return dbUser, nil
-	}
-	
+
 	return user, nil
 }
 
-// extractTokenFromHeader extracts Bearer token from Authorization header
-func extractTokenFromHeader(authHeader string) (string, error) {
+// ExtractTokenFromHeader extracts Bearer token from Authorization header
+func ExtractTokenFromHeader(authHeader string) (string, error) {
 	if authHeader == "" {
-		return "", ErrMissingToken
+		return "", NewAuthError(http.StatusUnauthorized, "missing authorization header", ErrMissingToken)
 	}
-	
+
 	if !strings.HasPrefix(authHeader, BearerPrefix) {
-		return "", ErrMalformedToken
+		return "", NewAuthError(http.StatusUnauthorized, "invalid authorization header format", ErrInvalidToken)
 	}
-	
+
 	token := strings.TrimPrefix(authHeader, BearerPrefix)
 	if token == "" {
-		return "", ErrMissingToken
+		return "", NewAuthError(http.StatusUnauthorized, "empty bearer token", ErrMissingToken)
 	}
-	
+
 	return token, nil
 }
 
-// AuthMiddleware creates HTTP middleware for protected routes
-func (a *AuthService) AuthMiddleware(next http.Handler) http.Handler {
+// AuthMiddleware provides HTTP middleware for protected routes
+func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get(AuthorizationHeader)
-		
-		token, err := extractTokenFromHeader(authHeader)
+		// Extract token from Authorization header
+		authHeader := r.Header.Get(AuthHeaderKey)
+		token, err := ExtractTokenFromHeader(authHeader)
 		if err != nil {
-			a.logger.Printf("Auth middleware - token extraction failed: %v", err)
-			a.writeErrorResponse(w, err, http.StatusUnauthorized)
+			handleAuthError(w, err)
 			return
 		}
-		
-		user, err := a.GetCurrentUser(token)
+
+		// Verify token
+		claims, err := VerifyToken(token)
 		if err != nil {
-			a.logger.Printf("Auth middleware - user verification failed: %v", err)
-			statusCode := http.StatusUnauthorized
-			if errors.Is(err, ErrUserNotFound) || errors.Is(err, ErrInactiveUser) {
-				statusCode = http.StatusForbidden
-			}
-			a.writeErrorResponse(w, err, statusCode)
+			handleAuthError(w, err)
 			return
 		}
+
+		// Add claims to request context
+		ctx := context.WithValue(r.Context(), "claims", claims)
+		ctx = context.WithValue(ctx, "user_id", claims.UserID)
 		
-		// Add user to request context
-		ctx := context.WithValue(r.Context(), "user", user)
-		ctx = context.WithValue(ctx, "token", token)
-		
-		// Continue to next handler
+		// Continue with the request
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// RequireActiveUser middleware ensures the user is active
-func (a *AuthService) RequireActiveUser(next http.Handler) http.Handler {
-	return a.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, ok := r.Context().Value("user").(*User)
-		if !ok {
-			a.logger.Printf("RequireActiveUser - user not found in context")
-			a.writeErrorResponse(w, ErrUserNotFound, http.StatusInternalServerError)
-			return
-		}
-		
-		if !user.IsActive {
-			a.logger.Printf("RequireActiveUser - user %d (%s) is inactive", user.ID, user.Username)
-			a.writeErrorResponse(w, ErrInactiveUser, http.StatusForbidden)
-			return
-		}
-		
-		next.ServeHTTP(w, r)
-	}))
-}
+// RequireRole creates middleware that requires specific role
+func RequireRole(role string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := r.Context().Value("claims").(*Claims)
+			if !ok {
+				handleAuthError(w, NewAuthError(http.StatusUnauthorized, "no authentication context", ErrInvalidToken))
+				return
+			}
 
-// GetUserFromContext extracts user from request context
-func GetUserFromContext(ctx context.Context) (*User, bool) {
-	user, ok := ctx.Value("user").(*User)
-	return user, ok
-}
+			if claims.Role != role {
+				handleAuthError(w, NewAuthError(http.StatusForbidden, "insufficient permissions", fmt.Errorf("required role: %s, got: %s", role, claims.Role)))
+				return
+			}
 
-// GetTokenFromContext extracts token from request context
-func GetTokenFromContext(ctx context.Context) (string, bool) {
-	token, ok := ctx.Value("token").(string)
-	return token, ok
-}
-
-// writeErrorResponse writes a JSON error response
-func (a *AuthService) writeErrorResponse(w http.ResponseWriter, err error, statusCode int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	
-	// Don't expose internal errors to clients
-	message := "Authentication failed"
-	switch {
-	case errors.Is(err, ErrMissingToken):
-		message = "Missing authorization token"
-	case errors.Is(err, ErrMalformedToken):
-		message = "Malformed authorization token"
-	case errors.Is(err, ErrExpiredToken):
-		message = "Token has expired"
-	case errors.Is(err, ErrInvalidToken):
-		message = "Invalid token"
-	case errors.Is(err, ErrInactiveUser):
-		message = "User account is inactive"
-	case errors.Is(err, ErrUserNotFound):
-		message = "User not found"
-	}
-	
-	response := ErrorResponse{
-		Success: false,
-		Error:   message,
-		Code:    statusCode,
-	}
-	
-	// In a real application, use a proper JSON encoder
-	fmt.Fprintf(w, `{"success":false,"error":"%s","code":%d}`, response.Error, response.Code)
-}
-```
-
-## core/auth/auth_test.go
-
-```go
-package auth
-
-import (
-	"context"
-	"errors"
-	"log"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"testing"
-	"time"
-
-	"github.com/golang-jwt/jwt/v5"
-)
-
-// MockUserRepository for testing
-type MockUserRepository struct {
-	users map[int]*User
-}
-
-func NewMockUserRepository() *MockUserRepository {
-	return &MockUserRepository{
-		users: map[int]*User{
-			1: {ID: 1, Username: "testuser", Email: "test@example.com", IsActive: true},
-			2: {ID: 2, Username: "inactive", Email: "inactive@example.com", IsActive: false},
-		},
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
-func (m *MockUserRepository) GetUserByID(ctx context.Context, id int) (*User, error) {
-	user, exists := m.users[id]
-	if !exists {
-		return nil, ErrUserNotFound
+// GetClaimsFromContext extracts claims from request context
+func GetClaimsFromContext(ctx context.Context) (*Claims, error) {
+	claims, ok := ctx.Value("claims").(*Claims)
+	if !ok {
+		return nil, NewAuthError(http.StatusUnauthorized, "no authentication context", ErrInvalidToken)
+	}
+	return claims, nil
+}
+
+// GetUserIDFromContext extracts user ID from request context
+func GetUserIDFromContext(ctx context.Context) (string, error) {
+	userID, ok := ctx.Value("user_id").(string)
+	if !ok || userID == "" {
+		return "", NewAuthError(http.StatusUnauthorized, "no user context", ErrUserNotFound)
+	}
+	return userID, nil
+}
+
+// handleAuthError handles authentication errors in HTTP responses
+func handleAuthError(w http.ResponseWriter, err error) {
+	var authErr *AuthError
+	if fmt.Errorf("%w", err, &authErr) {
+		http.Error(w, authErr.Message, authErr.Code)
+	} else {
+		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+	}
+}
+
+// GenerateSecureToken generates a cryptographically secure random token
+// Useful for password reset tokens, API keys, etc.
+func GenerateSecureToken(length int) (string, error) {
+	if length <= 0 {
+		length = 32
+	}
+
+	bytes := make([]byte, length)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("failed to generate secure token: %w", err)
+	}
+
+	return base64.URLEncoding.EncodeToString(bytes), nil
+}
+
+// RefreshToken creates a new token with extended expiration
+// This can be used to implement token refresh functionality
+func RefreshToken(oldTokenString string) (string, error) {
+	claims, err := VerifyToken(oldTokenString)
+	if err != nil {
+		return "", fmt.Errorf("cannot refresh invalid token: %w", err)
+	}
+
+	// Create new token with same data but fresh expiration
+	data := claims.Data
+	if data == nil {
+		data = make(map[string]interface{})
+	}
+
+	// Ensure user data is preserved
+	data["user_id"] = claims.UserID
+	data["username"] = claims.Username
+	data["email"] = claims.Email
+	data["role"] = claims.Role
+
+	return CreateAccessToken(data)
+}
+
+// Example usage:
+/*
+func main() {
+	// Create a password hash
+	hash, err := auth.GetPasswordHash("mySecurePassword123")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Verify password
+	isValid := auth.VerifyPassword("mySecurePassword123", hash)
+	fmt.Printf("Password valid: %v\n", isValid)
+
+	// Create access token
+	userData := map[string]interface{}{
+		"user_id":  "user123",
+		"username": "john_doe",
+		"email":    "john@example.com",
+		"role":     "admin",
+	}
+
+	token, err := auth.CreateAccessToken(userData)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Verify token
+	claims, err := auth.VerifyToken(token)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("User ID: %s\n", claims.UserID)
+
+	// Get current user
+	user, err := auth.GetCurrentUser(token)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("Current user: %+v\n", user)
+
+	// HTTP server with auth middleware
+	mux := http.NewServeMux()
+	
+	// Protected route
+	mux.Handle("/protected", auth.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID, _ := auth.GetUserIDFromContext(r.Context())
+		fmt.Fprintf(w, "Hello, user %s!",
