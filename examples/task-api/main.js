@@ -1,324 +1,196 @@
-Here's a complete JavaScript/Node.js equivalent of a Python FastAPI application entry point:
+/**
+ * Node.js Application Entry Point
+ * 
+ * Required dependencies in package.json:
+ * {
+ *   "type": "module",
+ *   "dependencies": {
+ *     "express": "^4.18.2"
+ *   },
+ *   "devDependencies": {
+ *     "nodemon": "^3.0.1"
+ *   },
+ *   "scripts": {
+ *     "start": "node main.js",
+ *     "dev": "nodemon main.js"
+ *   }
+ * }
+ */
 
-## main.js (Entry Point)
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import process from 'process';
 
-```javascript
-import app from './app.js';
-import { createServer } from 'http';
+// Get current file path for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// Configuration with environment variable overrides
+// Configuration
 const CONFIG = {
-    port: parseInt(process.env.PORT) || 8000,
-    host: process.env.HOST || '0.0.0.0',
-    isDevelopment: process.env.NODE_ENV !== 'production'
+    HOST: '0.0.0.0',
+    PORT: 8000,
+    NODE_ENV: process.env.NODE_ENV || 'development'
 };
 
-// Validate port number
-function validatePort(port) {
-    if (isNaN(port) || port < 1 || port > 65535) {
-        throw new Error(`Invalid port number: ${port}. Port must be between 1 and 65535.`);
-    }
-    return port;
-}
+// Global server reference for cleanup
+let server = null;
 
-// Enhanced error handler for server startup
-function handleServerError(error) {
-    const { port, host } = CONFIG;
-    
-    switch (error.code) {
-        case 'EADDRINUSE':
-            console.error(`❌ Error: Port ${port} is already in use`);
-            console.error(`   Try using a different port: PORT=3000 node main.js`);
-            break;
-        case 'EACCES':
-            console.error(`❌ Error: Permission denied to bind to ${host}:${port}`);
-            console.error(`   Try using a port number above 1024 or run with elevated privileges`);
-            break;
-        case 'ENOTFOUND':
-            console.error(`❌ Error: Host ${host} not found`);
-            break;
-        case 'ECONNREFUSED':
-            console.error(`❌ Error: Connection refused on ${host}:${port}`);
-            break;
-        default:
-            console.error(`❌ Server startup error:`, error.message);
-            console.error(`   Code: ${error.code || 'UNKNOWN'}`);
-    }
-    
-    console.error(`\n🔧 Troubleshooting tips:`);
-    console.error(`   • Check if another process is using port ${port}: lsof -i :${port}`);
-    console.error(`   • Try a different port: PORT=3001 node main.js`);
-    console.error(`   • Ensure you have proper network permissions\n`);
-    
-    process.exit(1);
-}
-
-// Graceful shutdown handler
-function setupGracefulShutdown(server) {
-    const shutdown = (signal) => {
-        console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
-        
-        server.close((err) => {
-            if (err) {
-                console.error('❌ Error during server shutdown:', err.message);
-                process.exit(1);
-            }
-            
-            console.log('✅ Server closed successfully');
-            console.log('👋 Goodbye!');
-            process.exit(0);
-        });
-        
-        // Force shutdown after 10 seconds
-        setTimeout(() => {
-            console.error('⚠️  Forced shutdown after timeout');
-            process.exit(1);
-        }, 10000);
-    };
-    
-    // Handle different termination signals
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    
-    // Handle uncaught exceptions
-    process.on('uncaughtException', (error) => {
-        console.error('💥 Uncaught Exception:', error);
-        shutdown('UNCAUGHT_EXCEPTION');
-    });
-    
-    process.on('unhandledRejection', (reason, promise) => {
-        console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-        shutdown('UNHANDLED_REJECTION');
-    });
-}
-
-// Development mode features
-function setupDevelopmentMode() {
-    if (!CONFIG.isDevelopment) return;
-    
-    console.log('🔧 Development mode enabled');
-    
-    // Enhanced logging for development
-    app.use((req, res, next) => {
-        const timestamp = new Date().toISOString();
-        console.log(`[${timestamp}] ${req.method} ${req.url}`);
-        next();
-    });
-    
-    // Development error handler with detailed stack traces
-    app.use((err, req, res, next) => {
-        console.error('💥 Development Error:', err.stack);
-        res.status(500).json({
-            error: err.message,
-            stack: err.stack,
-            timestamp: new Date().toISOString()
-        });
-    });
-}
-
-// Main server startup function
-async function startServer() {
+/**
+ * Import the Express app with error handling
+ */
+async function importApp() {
     try {
-        // Validate configuration
-        const port = validatePort(CONFIG.port);
-        const { host, isDevelopment } = CONFIG;
-        
-        console.log('🚀 Starting server...');
-        console.log(`📊 Environment: ${isDevelopment ? 'development' : 'production'}`);
-        console.log(`🌐 Host: ${host}`);
-        console.log(`🔌 Port: ${port}`);
-        
-        // Setup development features
-        setupDevelopmentMode();
-        
-        // Create HTTP server
-        const server = createServer(app);
-        
-        // Setup graceful shutdown
-        setupGracefulShutdown(server);
-        
-        // Start listening
-        server.listen(port, host, () => {
-            console.log('\n✅ Server started successfully!');
-            console.log(`🌍 Server running at http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
-            
-            if (isDevelopment) {
-                console.log('🔄 Auto-reload enabled (restart server to see changes)');
-                console.log('📝 Detailed logging enabled');
-            }
-            
-            console.log('\n📋 Available endpoints:');
-            console.log(`   • Health check: http://localhost:${port}/health`);
-            console.log(`   • API docs: http://localhost:${port}/docs`);
-            console.log('\n⏹️  Press Ctrl+C to stop the server\n');
-        });
-        
-        // Handle server errors
-        server.on('error', handleServerError);
-        
-        // Handle client errors
-        server.on('clientError', (err, socket) => {
-            console.warn('⚠️  Client error:', err.message);
-            socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
-        });
-        
+        const appModule = await import('./app.js');
+        return appModule.default || appModule.app;
     } catch (error) {
-        console.error('💥 Failed to start server:', error.message);
+        console.error('❌ Failed to import app module:', error.message);
+        console.error('   Make sure ./app.js exists and exports an Express app');
         process.exit(1);
     }
 }
 
-// Start the server
-startServer().catch((error) => {
-    console.error('💥 Unexpected error during server startup:', error);
+/**
+ * Start the server with comprehensive error handling
+ */
+async function startServer() {
+    try {
+        // Import the Express app
+        const app = await importApp();
+        
+        if (!app) {
+            throw new Error('App module did not export a valid Express application');
+        }
+
+        // Create server with promise wrapper for better error handling
+        const startServerPromise = new Promise((resolve, reject) => {
+            server = app.listen(CONFIG.PORT, CONFIG.HOST, (error) => {
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve(server);
+                }
+            });
+
+            // Handle server errors
+            server.on('error', (error) => {
+                if (error.code === 'EADDRINUSE') {
+                    reject(new Error(`Port ${CONFIG.PORT} is already in use. Please choose a different port or stop the conflicting service.`));
+                } else if (error.code === 'EACCES') {
+                    reject(new Error(`Permission denied to bind to port ${CONFIG.PORT}. Try using a port number above 1024.`));
+                } else {
+                    reject(error);
+                }
+            });
+        });
+
+        // Wait for server to start
+        await startServerPromise;
+
+        // Success logging
+        console.log('🚀 Server started successfully!');
+        console.log(`📍 Server running at: http://${CONFIG.HOST}:${CONFIG.PORT}`);
+        console.log(`🌍 Environment: ${CONFIG.NODE_ENV}`);
+        
+        if (CONFIG.NODE_ENV === 'development') {
+            console.log('🔄 Development mode: Use "npm run dev" for auto-reload');
+            console.log('💡 API docs typically available at: http://localhost:8000/docs');
+        }
+        
+        console.log('⏹️  Press Ctrl+C to stop the server');
+
+    } catch (error) {
+        console.error('❌ Failed to start server:', error.message);
+        process.exit(1);
+    }
+}
+
+/**
+ * Graceful shutdown handler
+ */
+async function gracefulShutdown(signal) {
+    console.log(`\n📡 Received ${signal}. Starting graceful shutdown...`);
+    
+    if (server) {
+        try {
+            // Close server with timeout
+            const shutdownPromise = new Promise((resolve, reject) => {
+                server.close((error) => {
+                    if (error) {
+                        reject(error);
+                    } else {
+                        resolve();
+                    }
+                });
+            });
+
+            // Set shutdown timeout
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Shutdown timeout')), 10000);
+            });
+
+            await Promise.race([shutdownPromise, timeoutPromise]);
+            console.log('✅ Server closed successfully');
+            
+        } catch (error) {
+            console.error('⚠️  Error during shutdown:', error.message);
+            console.log('🔄 Forcing shutdown...');
+        }
+    }
+    
+    console.log('👋 Goodbye!');
+    process.exit(0);
+}
+
+/**
+ * Setup signal handlers for graceful shutdown
+ */
+function setupSignalHandlers() {
+    // Handle different termination signals
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+        console.error('💥 Uncaught Exception:', error);
+        gracefulShutdown('UNCAUGHT_EXCEPTION');
+    });
+    
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (reason, promise) => {
+        console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+        gracefulShutdown('UNHANDLED_REJECTION');
+    });
+}
+
+/**
+ * Main execution function - equivalent to Python's if __name__ == "__main__"
+ */
+async function main() {
+    // Check if this file is being run directly
+    if (process.argv[1] === __filename || process.argv[1].endsWith('main.js')) {
+        console.log('🌟 Starting Node.js application...');
+        console.log(`📦 Node.js version: ${process.version}`);
+        console.log(`📁 Working directory: ${process.cwd()}`);
+        
+        // Setup graceful shutdown
+        setupSignalHandlers();
+        
+        // Start the server
+        await startServer();
+    }
+}
+
+/**
+ * Export for testing or programmatic use
+ */
+export { startServer, gracefulShutdown, CONFIG };
+
+/**
+ * Execute main function if this file is run directly
+ * This is the ES6 equivalent of Python's if __name__ == "__main__"
+ */
+main().catch((error) => {
+    console.error('💥 Fatal error in main():', error);
     process.exit(1);
 });
-```
-
-## app.js (Express Application)
-
-```javascript
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import compression from 'compression';
-
-const app = express();
-
-// Security middleware
-app.use(helmet());
-
-// CORS configuration
-app.use(cors({
-    origin: process.env.NODE_ENV === 'production' 
-        ? ['https://yourdomain.com'] 
-        : true,
-    credentials: true
-}));
-
-// Compression middleware
-app.use(compression());
-
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Health check endpoint (equivalent to FastAPI's automatic health check)
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        environment: process.env.NODE_ENV || 'development'
-    });
-});
-
-// API documentation endpoint
-app.get('/docs', (req, res) => {
-    res.json({
-        message: 'API Documentation',
-        version: '1.0.0',
-        endpoints: {
-            health: '/health',
-            docs: '/docs'
-        }
-    });
-});
-
-// Root endpoint
-app.get('/', (req, res) => {
-    res.json({
-        message: 'Welcome to the API',
-        version: '1.0.0',
-        documentation: '/docs'
-    });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-    res.status(404).json({
-        error: 'Not Found',
-        message: `Route ${req.originalUrl} not found`,
-        timestamp: new Date().toISOString()
-    });
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-    const isDevelopment = process.env.NODE_ENV !== 'production';
-    
-    console.error('💥 Error:', err.message);
-    
-    res.status(err.status || 500).json({
-        error: err.message || 'Internal Server Error',
-        ...(isDevelopment && { stack: err.stack }),
-        timestamp: new Date().toISOString()
-    });
-});
-
-export default app;
-```
-
-## package.json
-
-```json
-{
-  "name": "express-fastapi-equivalent",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "Express.js equivalent of FastAPI application",
-  "main": "main.js",
-  "scripts": {
-    "start": "node main.js",
-    "dev": "NODE_ENV=development nodemon main.js",
-    "prod": "NODE_ENV=production node main.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "helmet": "^7.0.0",
-    "compression": "^1.7.4"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  },
-  "engines": {
-    "node": ">=16.0.0"
-  }
-}
-```
-
-## Usage Examples
-
-### Basic startup:
-```bash
-node main.js
-```
-
-### Development mode with auto-reload:
-```bash
-npm run dev
-```
-
-### Production mode:
-```bash
-npm run prod
-```
-
-### Custom port and host:
-```bash
-PORT=3000 HOST=127.0.0.1 node main.js
-```
-
-## Key Features
-
-1. **FastAPI Equivalent**: Mirrors FastAPI's functionality with Express.js
-2. **Container Ready**: Uses `0.0.0.0` host for Docker compatibility
-3. **Development Mode**: Auto-reload equivalent with enhanced logging
-4. **Error Handling**: Comprehensive error handling for all common scenarios
-5. **Graceful Shutdown**: Proper cleanup on SIGTERM/SIGINT
-6. **Environment Support**: Development vs production configuration
-7. **Security**: Includes helmet, CORS, and compression middleware
-8. **Health Checks**: Built-in health and documentation endpoints
-
-This implementation provides a production-ready Express.js server that closely matches the functionality and robustness of a FastAPI application.

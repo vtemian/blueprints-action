@@ -1,569 +1,522 @@
-I'll provide a complete implementation of the user management and authentication API module. Here's the full code structure:
-
-## Package.json
-
-```json
-{
-  "name": "user-auth-api",
-  "version": "1.0.0",
-  "description": "User management and authentication API",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "jsonwebtoken": "^9.0.2",
-    "bcrypt": "^5.1.1",
-    "express-validator": "^7.0.1",
-    "express-rate-limit": "^6.10.0",
-    "helmet": "^7.0.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "morgan": "^1.10.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  }
-}
-```
-
-## .env
-
-```env
-NODE_ENV=development
-PORT=3000
-JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
-JWT_EXPIRES_IN=7d
-BCRYPT_SALT_ROUNDS=12
-```
-
-## server.js
-
-```javascript
 /**
- * Main server file for User Authentication API
- * @author Your Name
- * @version 1.0.0
+ * User Management and Authentication API Module
+ * Provides complete user registration, authentication, and profile management
+ * @module api.users
  */
 
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
-const rateLimit = require('express-rate-limit');
-require('dotenv').config();
+import express from 'express';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+import { body, validationResult } from 'express-validator';
+import mongoose from 'mongoose';
 
-const userRoutes = require('./routes/users');
-const { errorHandler, notFound } = require('./middleware/errorMiddleware');
+const router = express.Router();
 
-const app = express();
+// Constants
+const SALT_ROUNDS = 12;
+const JWT_EXPIRES_IN = '24h';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
 
-// Security middleware
-app.use(helmet());
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
-  credentials: true
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: {
-    success: false,
-    message: 'Too many requests from this IP, please try again later.'
+// User Schema (assuming Mongoose model)
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    trim: true
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 8
+  },
+  firstName: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  lastName: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  lastLogin: {
+    type: Date,
+    default: null
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
   }
 });
 
-app.use(limiter);
+// Remove password from JSON output
+userSchema.methods.toJSON = function() {
+  const user = this.toObject();
+  delete user.password;
+  return user;
+};
 
-// Logging middleware
-app.use(morgan('combined', {
-  skip: (req, res) => {
-    // Don't log sensitive endpoints in production
-    return process.env.NODE_ENV === 'production' && 
-           (req.url.includes('/login') || req.url.includes('/register'));
-  }
-}));
+const User = mongoose.model('User', userSchema);
 
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// Routes
-app.use('/api/users', userRoutes);
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'Server is running',
-    timestamp: new Date().toISOString()
-  });
+/**
+ * Standard API response formatter
+ * @param {boolean} success - Operation success status
+ * @param {Object} data - Response data or error information
+ * @returns {Object} Formatted response object
+ */
+const formatResponse = (success, data) => ({
+  success,
+  ...(success ? { data } : { error: data })
 });
 
-// Error handling middleware
-app.use(notFound);
-app.use(errorHandler);
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
-});
-
-module.exports = app;
-```
-
-## models/User.js
-
-```javascript
 /**
- * User model with in-memory storage simulation
- * In production, this would be replaced with actual database models
- * @module models/User
+ * Validation middleware for user registration
  */
-
-/**
- * In-memory user storage (replace with actual database in production)
- */
-let users = [];
-let nextId = 1;
+export const validateRegistration = [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email address'),
+  body('password')
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters long')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+    .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
+  body('firstName')
+    .trim()
+    .isLength({ min: 1, max: 50 })
+    .withMessage('First name is required and must be less than 50 characters'),
+  body('lastName')
+    .trim()
+    .isLength({ min: 1, max: 50 })
+    .withMessage('Last name is required and must be less than 50 characters')
+];
 
 /**
- * User class representing user entity
+ * Validation middleware for user login
  */
-class User {
-  /**
-   * Create a new user
-   * @param {Object} userData - User data
-   * @param {string} userData.name - User's full name
-   * @param {string} userData.email - User's email address
-   * @param {string} userData.password - User's hashed password
-   */
-  constructor({ name, email, password }) {
-    this.id = nextId++;
-    this.name = name;
-    this.email = email.toLowerCase();
-    this.password = password;
-    this.createdAt = new Date();
-    this.updatedAt = new Date();
-    this.lastLogin = null;
-  }
-
-  /**
-   * Convert user to JSON, excluding sensitive fields
-   * @param {boolean} includeSensitive - Whether to include sensitive data
-   * @returns {Object} User object without sensitive data
-   */
-  toJSON(includeSensitive = false) {
-    const userObj = { ...this };
-    if (!includeSensitive) {
-      delete userObj.password;
-    }
-    return userObj;
-  }
-
-  /**
-   * Update user data
-   * @param {Object} updateData - Data to update
-   */
-  update(updateData) {
-    Object.assign(this, updateData);
-    this.updatedAt = new Date();
-  }
-}
+export const validateLogin = [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email address'),
+  body('password')
+    .notEmpty()
+    .withMessage('Password is required')
+];
 
 /**
- * User repository methods
+ * Validation middleware for profile updates
  */
-const UserModel = {
-  /**
-   * Find user by email
-   * @param {string} email - User email
-   * @returns {User|null} User object or null
-   */
-  findByEmail: async (email) => {
-    return users.find(user => user.email === email.toLowerCase()) || null;
-  },
+export const validateProfileUpdate = [
+  body('email')
+    .optional()
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email address'),
+  body('firstName')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 50 })
+    .withMessage('First name must be less than 50 characters'),
+  body('lastName')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 50 })
+    .withMessage('Last name must be less than 50 characters'),
+  body('currentPassword')
+    .if(body('email').exists())
+    .notEmpty()
+    .withMessage('Current password is required when changing email address')
+];
 
-  /**
-   * Find user by ID
-   * @param {number} id - User ID
-   * @returns {User|null} User object or null
-   */
-  findById: async (id) => {
-    return users.find(user => user.id === parseInt(id)) || null;
-  },
-
-  /**
-   * Create new user
-   * @param {Object} userData - User data
-   * @returns {User} Created user object
-   */
-  create: async (userData) => {
-    const user = new User(userData);
-    users.push(user);
-    return user;
-  },
-
-  /**
-   * Update user by ID
-   * @param {number} id - User ID
-   * @param {Object} updateData - Data to update
-   * @returns {User|null} Updated user or null
-   */
-  updateById: async (id, updateData) => {
-    const user = await UserModel.findById(id);
-    if (user) {
-      user.update(updateData);
-      return user;
-    }
-    return null;
-  },
-
-  /**
-   * Delete user by ID
-   * @param {number} id - User ID
-   * @returns {boolean} Success status
-   */
-  deleteById: async (id) => {
-    const index = users.findIndex(user => user.id === parseInt(id));
-    if (index !== -1) {
-      users.splice(index, 1);
+/**
+ * Validation middleware for password change
+ */
+export const validatePasswordChange = [
+  body('currentPassword')
+    .notEmpty()
+    .withMessage('Current password is required'),
+  body('newPassword')
+    .isLength({ min: 8 })
+    .withMessage('New password must be at least 8 characters long')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+    .withMessage('New password must contain at least one uppercase letter, one lowercase letter, and one number'),
+  body('confirmPassword')
+    .custom((value, { req }) => {
+      if (value !== req.body.newPassword) {
+        throw new Error('Password confirmation does not match new password');
+      }
       return true;
-    }
-    return false;
-  }
-};
-
-module.exports = { User, UserModel };
-```
-
-## utils/errors.js
-
-```javascript
-/**
- * Custom error classes for the application
- * @module utils/errors
- */
+    })
+];
 
 /**
- * Base application error class
- */
-class AppError extends Error {
-  /**
-   * Create an application error
-   * @param {string} message - Error message
-   * @param {number} statusCode - HTTP status code
-   * @param {boolean} isOperational - Whether error is operational
-   */
-  constructor(message, statusCode, isOperational = true) {
-    super(message);
-    this.statusCode = statusCode;
-    this.isOperational = isOperational;
-    this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
-
-    Error.captureStackTrace(this, this.constructor);
-  }
-}
-
-/**
- * Validation error class
- */
-class ValidationError extends AppError {
-  /**
-   * Create a validation error
-   * @param {string} message - Error message
-   * @param {Array} errors - Validation errors array
-   */
-  constructor(message, errors = []) {
-    super(message, 400);
-    this.errors = errors;
-  }
-}
-
-/**
- * Authentication error class
- */
-class AuthenticationError extends AppError {
-  /**
-   * Create an authentication error
-   * @param {string} message - Error message
-   */
-  constructor(message = 'Authentication failed') {
-    super(message, 401);
-  }
-}
-
-/**
- * Authorization error class
- */
-class AuthorizationError extends AppError {
-  /**
-   * Create an authorization error
-   * @param {string} message - Error message
-   */
-  constructor(message = 'Access denied') {
-    super(message, 403);
-  }
-}
-
-/**
- * Not found error class
- */
-class NotFoundError extends AppError {
-  /**
-   * Create a not found error
-   * @param {string} message - Error message
-   */
-  constructor(message = 'Resource not found') {
-    super(message, 404);
-  }
-}
-
-/**
- * Conflict error class
- */
-class ConflictError extends AppError {
-  /**
-   * Create a conflict error
-   * @param {string} message - Error message
-   */
-  constructor(message = 'Resource conflict') {
-    super(message, 409);
-  }
-}
-
-module.exports = {
-  AppError,
-  ValidationError,
-  AuthenticationError,
-  AuthorizationError,
-  NotFoundError,
-  ConflictError
-};
-```
-
-## middleware/errorMiddleware.js
-
-```javascript
-/**
- * Error handling middleware
- * @module middleware/errorMiddleware
- */
-
-const { AppError } = require('../utils/errors');
-
-/**
- * Handle 404 not found errors
+ * Middleware to handle validation errors
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
- * @param {Function} next - Express next function
+ * @param {Function} next - Express next middleware function
  */
-const notFound = (req, res, next) => {
-  const error = new AppError(`Not found - ${req.originalUrl}`, 404);
-  next(error);
+export const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    const errorMessages = errors.array().reduce((acc, error) => {
+      acc[error.path] = error.msg;
+      return acc;
+    }, {});
+    
+    return res.status(400).json(formatResponse(false, {
+      message: 'Validation failed',
+      fields: errorMessages
+    }));
+  }
+  next();
 };
 
 /**
- * Global error handler middleware
- * @param {Error} err - Error object
+ * Authentication middleware to verify JWT tokens
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
- * @param {Function} next - Express next function
+ * @param {Function} next - Express next middleware function
  */
-const errorHandler = (err, req, res, next) => {
-  let error = { ...err };
-  error.message = err.message;
-
-  // Log error (exclude sensitive information)
-  if (process.env.NODE_ENV === 'development') {
-    console.error(err);
-  }
-
-  // Mongoose bad ObjectId
-  if (err.name === 'CastError') {
-    const message = 'Resource not found';
-    error = new AppError(message, 404);
-  }
-
-  // Mongoose duplicate key
-  if (err.code === 11000) {
-    const message = 'Duplicate field value entered';
-    error = new AppError(message, 409);
-  }
-
-  // Mongoose validation error
-  if (err.name === 'ValidationError') {
-    const message = Object.values(err.errors).map(val => val.message);
-    error = new AppError(message, 400);
-  }
-
-  // JWT errors
-  if (err.name === 'JsonWebTokenError') {
-    const message = 'Invalid token';
-    error = new AppError(message, 401);
-  }
-
-  if (err.name === 'TokenExpiredError') {
-    const message = 'Token expired';
-    error = new AppError(message, 401);
-  }
-
-  const response = {
-    success: false,
-    message: error.message || 'Server Error'
-  };
-
-  // Include validation errors if present
-  if (error.errors) {
-    response.errors = error.errors;
-  }
-
-  // Don't leak error details in production
-  if (process.env.NODE_ENV === 'development') {
-    response.stack = err.stack;
-  }
-
-  res.status(error.statusCode || 500).json(response);
-};
-
-module.exports = {
-  notFound,
-  errorHandler
-};
-```
-
-## middleware/auth.js
-
-```javascript
-/**
- * Authentication middleware
- * @module middleware/auth
- */
-
-const jwt = require('jsonwebtoken');
-const { UserModel } = require('../models/User');
-const { AuthenticationError } = require('../utils/errors');
-
-/**
- * JWT authentication middleware
- * Verifies JWT token and adds user to request object
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
- */
-const authenticate = async (req, res, next) => {
+export const authenticateToken = async (req, res, next) => {
   try {
-    let token;
-
-    // Check for token in Authorization header
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-
-    // Check for token in cookies (if using cookie-based auth)
-    if (!token && req.cookies && req.cookies.token) {
-      token = req.cookies.token;
-    }
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
     if (!token) {
-      throw new AuthenticationError('Access denied. No token provided.');
+      return res.status(401).json(formatResponse(false, {
+        message: 'Access token required'
+      }));
     }
 
-    try {
-      // Verify token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      
-      // Get user from database
-      const user = await UserModel.findById(decoded.id);
-      
-      if (!user) {
-        throw new AuthenticationError('Token is valid but user no longer exists.');
-      }
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(decoded.userId);
 
-      // Add user to request object (exclude password)
-      req.user = user.toJSON();
-      next();
-    } catch (jwtError) {
-      if (jwtError.name === 'TokenExpiredError') {
-        throw new AuthenticationError('Token has expired.');
-      } else if (jwtError.name === 'JsonWebTokenError') {
-        throw new AuthenticationError('Invalid token.');
-      } else {
-        throw jwtError;
-      }
+    if (!user) {
+      return res.status(401).json(formatResponse(false, {
+        message: 'Invalid token - user not found'
+      }));
     }
+
+    req.user = user;
+    next();
   } catch (error) {
-    next(error);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json(formatResponse(false, {
+        message: 'Invalid token'
+      }));
+    }
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json(formatResponse(false, {
+        message: 'Token expired'
+      }));
+    }
+    
+    console.error('Authentication error:', error);
+    return res.status(500).json(formatResponse(false, {
+      message: 'Authentication service error'
+    }));
   }
 };
 
 /**
  * Generate JWT token for user
- * @param {number} userId - User ID
+ * @param {string} userId - User ID
  * @returns {string} JWT token
  */
 const generateToken = (userId) => {
   return jwt.sign(
-    { id: userId },
-    process.env.JWT_SECRET,
-    {
-      expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-      issuer: 'user-auth-api',
-      audience: 'user-auth-api-users'
-    }
+    { userId },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
   );
 };
 
 /**
- * Optional authentication middleware
- * Similar to authenticate but doesn't throw error if no token
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
+ * Hash password using bcrypt
+ * @param {string} password - Plain text password
+ * @returns {Promise<string>} Hashed password
  */
-const optionalAuth = async (req, res, next) => {
-  try {
-    let token;
-
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-
-    if (token) {
-      try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await UserModel.findById(decoded.id);
-        
-        if (user) {
-          req.user = user.toJSON();
-        }
-      } catch (jwtError) {
-        // Silently fail for optional auth
-        console.log('Optional auth failed:', jwtError.message);
-      }
-    }
-
-    next();
-  } catch (error) {
-    next(error);
-  }
+const hashPassword = async (password) => {
+  return await bcrypt.hash(password, SALT_ROUNDS);
 };
 
-module.exports = {
-  authenticate,
-  generateToken,
-  optionalAuth
-};
-```
-
-## middleware/validation.js
-
-```javascript
 /**
- * Validation middleware using express-validator
- * @module middleware/
+ * Compare password with hash
+ * @param {string} password - Plain text password
+ * @param {string} hash - Hashed password
+ * @returns {Promise<boolean>} Comparison result
+ */
+const comparePassword = async (password, hash) => {
+  return await bcrypt.compare(password, hash);
+};
+
+/**
+ * POST /api/users/register
+ * Register a new user with email uniqueness check
+ * Rate limiting recommended: 5 requests per 15 minutes per IP
+ */
+router.post('/register', 
+  validateRegistration,
+  handleValidationErrors,
+  async (req, res) => {
+    try {
+      const { email, password, firstName, lastName } = req.body;
+
+      // Check if user already exists
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(409).json(formatResponse(false, {
+          message: 'Email address is already registered',
+          field: 'email'
+        }));
+      }
+
+      // Hash password
+      const hashedPassword = await hashPassword(password);
+
+      // Create new user
+      const user = new User({
+        email,
+        password: hashedPassword,
+        firstName,
+        lastName
+      });
+
+      await user.save();
+
+      // Generate token
+      const token = generateToken(user._id);
+
+      res.status(201).json(formatResponse(true, {
+        message: 'User registered successfully',
+        user: user.toJSON(),
+        token
+      }));
+
+    } catch (error) {
+      console.error('Registration error:', error);
+      
+      // Handle MongoDB duplicate key error
+      if (error.code === 11000) {
+        return res.status(409).json(formatResponse(false, {
+          message: 'Email address is already registered',
+          field: 'email'
+        }));
+      }
+
+      res.status(500).json(formatResponse(false, {
+        message: 'Registration failed due to server error'
+      }));
+    }
+  }
+);
+
+/**
+ * POST /api/users/login
+ * Authenticate user with password verification
+ * Rate limiting recommended: 10 requests per 15 minutes per IP
+ */
+router.post('/login',
+  validateLogin,
+  handleValidationErrors,
+  async (req, res) => {
+    try {
+      const { email, password } = req.body;
+
+      // Find user by email
+      const user = await User.findOne({ email }).select('+password');
+      if (!user) {
+        return res.status(401).json(formatResponse(false, {
+          message: 'Invalid email or password'
+        }));
+      }
+
+      // Verify password
+      const isValidPassword = await comparePassword(password, user.password);
+      if (!isValidPassword) {
+        return res.status(401).json(formatResponse(false, {
+          message: 'Invalid email or password'
+        }));
+      }
+
+      // Update last login timestamp
+      user.lastLogin = new Date();
+      await user.save();
+
+      // Generate token
+      const token = generateToken(user._id);
+
+      res.json(formatResponse(true, {
+        message: 'Login successful',
+        user: user.toJSON(),
+        token
+      }));
+
+    } catch (error) {
+      console.error('Login error:', error);
+      res.status(500).json(formatResponse(false, {
+        message: 'Login failed due to server error'
+      }));
+    }
+  }
+);
+
+/**
+ * GET /api/users/me
+ * Get authenticated user profile
+ */
+router.get('/me',
+  authenticateToken,
+  async (req, res) => {
+    try {
+      res.json(formatResponse(true, {
+        user: req.user.toJSON()
+      }));
+    } catch (error) {
+      console.error('Get profile error:', error);
+      res.status(500).json(formatResponse(false, {
+        message: 'Failed to retrieve user profile'
+      }));
+    }
+  }
+);
+
+/**
+ * PUT /api/users/me
+ * Update user profile with email change validation
+ */
+router.put('/me',
+  authenticateToken,
+  validateProfileUpdate,
+  handleValidationErrors,
+  async (req, res) => {
+    try {
+      const { email, firstName, lastName, currentPassword } = req.body;
+      const user = req.user;
+
+      // If email is being changed, verify current password
+      if (email && email !== user.email) {
+        if (!currentPassword) {
+          return res.status(400).json(formatResponse(false, {
+            message: 'Current password is required when changing email address',
+            field: 'currentPassword'
+          }));
+        }
+
+        // Verify current password
+        const userWithPassword = await User.findById(user._id).select('+password');
+        const isValidPassword = await comparePassword(currentPassword, userWithPassword.password);
+        
+        if (!isValidPassword) {
+          return res.status(401).json(formatResponse(false, {
+            message: 'Current password is incorrect',
+            field: 'currentPassword'
+          }));
+        }
+
+        // Check if new email is already taken
+        const existingUser = await User.findOne({ email, _id: { $ne: user._id } });
+        if (existingUser) {
+          return res.status(409).json(formatResponse(false, {
+            message: 'Email address is already in use',
+            field: 'email'
+          }));
+        }
+      }
+
+      // Update user fields
+      const updateFields = {};
+      if (email) updateFields.email = email;
+      if (firstName) updateFields.firstName = firstName;
+      if (lastName) updateFields.lastName = lastName;
+      updateFields.updatedAt = new Date();
+
+      const updatedUser = await User.findByIdAndUpdate(
+        user._id,
+        updateFields,
+        { new: true, runValidators: true }
+      );
+
+      res.json(formatResponse(true, {
+        message: 'Profile updated successfully',
+        user: updatedUser.toJSON()
+      }));
+
+    } catch (error) {
+      console.error('Profile update error:', error);
+      
+      // Handle MongoDB duplicate key error
+      if (error.code === 11000) {
+        return res.status(409).json(formatResponse(false, {
+          message: 'Email address is already in use',
+          field: 'email'
+        }));
+      }
+
+      res.status(500).json(formatResponse(false, {
+        message: 'Profile update failed due to server error'
+      }));
+    }
+  }
+);
+
+/**
+ * POST /api/users/change-password
+ * Change password with current password verification
+ * Rate limiting recommended: 5 requests per hour per user
+ */
+router.post('/change-password',
+  authenticateToken,
+  validatePasswordChange,
+  handleValidationErrors,
+  async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+      const userId = req.user._id;
+
+      // Get user with password
+      const user = await User.findById(userId).select('+password');
+      if (!user) {
+        return res.status(404).json(formatResponse(false, {
+          message: 'User not found'
+        }));
+      }
+
+      // Verify current password
+      const isValidPassword = await comparePassword(currentPassword, user.password);
+      if (!isValidPassword) {
+        return res.status(401).json(formatResponse(false, {
+          message: 'Current password is incorrect',
+          field: 'currentPassword'
+        }));
+      }
+
+      // Check if new password is different from current
+      const isSamePassword = await comparePassword(newPassword, user.password);
+      if (isSamePassword) {
+        return res.status(400).json(formatResponse(false, {
+          message: 'New password must be different from current password',
+          field: 'newPassword'
+        }));
+      }
+
+      // Hash new password
+      const hashedNewPassword = await hashPassword(newPassword);
+
+      // Update password
+      await User.findByIdAndUpdate(userId, {
+        password: hashedNewPassword,
+        updatedAt: new Date()
+      });
+
+      res.json(formatResponse(true, {
+        message: 'Password changed successfully'
+      }));

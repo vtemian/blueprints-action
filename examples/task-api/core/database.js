@@ -1,24 +1,47 @@
-/**
- * @fileoverview Production-ready SQLite database connection and session management module
- * @module core/database
- * @version 1.0.0
- */
+I'll create a comprehensive database connection and session management module for you. Here's the complete implementation:
 
+## package.json dependencies
+
+```json
+{
+  "dependencies": {
+    "better-sqlite3": "^8.7.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.6",
+    "@types/uuid": "^9.0.6"
+  }
+}
+```
+
+## core/database.js
+
+```javascript
 import Database from 'better-sqlite3';
-import { randomUUID } from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { EventEmitter } from 'events';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
- * Custom database error classes
+ * Custom database error classes for better error handling
  */
 export class DatabaseError extends Error {
-  constructor(message, code = 'DB_ERROR', originalError = null) {
+  /**
+   * @param {string} message - Error message
+   * @param {string} code - Error code
+   * @param {Error} [originalError] - Original error object
+   */
+  constructor(message, code, originalError = null) {
     super(message);
     this.name = 'DatabaseError';
     this.code = code;
     this.originalError = originalError;
+    this.timestamp = new Date().toISOString();
   }
 }
 
@@ -29,61 +52,110 @@ export class ConnectionError extends DatabaseError {
   }
 }
 
-export class QueryError extends DatabaseError {
-  constructor(message, query = null, originalError = null) {
-    super(message, 'QUERY_ERROR', originalError);
-    this.name = 'QueryError';
-    this.query = query;
+export class TransactionError extends DatabaseError {
+  constructor(message, originalError = null) {
+    super(message, 'TRANSACTION_ERROR', originalError);
+    this.name = 'TransactionError';
+  }
+}
+
+export class ValidationError extends DatabaseError {
+  constructor(message, originalError = null) {
+    super(message, 'VALIDATION_ERROR', originalError);
+    this.name = 'ValidationError';
   }
 }
 
 /**
- * Connection pool implementation for better-sqlite3
+ * Database configuration with validation and defaults
  */
-class ConnectionPool extends EventEmitter {
-  constructor(dbPath, options = {}) {
-    super();
-    this.dbPath = dbPath;
-    this.maxConnections = options.maxConnections || 10;
-    this.idleTimeout = options.idleTimeout || 30000;
-    this.connections = new Map();
+class DatabaseConfig {
+  constructor() {
+    this.databaseUrl = process.env.DATABASE_URL || './tasks.db';
+    this.maxConnections = parseInt(process.env.DB_MAX_CONNECTIONS) || 10;
+    this.connectionTimeout = parseInt(process.env.DB_CONNECTION_TIMEOUT) || 30000;
+    this.maxRetries = parseInt(process.env.DB_MAX_RETRIES) || 3;
+    this.retryDelay = parseInt(process.env.DB_RETRY_DELAY) || 1000;
+    this.enableWAL = process.env.DB_ENABLE_WAL !== 'false';
+    this.busyTimeout = parseInt(process.env.DB_BUSY_TIMEOUT) || 10000;
+    
+    this.validate();
+  }
+
+  validate() {
+    if (!this.databaseUrl) {
+      throw new ValidationError('Database URL is required');
+    }
+    if (this.maxConnections < 1 || this.maxConnections > 50) {
+      throw new ValidationError('Max connections must be between 1 and 50');
+    }
+    if (this.connectionTimeout < 1000) {
+      throw new ValidationError('Connection timeout must be at least 1000ms');
+    }
+  }
+}
+
+/**
+ * Connection pool manager for SQLite database connections
+ */
+class ConnectionPool {
+  constructor(config) {
+    this.config = config;
+    this.connections = new Set();
     this.availableConnections = [];
     this.waitingQueue = [];
-    this.totalConnections = 0;
-    this.closed = false;
+    this.isShuttingDown = false;
   }
 
   /**
-   * Get a connection from the pool
+   * Get a connection from the pool with retry logic
    * @returns {Promise<Database>} Database connection
    */
   async getConnection() {
-    if (this.closed) {
-      throw new ConnectionError('Connection pool is closed');
+    if (this.isShuttingDown) {
+      throw new ConnectionError('Connection pool is shutting down');
     }
 
+    // Return available connection if exists
+    if (this.availableConnections.length > 0) {
+      const connection = this.availableConnections.pop();
+      if (this.isConnectionHealthy(connection)) {
+        return connection;
+      }
+      // Remove unhealthy connection
+      this.connections.delete(connection);
+      try {
+        connection.close();
+      } catch (error) {
+        console.error('Error closing unhealthy connection:', error);
+      }
+    }
+
+    // Create new connection if under limit
+    if (this.connections.size < this.config.maxConnections) {
+      return await this.createConnection();
+    }
+
+    // Wait for available connection
     return new Promise((resolve, reject) => {
-      // Try to get an available connection
-      if (this.availableConnections.length > 0) {
-        const connection = this.availableConnections.pop();
-        this._resetConnectionTimeout(connection);
-        resolve(connection);
-        return;
-      }
-
-      // Create new connection if under limit
-      if (this.totalConnections < this.maxConnections) {
-        try {
-          const connection = this._createConnection();
-          resolve(connection);
-        } catch (error) {
-          reject(new ConnectionError('Failed to create database connection', error));
+      const timeout = setTimeout(() => {
+        const index = this.waitingQueue.findIndex(item => item.resolve === resolve);
+        if (index !== -1) {
+          this.waitingQueue.splice(index, 1);
         }
-        return;
-      }
+        reject(new ConnectionError('Connection timeout: No available connections'));
+      }, this.config.connectionTimeout);
 
-      // Add to waiting queue
-      this.waitingQueue.push({ resolve, reject });
+      this.waitingQueue.push({
+        resolve: (connection) => {
+          clearTimeout(timeout);
+          resolve(connection);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      });
     });
   }
 
@@ -92,472 +164,333 @@ class ConnectionPool extends EventEmitter {
    * @param {Database} connection - Database connection to release
    */
   releaseConnection(connection) {
-    if (this.closed || !this.connections.has(connection)) {
+    if (!this.connections.has(connection)) {
       return;
     }
 
-    // Check if there are waiting requests
+    // Serve waiting requests first
     if (this.waitingQueue.length > 0) {
       const { resolve } = this.waitingQueue.shift();
-      this._resetConnectionTimeout(connection);
       resolve(connection);
       return;
     }
 
     // Return to available pool
     this.availableConnections.push(connection);
-    this._setConnectionTimeout(connection);
   }
 
   /**
-   * Create a new database connection
-   * @private
-   * @returns {Database} New database connection
+   * Create a new database connection with retry logic
+   * @returns {Promise<Database>} New database connection
    */
-  _createConnection() {
-    try {
-      const connection = new Database(this.dbPath, {
-        verbose: process.env.NODE_ENV === 'development' ? console.log : null,
-        fileMustExist: false
-      });
+  async createConnection() {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+      try {
+        await this.ensureDatabaseDirectory();
+        
+        const connection = new Database(this.config.databaseUrl, {
+          timeout: this.config.busyTimeout,
+          verbose: process.env.NODE_ENV === 'development' ? console.log : null
+        });
 
-      // Configure connection
+        // Configure connection
+        this.configureConnection(connection);
+        this.connections.add(connection);
+        
+        console.log(`Database connection created (attempt ${attempt}/${this.config.maxRetries})`);
+        return connection;
+        
+      } catch (error) {
+        lastError = error;
+        console.error(`Connection attempt ${attempt} failed:`, error.message);
+        
+        if (attempt < this.config.maxRetries) {
+          const delay = this.config.retryDelay * Math.pow(2, attempt - 1);
+          await this.sleep(delay);
+        }
+      }
+    }
+    
+    throw new ConnectionError(
+      `Failed to create database connection after ${this.config.maxRetries} attempts`,
+      lastError
+    );
+  }
+
+  /**
+   * Configure database connection settings
+   * @param {Database} connection - Database connection to configure
+   */
+  configureConnection(connection) {
+    // Enable WAL mode for better concurrency
+    if (this.config.enableWAL) {
       connection.pragma('journal_mode = WAL');
-      connection.pragma('synchronous = NORMAL');
-      connection.pragma('cache_size = 1000');
-      connection.pragma('temp_store = memory');
-      connection.pragma('mmap_size = 268435456'); // 256MB
-
-      this.connections.set(connection, {
-        created: Date.now(),
-        lastUsed: Date.now(),
-        timeout: null
-      });
-
-      this.totalConnections++;
-      this.emit('connection:created', { total: this.totalConnections });
-
-      return connection;
-    } catch (error) {
-      throw new ConnectionError('Failed to create database connection', error);
     }
+    
+    // Set other pragmas for performance and reliability
+    connection.pragma('synchronous = NORMAL');
+    connection.pragma('cache_size = 1000');
+    connection.pragma('temp_store = memory');
+    connection.pragma('mmap_size = 268435456'); // 256MB
+    
+    // Set busy timeout
+    connection.pragma(`busy_timeout = ${this.config.busyTimeout}`);
   }
 
   /**
-   * Set idle timeout for connection
-   * @private
-   * @param {Database} connection - Database connection
+   * Check if connection is healthy
+   * @param {Database} connection - Connection to check
+   * @returns {boolean} True if connection is healthy
    */
-  _setConnectionTimeout(connection) {
-    const connectionInfo = this.connections.get(connection);
-    if (!connectionInfo) return;
-
-    connectionInfo.timeout = setTimeout(() => {
-      this._closeIdleConnection(connection);
-    }, this.idleTimeout);
-  }
-
-  /**
-   * Reset connection timeout
-   * @private
-   * @param {Database} connection - Database connection
-   */
-  _resetConnectionTimeout(connection) {
-    const connectionInfo = this.connections.get(connection);
-    if (!connectionInfo) return;
-
-    if (connectionInfo.timeout) {
-      clearTimeout(connectionInfo.timeout);
-      connectionInfo.timeout = null;
-    }
-    connectionInfo.lastUsed = Date.now();
-  }
-
-  /**
-   * Close idle connection
-   * @private
-   * @param {Database} connection - Database connection to close
-   */
-  _closeIdleConnection(connection) {
-    const index = this.availableConnections.indexOf(connection);
-    if (index > -1) {
-      this.availableConnections.splice(index, 1);
-    }
-
-    this._closeConnection(connection);
-  }
-
-  /**
-   * Close a specific connection
-   * @private
-   * @param {Database} connection - Database connection to close
-   */
-  _closeConnection(connection) {
+  isConnectionHealthy(connection) {
     try {
-      connection.close();
+      connection.prepare('SELECT 1').get();
+      return true;
     } catch (error) {
-      console.error('Error closing database connection:', error);
+      return false;
     }
-
-    this.connections.delete(connection);
-    this.totalConnections--;
-    this.emit('connection:closed', { total: this.totalConnections });
   }
 
   /**
-   * Close all connections in the pool
+   * Ensure database directory exists
+   * @returns {Promise<void>}
    */
-  async close() {
-    this.closed = true;
-
-    // Reject all waiting requests
-    while (this.waitingQueue.length > 0) {
-      const { reject } = this.waitingQueue.shift();
-      reject(new ConnectionError('Connection pool is closing'));
+  async ensureDatabaseDirectory() {
+    if (this.config.databaseUrl === ':memory:') {
+      return;
     }
+    
+    const dbDir = path.dirname(path.resolve(this.config.databaseUrl));
+    try {
+      await fs.access(dbDir);
+    } catch (error) {
+      await fs.mkdir(dbDir, { recursive: true });
+    }
+  }
+
+  /**
+   * Close all connections and cleanup
+   * @returns {Promise<void>}
+   */
+  async closeAll() {
+    this.isShuttingDown = true;
+    
+    // Reject all waiting requests
+    this.waitingQueue.forEach(({ reject }) => {
+      reject(new ConnectionError('Connection pool is shutting down'));
+    });
+    this.waitingQueue.length = 0;
 
     // Close all connections
-    for (const connection of this.connections.keys()) {
-      this._closeConnection(connection);
-    }
+    const closePromises = Array.from(this.connections).map(connection => {
+      return new Promise((resolve) => {
+        try {
+          connection.close();
+          resolve();
+        } catch (error) {
+          console.error('Error closing connection:', error);
+          resolve();
+        }
+      });
+    });
 
+    await Promise.all(closePromises);
+    this.connections.clear();
     this.availableConnections.length = 0;
-    this.emit('pool:closed');
+    
+    console.log('All database connections closed');
   }
 
   /**
-   * Get pool statistics
-   * @returns {Object} Pool statistics
+   * Sleep utility for retry delays
+   * @param {number} ms - Milliseconds to sleep
+   * @returns {Promise<void>}
    */
-  getStats() {
-    return {
-      totalConnections: this.totalConnections,
-      availableConnections: this.availableConnections.length,
-      waitingRequests: this.waitingQueue.length,
-      maxConnections: this.maxConnections,
-      closed: this.closed
-    };
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 }
 
 /**
- * Main Database class for SQLite operations
+ * Main database manager class
+ * 
+ * @example
+ * ```javascript
+ * // Initialize database
+ * await initDb();
+ * 
+ * // Get connection and execute query
+ * const db = await getDb();
+ * const result = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+ * 
+ * // Use transaction
+ * await withTransaction(async (db) => {
+ *   db.prepare('INSERT INTO users (id, name) VALUES (?, ?)').run(uuidv4(), 'John');
+ *   db.prepare('INSERT INTO profiles (user_id, bio) VALUES (?, ?)').run(userId, 'Bio');
+ * });
+ * ```
  */
-export class DatabaseManager extends EventEmitter {
-  constructor(options = {}) {
-    super();
-    
-    this.dbUrl = options.dbUrl || process.env.DATABASE_URL || './tasks.db';
-    this.poolOptions = {
-      maxConnections: options.maxConnections || 10,
-      idleTimeout: options.idleTimeout || 30000,
-      ...options.poolOptions
-    };
-    
-    this.pool = null;
-    this.connected = false;
-    this.retryAttempts = options.retryAttempts || 3;
-    this.retryDelay = options.retryDelay || 1000;
-    this.healthCheckInterval = options.healthCheckInterval || 30000;
-    this.healthCheckTimer = null;
+class DatabaseManager {
+  constructor() {
+    this.config = new DatabaseConfig();
+    this.pool = new ConnectionPool(this.config);
+    this.isInitialized = false;
+    this.setupGracefulShutdown();
   }
 
   /**
-   * Connect to the database and initialize connection pool
+   * Initialize database with tables and migrations
    * @returns {Promise<void>}
    */
-  async connect() {
-    if (this.connected) {
+  async initialize() {
+    if (this.isInitialized) {
       return;
     }
 
     try {
-      // Ensure database directory exists
-      const dbDir = path.dirname(this.dbUrl);
-      await fs.mkdir(dbDir, { recursive: true });
-
-      // Create connection pool
-      this.pool = new ConnectionPool(this.dbUrl, this.poolOptions);
+      const connection = await this.pool.getConnection();
       
-      // Test connection
-      await this._testConnection();
+      // Create system tables
+      await this.createSystemTables(connection);
       
-      this.connected = true;
-      this._startHealthCheck();
+      // Run migrations
+      await this.runMigrations(connection);
       
-      this.emit('connected');
-      console.log(`Database connected: ${this.dbUrl}`);
+      this.pool.releaseConnection(connection);
+      this.isInitialized = true;
+      
+      console.log('Database initialized successfully');
     } catch (error) {
-      throw new ConnectionError('Failed to connect to database', error);
+      throw new DatabaseError('Failed to initialize database', 'INIT_ERROR', error);
     }
   }
 
   /**
-   * Disconnect from the database
-   * @returns {Promise<void>}
+   * Create system tables for metadata and migrations
+   * @param {Database} connection - Database connection
    */
-  async disconnect() {
-    if (!this.connected) {
-      return;
-    }
-
-    this._stopHealthCheck();
+  createSystemTables(connection) {
+    const createMigrationsTable = `
+      CREATE TABLE IF NOT EXISTS migrations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
     
-    if (this.pool) {
-      await this.pool.close();
-      this.pool = null;
-    }
-    
-    this.connected = false;
-    this.emit('disconnected');
-    console.log('Database disconnected');
+    connection.exec(createMigrationsTable);
   }
 
   /**
-   * Get a database connection from the pool
+   * Run database migrations
+   * @param {Database} connection - Database connection
+   */
+  async runMigrations(connection) {
+    // Example initial migration - create tasks table
+    const migrations = [
+      {
+        id: '001_create_tasks_table',
+        name: 'Create tasks table',
+        sql: `
+          CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+            title TEXT NOT NULL,
+            description TEXT,
+            status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'cancelled')),
+            priority INTEGER DEFAULT 1 CHECK (priority BETWEEN 1 AND 5),
+            due_date DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+          CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
+          CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
+          
+          CREATE TRIGGER IF NOT EXISTS update_tasks_updated_at 
+          AFTER UPDATE ON tasks
+          BEGIN
+            UPDATE tasks SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+          END;
+        `
+      }
+    ];
+
+    for (const migration of migrations) {
+      const existing = connection.prepare('SELECT id FROM migrations WHERE id = ?').get(migration.id);
+      
+      if (!existing) {
+        console.log(`Running migration: ${migration.name}`);
+        connection.exec(migration.sql);
+        connection.prepare('INSERT INTO migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
+      }
+    }
+  }
+
+  /**
+   * Get database connection from pool
    * @returns {Promise<Database>} Database connection
    */
   async getConnection() {
-    if (!this.connected || !this.pool) {
-      throw new ConnectionError('Database not connected');
+    if (!this.isInitialized) {
+      await this.initialize();
     }
-
     return await this.pool.getConnection();
   }
 
   /**
-   * Release a connection back to the pool
-   * @param {Database} connection - Database connection to release
+   * Release connection back to pool
+   * @param {Database} connection - Connection to release
    */
   releaseConnection(connection) {
-    if (this.pool) {
-      this.pool.releaseConnection(connection);
-    }
+    this.pool.releaseConnection(connection);
   }
 
   /**
-   * Execute a query with automatic connection management
-   * @param {string} sql - SQL query
-   * @param {Array} params - Query parameters
-   * @returns {Promise<any>} Query result
+   * Execute function within a database transaction
+   * @param {Function} fn - Async function to execute in transaction
+   * @returns {Promise<any>} Result of the function
    */
-  async query(sql, params = []) {
+  async withTransaction(fn) {
     const connection = await this.getConnection();
+    const transaction = connection.transaction(fn);
     
     try {
-      const stmt = connection.prepare(sql);
-      const result = stmt.all(...params);
+      const result = transaction(connection);
+      this.releaseConnection(connection);
       return result;
     } catch (error) {
-      throw new QueryError('Query execution failed', sql, error);
-    } finally {
       this.releaseConnection(connection);
+      throw new TransactionError('Transaction failed', error);
     }
   }
 
   /**
-   * Execute a single row query
-   * @param {string} sql - SQL query
-   * @param {Array} params - Query parameters
-   * @returns {Promise<any>} Single row result
-   */
-  async queryOne(sql, params = []) {
-    const connection = await this.getConnection();
-    
-    try {
-      const stmt = connection.prepare(sql);
-      const result = stmt.get(...params);
-      return result;
-    } catch (error) {
-      throw new QueryError('Query execution failed', sql, error);
-    } finally {
-      this.releaseConnection(connection);
-    }
-  }
-
-  /**
-   * Execute a query that modifies data
-   * @param {string} sql - SQL query
-   * @param {Array} params - Query parameters
-   * @returns {Promise<Object>} Execution result with changes and lastInsertRowid
-   */
-  async execute(sql, params = []) {
-    const connection = await this.getConnection();
-    
-    try {
-      const stmt = connection.prepare(sql);
-      const result = stmt.run(...params);
-      return {
-        changes: result.changes,
-        lastInsertRowid: result.lastInsertRowid
-      };
-    } catch (error) {
-      throw new QueryError('Query execution failed', sql, error);
-    } finally {
-      this.releaseConnection(connection);
-    }
-  }
-
-  /**
-   * Execute multiple queries in a transaction
-   * @param {Function} callback - Function containing transaction logic
-   * @returns {Promise<any>} Transaction result
-   */
-  async transaction(callback) {
-    const connection = await this.getConnection();
-    
-    try {
-      const transaction = connection.transaction(callback);
-      return transaction();
-    } catch (error) {
-      throw new QueryError('Transaction failed', null, error);
-    } finally {
-      this.releaseConnection(connection);
-    }
-  }
-
-  /**
-   * Test database connection
-   * @private
+   * Close all database connections
    * @returns {Promise<void>}
    */
-  async _testConnection() {
-    const connection = await this.pool.getConnection();
-    
-    try {
-      connection.prepare('SELECT 1').get();
-    } catch (error) {
-      throw new ConnectionError('Database connection test failed', error);
-    } finally {
-      this.pool.releaseConnection(connection);
-    }
+  async close() {
+    await this.pool.closeAll();
+    this.isInitialized = false;
   }
 
   /**
-   * Start health check timer
-   * @private
+   * Setup graceful shutdown handlers
    */
-  _startHealthCheck() {
-    if (this.healthCheckTimer) {
-      return;
-    }
-
-    this.healthCheckTimer = setInterval(async () => {
+  setupGracefulShutdown() {
+    const shutdown = async (signal) => {
+      console.log(`Received ${signal}, closing database connections...`);
       try {
-        await this.healthCheck();
+        await this.close();
+        process.exit(0);
       } catch (error) {
-        this.emit('health:error', error);
+        console.error('Error during shutdown:', error);
+        process.exit(1);
       }
-    }, this.healthCheckInterval);
-  }
-
-  /**
-   * Stop health check timer
-   * @private
-   */
-  _stopHealthCheck() {
-    if (this.healthCheckTimer) {
-      clearInterval(this.healthCheckTimer);
-      this.healthCheckTimer = null;
-    }
-  }
-
-  /**
-   * Perform health check
-   * @returns {Promise<Object>} Health check result
-   */
-  async healthCheck() {
-    const startTime = Date.now();
-    
-    try {
-      await this._testConnection();
-      const responseTime = Date.now() - startTime;
-      const stats = this.pool.getStats();
-      
-      const health = {
-        status: 'healthy',
-        responseTime,
-        timestamp: new Date().toISOString(),
-        pool: stats
-      };
-      
-      this.emit('health:check', health);
-      return health;
-    } catch (error) {
-      const health = {
-        status: 'unhealthy',
-        error: error.message,
-        timestamp: new Date().toISOString()
-      };
-      
-      this.emit('health:check', health);
-      throw error;
-    }
-  }
-
-  /**
-   * Get database statistics
-   * @returns {Object} Database statistics
-   */
-  getStats() {
-    return {
-      connected: this.connected,
-      dbUrl: this.dbUrl,
-      pool: this.pool ? this.pool.getStats() : null
     };
-  }
-}
 
-/**
- * Database initialization and schema management
- */
-export class DatabaseInitializer {
-  constructor(dbManager) {
-    this.db = dbManager;
-    this.migrations = new Map();
-  }
-
-  /**
-   * Initialize database with default schema
-   * @returns {Promise<void>}
-   */
-  async initDb() {
-    const connection = await this.db.getConnection();
-    
-    try {
-      // Create migrations table
-      connection.exec(`
-        CREATE TABLE IF NOT EXISTS migrations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT UNIQUE NOT NULL,
-          executed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-
-      // Create default tables
-      await this._createDefaultTables(connection);
-      
-      console.log('Database initialized successfully');
-    } catch (error) {
-      throw new DatabaseError('Database initialization failed', 'INIT_ERROR', error);
-    } finally {
-      this.db.releaseConnection(connection);
-    }
-  }
-
-  /**
-   * Create default application tables
-   * @private
-   * @param {Database} connection - Database connection
-   */
-  async _createDefaultTables(connection) {
-    // Example: Tasks table
-    connection.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-        title TEXT NOT NULL,
-        description TEXT,
-        status TEXT DEFAULT 'pending',
-        priority INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.
