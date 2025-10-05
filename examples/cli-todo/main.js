@@ -1,234 +1,294 @@
 #!/usr/bin/env node
 
 /**
- * CLI Todo Application Entry Point
- * 
- * A production-ready command-line interface for managing todos.
- * Supports add, list, done, remove, and help commands with comprehensive error handling.
- * 
- * @author Senior JavaScript Developer
- * @version 1.0.0
+ * Todo CLI Application Entry Point
+ * Main module that handles command-line argument parsing, routing, and error handling
  */
 
-'use strict';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import process from 'process';
+import app from './src/app.js';
+import * as commands from './src/commands/index.js';
 
-const process = require('process');
-
-// Import application modules
-let app, commands;
-
-try {
-  // Try importing from modular structure first, fallback to single files
-  try {
-    app = require('./app/index.js');
-    commands = require('./commands/index.js');
-  } catch (moduleError) {
-    app = require('./app.js');
-    commands = require('./commands.js');
-  }
-} catch (importError) {
-  console.error('Error: Failed to load application modules.');
-  console.error('Please ensure app.js and commands.js exist in the project directory.');
-  process.exit(1);
-}
-
-/**
- * Display usage information for specific commands
- */
-const showCommandUsage = (command) => {
-  const usageMap = {
-    add: 'Usage: todo add <task description>',
-    done: 'Usage: todo done <task id>',
-    remove: 'Usage: todo remove <task id>',
-    list: 'Usage: todo list'
-  };
-  
-  console.error(`Error: Missing required arguments for '${command}' command.`);
-  console.error(usageMap[command] || 'Usage: todo help');
-};
-
-/**
- * Validate command arguments
- */
-const validateCommand = (command, args) => {
-  switch (command) {
-    case 'add':
-      if (args.length === 0) {
-        showCommandUsage('add');
-        return false;
-      }
-      break;
-    case 'done':
-    case 'remove':
-      if (args.length === 0) {
-        showCommandUsage(command);
-        return false;
-      }
-      // Validate that the argument is a number for done/remove commands
-      const id = parseInt(args[0], 10);
-      if (isNaN(id) || id <= 0) {
-        console.error(`Error: Invalid task ID '${args[0]}'. Please provide a valid positive number.`);
-        return false;
-      }
-      break;
-    case 'list':
-    case 'help':
-      // These commands don't require additional arguments
-      break;
-    default:
-      return false;
-  }
-  return true;
-};
-
-/**
- * Route commands to appropriate handlers
- */
-const routeCommand = async (command, args) => {
-  // Validate command exists
-  if (!commands[command]) {
-    console.error(`Error: Unknown command '${command}'.`);
-    await commands.help();
-    process.exit(1);
-  }
-
-  // Validate command arguments
-  if (!validateCommand(command, args)) {
-    process.exit(1);
-  }
-
-  // Execute the command
-  try {
-    switch (command) {
-      case 'add':
-        // Join all arguments to support multi-word task descriptions
-        const taskDescription = args.join(' ').trim();
-        await commands.add(taskDescription);
-        break;
-      case 'list':
-        await commands.list();
-        break;
-      case 'done':
-        const doneId = parseInt(args[0], 10);
-        await commands.done(doneId);
-        break;
-      case 'remove':
-        const removeId = parseInt(args[0], 10);
-        await commands.remove(removeId);
-        break;
-      case 'help':
-        await commands.help();
-        break;
-      default:
-        // This should never be reached due to earlier validation
-        throw new Error(`Unhandled command: ${command}`);
-    }
-  } catch (error) {
-    // Handle specific error types
-    if (error.code === 'ENOENT') {
-      console.error('Error: Todo data file not found. Run "todo add <task>" to create your first todo.');
-    } else if (error.code === 'EACCES') {
-      console.error('Error: Permission denied. Please check file permissions.');
-    } else if (error.code === 'ENOSPC') {
-      console.error('Error: No space left on device. Please free up some disk space.');
-    } else if (error.message && error.message.includes('JSON')) {
-      console.error('Error: Todo data file is corrupted. Please check the file format.');
-    } else if (error.message) {
-      // Display user-friendly error messages from commands
-      console.error(`Error: ${error.message}`);
-    } else {
-      // Fallback for unexpected errors
-      console.error('Error: An unexpected error occurred while executing the command.');
-      console.error('Please try again or contact support if the problem persists.');
-    }
-    
-    process.exit(1);
-  }
-};
+// ES6 module compatibility for __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 /**
  * Main application entry point
+ * Parses command line arguments, routes to appropriate handlers, and manages error handling
+ * 
+ * @async
+ * @function main
+ * @returns {Promise<void>}
  */
-const main = async () => {
-  try {
-    // Parse command line arguments (strip 'node' and script name)
-    const args = process.argv.slice(2);
-    
-    // Handle no arguments - show help
-    if (args.length === 0) {
-      await commands.help();
-      process.exit(0);
+async function main() {
+    try {
+        // Initialize application
+        await app.initialize();
+
+        // Parse command line arguments (skip node path and script path)
+        const args = process.argv.slice(2);
+        
+        // Handle empty arguments - show help
+        if (args.length === 0) {
+            await commands.help();
+            process.exit(0);
+        }
+
+        // Extract command and remaining arguments
+        const [command, ...commandArgs] = args;
+        const normalizedCommand = command.toLowerCase().trim();
+
+        // Validate and sanitize command input
+        if (!normalizedCommand || typeof normalizedCommand !== 'string') {
+            console.error('Error: Invalid command format');
+            await commands.help();
+            process.exit(1);
+        }
+
+        // Route to appropriate command handler
+        switch (normalizedCommand) {
+            case 'add':
+                await handleAddCommand(commandArgs);
+                break;
+                
+            case 'list':
+                await handleListCommand(commandArgs);
+                break;
+                
+            case 'done':
+                await handleDoneCommand(commandArgs);
+                break;
+                
+            case 'remove':
+            case 'rm':
+                await handleRemoveCommand(commandArgs);
+                break;
+                
+            case 'help':
+            case '--help':
+            case '-h':
+                await commands.help();
+                break;
+                
+            default:
+                console.error(`Error: Unknown command '${command}'`);
+                console.error('Run "todo help" to see available commands');
+                process.exit(1);
+        }
+
+        // Successful execution
+        process.exit(0);
+
+    } catch (error) {
+        await handleGlobalError(error);
     }
-    
-    // Extract command and remaining arguments
-    const [command, ...commandArgs] = args;
-    const normalizedCommand = command.toLowerCase().trim();
-    
-    // Handle help command variations
-    if (normalizedCommand === 'help' || normalizedCommand === '--help' || normalizedCommand === '-h') {
-      await commands.help();
-      process.exit(0);
-    }
-    
-    // Route to appropriate command handler
-    await routeCommand(normalizedCommand, commandArgs);
-    
-    // Successful execution
-    process.exit(0);
-    
-  } catch (error) {
-    // Handle any uncaught errors in main execution
-    console.error('Error: A critical error occurred.');
-    
-    // Log detailed error in development/debug mode
-    if (process.env.NODE_ENV === 'development' || process.env.DEBUG) {
-      console.error('Debug information:', error);
-    }
-    
-    process.exit(1);
-  }
-};
+}
 
 /**
- * Handle uncaught exceptions and unhandled promise rejections
+ * Handle 'add' command with validation
+ * @param {string[]} args - Command arguments
  */
-process.on('uncaughtException', (error) => {
-  console.error('Error: A critical system error occurred.');
-  if (process.env.NODE_ENV === 'development') {
-    console.error('Uncaught Exception:', error);
-  }
-  process.exit(1);
-});
+async function handleAddCommand(args) {
+    if (args.length === 0) {
+        console.error('Error: Missing todo description');
+        console.error('Usage: todo add <description>');
+        console.error('Example: todo add "Buy groceries"');
+        process.exit(1);
+    }
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Error: An unhandled promise rejection occurred.');
-  if (process.env.NODE_ENV === 'development') {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  }
-  process.exit(1);
-});
+    // Join all arguments to form the complete description
+    const description = args.join(' ').trim();
+    
+    if (description.length === 0) {
+        console.error('Error: Todo description cannot be empty');
+        process.exit(1);
+    }
+
+    if (description.length > 500) {
+        console.error('Error: Todo description too long (max 500 characters)');
+        process.exit(1);
+    }
+
+    await commands.add(description);
+}
+
+/**
+ * Handle 'list' command with optional filters
+ * @param {string[]} args - Command arguments
+ */
+async function handleListCommand(args) {
+    // List command can accept optional filter arguments
+    const options = parseListOptions(args);
+    await commands.list(options);
+}
+
+/**
+ * Handle 'done' command with validation
+ * @param {string[]} args - Command arguments
+ */
+async function handleDoneCommand(args) {
+    if (args.length === 0) {
+        console.error('Error: Missing todo ID');
+        console.error('Usage: todo done <id>');
+        console.error('Example: todo done 1');
+        process.exit(1);
+    }
+
+    const todoId = parseInt(args[0], 10);
+    
+    if (isNaN(todoId) || todoId <= 0) {
+        console.error('Error: Invalid todo ID. Must be a positive number');
+        console.error('Use "todo list" to see available todo IDs');
+        process.exit(1);
+    }
+
+    await commands.done(todoId);
+}
+
+/**
+ * Handle 'remove' command with validation
+ * @param {string[]} args - Command arguments
+ */
+async function handleRemoveCommand(args) {
+    if (args.length === 0) {
+        console.error('Error: Missing todo ID');
+        console.error('Usage: todo remove <id>');
+        console.error('Example: todo remove 1');
+        process.exit(1);
+    }
+
+    const todoId = parseInt(args[0], 10);
+    
+    if (isNaN(todoId) || todoId <= 0) {
+        console.error('Error: Invalid todo ID. Must be a positive number');
+        console.error('Use "todo list" to see available todo IDs');
+        process.exit(1);
+    }
+
+    await commands.remove(todoId);
+}
+
+/**
+ * Parse list command options
+ * @param {string[]} args - Command arguments
+ * @returns {Object} Parsed options
+ */
+function parseListOptions(args) {
+    const options = {
+        filter: 'all', // all, pending, completed
+        sort: 'id'     // id, date, priority
+    };
+
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i].toLowerCase();
+        
+        switch (arg) {
+            case '--pending':
+            case '-p':
+                options.filter = 'pending';
+                break;
+            case '--completed':
+            case '-c':
+                options.filter = 'completed';
+                break;
+            case '--sort-date':
+                options.sort = 'date';
+                break;
+            case '--sort-priority':
+                options.sort = 'priority';
+                break;
+        }
+    }
+
+    return options;
+}
+
+/**
+ * Handle global application errors
+ * @param {Error} error - The error object
+ */
+async function handleGlobalError(error) {
+    console.error('An unexpected error occurred:');
+    
+    // Handle specific error types
+    if (error.code === 'ENOENT') {
+        console.error('Error: Todo data file not found or inaccessible');
+        console.error('The application will create a new todo list');
+    } else if (error.code === 'EACCES') {
+        console.error('Error: Permission denied accessing todo data file');
+        console.error('Please check file permissions or run with appropriate privileges');
+    } else if (error.code === 'ENOSPC') {
+        console.error('Error: No space left on device');
+        console.error('Please free up disk space and try again');
+    } else if (error.name === 'ValidationError') {
+        console.error(`Error: ${error.message}`);
+    } else if (error.name === 'TodoNotFoundError') {
+        console.error(`Error: ${error.message}`);
+        console.error('Use "todo list" to see available todos');
+    } else {
+        // Generic error handling
+        console.error(`Error: ${error.message || 'Unknown error occurred'}`);
+        
+        // In development, show stack trace
+        if (process.env.NODE_ENV === 'development') {
+            console.error('\nStack trace:');
+            console.error(error.stack);
+        }
+    }
+
+    process.exit(1);
+}
 
 /**
  * Handle process termination signals gracefully
  */
-process.on('SIGINT', () => {
-  console.log('\nOperation cancelled by user.');
-  process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-  console.log('\nApplication terminated.');
-  process.exit(0);
-});
-
-// Execute main function only if this file is run directly
-if (require.main === module) {
-  main();
+function setupGracefulShutdown() {
+    const signals = ['SIGINT', 'SIGTERM', 'SIGQUIT'];
+    
+    signals.forEach(signal => {
+        process.on(signal, async () => {
+            console.log(`\nReceived ${signal}. Shutting down gracefully...`);
+            
+            try {
+                await app.cleanup();
+                console.log('Cleanup completed successfully');
+                process.exit(0);
+            } catch (error) {
+                console.error('Error during cleanup:', error.message);
+                process.exit(1);
+            }
+        });
+    });
 }
 
-// Export for testing purposes
-module.exports = {
-  main,
-  routeCommand,
-  validateCommand
-};
+/**
+ * Handle uncaught exceptions and unhandled rejections
+ */
+function setupErrorHandlers() {
+    process.on('uncaughtException', (error) => {
+        console.error('Uncaught Exception:', error.message);
+        if (process.env.NODE_ENV === 'development') {
+            console.error(error.stack);
+        }
+        process.exit(1);
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+        console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+        process.exit(1);
+    });
+}
+
+// Initialize error handlers and graceful shutdown
+setupErrorHandlers();
+setupGracefulShutdown();
+
+// Execute main function only if this file is run directly
+if (import.meta.url === `file://${process.argv[1]}`) {
+    main().catch(handleGlobalError);
+}
+
+export default main;
