@@ -1,81 +1,151 @@
 #!/usr/bin/env python3
 """
-CLI Todo Application Entry Point
+Todo CLI Application Entry Point
 
-This module serves as the main entry point for the CLI Todo application.
-It handles command-line argument parsing, routes commands to appropriate
-handlers, and manages error handling with proper exit codes.
+A command-line interface for managing todo items. This module serves as the main
+entry point and handles command routing, argument parsing, and error handling.
+
+Usage:
+    python main.py add "Task description"
+    python main.py list
+    python main.py done <task_id>
+    python main.py remove <task_id>
+    python main.py help
 """
 
 import sys
-from app import commands
+import os
+
+
+def route_command(command, args):
+    """
+    Route commands to appropriate handlers in the commands module.
+    
+    Args:
+        command (str): The command to execute
+        args (list): Additional arguments for the command
+        
+    Returns:
+        int: Exit code (0 for success, 1 for error)
+    """
+    try:
+        # Import commands module with error handling
+        try:
+            import commands
+        except ImportError as e:
+            print(f"Error: Could not import commands module: {e}", file=sys.stderr)
+            print("Please ensure the commands.py file exists in the same directory.", file=sys.stderr)
+            return 1
+        
+        # Normalize command to lowercase for case-insensitive matching
+        command = command.lower().strip()
+        
+        # Route commands to appropriate handlers
+        if command == "add":
+            if not args:
+                print("Error: 'add' command requires a task description.", file=sys.stderr)
+                print("Usage: python main.py add \"Task description\"", file=sys.stderr)
+                return 1
+            # Join all arguments to support multi-word descriptions
+            task_description = " ".join(args)
+            return commands.add(task_description)
+            
+        elif command == "list":
+            return commands.list()
+            
+        elif command == "done":
+            if not args:
+                print("Error: 'done' command requires a task ID.", file=sys.stderr)
+                print("Usage: python main.py done <task_id>", file=sys.stderr)
+                return 1
+            try:
+                task_id = int(args[0])
+                return commands.done(task_id)
+            except ValueError:
+                print(f"Error: Invalid task ID '{args[0]}'. Task ID must be a number.", file=sys.stderr)
+                print("Usage: python main.py done <task_id>", file=sys.stderr)
+                return 1
+                
+        elif command == "remove":
+            if not args:
+                print("Error: 'remove' command requires a task ID.", file=sys.stderr)
+                print("Usage: python main.py remove <task_id>", file=sys.stderr)
+                return 1
+            try:
+                task_id = int(args[0])
+                return commands.remove(task_id)
+            except ValueError:
+                print(f"Error: Invalid task ID '{args[0]}'. Task ID must be a number.", file=sys.stderr)
+                print("Usage: python main.py remove <task_id>", file=sys.stderr)
+                return 1
+                
+        elif command == "help":
+            return commands.help()
+            
+        else:
+            print(f"Error: Unknown command '{command}'.", file=sys.stderr)
+            print("Run 'python main.py help' for available commands.", file=sys.stderr)
+            return 1
+            
+    except AttributeError as e:
+        print(f"Error: Command handler not found: {e}", file=sys.stderr)
+        print("Please ensure the commands module has all required functions.", file=sys.stderr)
+        return 1
+    except FileNotFoundError as e:
+        print(f"Error: Todo file not found or cannot be created: {e}", file=sys.stderr)
+        print("Please check file permissions and disk space.", file=sys.stderr)
+        return 1
+    except PermissionError as e:
+        print(f"Error: Permission denied accessing todo file: {e}", file=sys.stderr)
+        print("Please check file permissions.", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"Error: File system error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: An unexpected error occurred: {e}", file=sys.stderr)
+        print("Please try again or contact support if the problem persists.", file=sys.stderr)
+        return 1
 
 
 def main():
     """
-    Main entry point for the CLI Todo application.
+    Main entry point for the Todo CLI application.
     
     Parses command-line arguments and routes them to appropriate command handlers.
-    Handles errors gracefully and exits with proper status codes.
+    Implements comprehensive error handling and ensures proper exit codes.
     """
     try:
-        # Get command from command line arguments
-        try:
-            command = sys.argv[1].lower() if len(sys.argv) > 1 else "help"
-        except IndexError:
-            command = "help"
+        # Get command line arguments, excluding the script name
+        args = sys.argv[1:]
         
-        # Command routing dictionary
-        command_handlers = {
-            "add": commands.add,
-            "list": commands.list,
-            "done": commands.done,
-            "remove": commands.remove,
-            "help": commands.help,
-            "--help": commands.help,
-            "-h": commands.help
-        }
-        
-        # Route command to appropriate handler
-        if command in command_handlers:
+        # Handle case when no arguments are provided
+        if not args:
+            print("No command provided. Showing help:", file=sys.stderr)
             try:
-                command_handlers[command]()
-                sys.exit(0)
-            except IndexError:
-                # Handle missing required arguments
-                print(f"Error: Missing required arguments for '{command}' command.")
-                print(f"Use 'todo help' for usage information.")
+                import commands
+                exit_code = commands.help()
+                sys.exit(exit_code)
+            except ImportError:
+                print("Error: Could not import commands module.", file=sys.stderr)
+                print("Please ensure the commands.py file exists.", file=sys.stderr)
                 sys.exit(1)
-            except ValueError as e:
-                # Handle invalid argument values
-                print(f"Error: {e}")
-                sys.exit(1)
-        else:
-            # Handle unrecognized commands
-            print(f"Error: Unrecognized command '{command}'")
-            print("Use 'todo help' for available commands.")
-            sys.exit(1)
-            
-    except FileNotFoundError as e:
-        # Handle file I/O errors - todo file not found
-        print(f"Error: Todo file not found - {e}")
-        sys.exit(1)
-    except PermissionError as e:
-        # Handle file permission errors
-        print(f"Error: Permission denied - {e}")
-        sys.exit(1)
-    except IOError as e:
-        # Handle other I/O related errors
-        print(f"Error: File operation failed - {e}")
-        sys.exit(1)
+        
+        # Extract command and remaining arguments
+        command = args[0]
+        command_args = args[1:] if len(args) > 1 else []
+        
+        # Route the command and get exit code
+        exit_code = route_command(command, command_args)
+        
+        # Exit with the appropriate code
+        sys.exit(exit_code)
+        
     except KeyboardInterrupt:
-        # Handle Ctrl+C gracefully
-        print("\nOperation cancelled by user.")
+        print("\nOperation cancelled by user.", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        # Handle any unexpected exceptions
-        print(f"Error: An unexpected error occurred - {e}")
-        print("Please try again or contact support if the problem persists.")
+        print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
