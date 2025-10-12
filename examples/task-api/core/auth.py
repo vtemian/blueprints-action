@@ -1,174 +1,118 @@
 """
-Core authentication module for JWT token management and password security.
+Authentication and authorization utilities for the application.
 
-This module provides comprehensive authentication utilities including:
-- JWT token generation and validation
-- Secure password hashing and verification
-- FastAPI integration with OAuth2 Bearer authentication
-- User authentication and authorization dependencies
+This module provides JWT token management, password hashing/verification,
+and FastAPI dependencies for user authentication and authorization.
 """
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
-from jose.exceptions import ExpiredSignatureError
+from jose import JWTError, jwt, ExpiredSignatureError, JWTClaimsError
 from passlib.context import CryptContext
-from sqlalchemy.orm import Session
+from passlib.exc import InvalidHashError
 
 from models.user import User
-from database import get_db
 
-# Constants
-TOKEN_EXPIRE_HOURS = 24
+
+# Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_HOURS = 24
+BCRYPT_ROUNDS = 12
 
-# Environment configuration
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError(
-        "SECRET_KEY environment variable is required for JWT token generation. "
-        "Please set a secure secret key with sufficient entropy (minimum 32 characters)."
-    )
+# Security contexts
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=BCRYPT_ROUNDS)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
-if len(SECRET_KEY) < 32:
-    raise ValueError(
-        "SECRET_KEY must be at least 32 characters long for security purposes."
-    )
-
-# Password hashing configuration
-pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto",
-    bcrypt__rounds=12
-)
-
-# OAuth2 scheme for FastAPI integration
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="/token",
-    scheme_name="JWT"
-)
+# Exception messages
+INVALID_CREDENTIALS_MSG = "Could not validate credentials"
+INACTIVE_USER_MSG = "Inactive user"
+TOKEN_EXPIRED_MSG = "Token has expired"
+INVALID_TOKEN_MSG = "Invalid token"
 
 
 def create_access_token(data: Dict[str, Any]) -> str:
     """
-    Generate a JWT access token with 24-hour expiration.
+    Create a JWT access token with expiration.
     
     Args:
-        data: Dictionary containing claims to encode in the token.
-              Typically includes user identification information.
-    
+        data: Dictionary containing claims to encode in the token
+        
     Returns:
-        str: Encoded JWT token string.
-    
+        str: Encoded JWT token
+        
     Raises:
-        ValueError: If data is empty or None.
-        JWTError: If token encoding fails.
-    
-    Example:
-        >>> token = create_access_token({"sub": "user123", "email": "user@example.com"})
+        ValueError: If data is empty or invalid
+        RuntimeError: If token creation fails
     """
     if not data:
         raise ValueError("Token data cannot be empty")
     
-    # Create a copy to avoid modifying the original data
-    to_encode = data.copy()
-    
-    # Add expiration time (timezone-aware)
-    expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRE_HOURS)
-    to_encode.update({
-        "exp": expire,
-        "iat": datetime.now(timezone.utc),  # Issued at
-        "type": "access_token"
-    })
-    
     try:
+        to_encode = data.copy()
+        expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+        to_encode.update({"exp": expire})
+        
         encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         return encoded_jwt
     except Exception as e:
-        raise JWTError(f"Failed to encode JWT token: {str(e)}")
+        raise RuntimeError(f"Failed to create access token: {str(e)}")
 
 
 def verify_token(token: str) -> Dict[str, Any]:
     """
-    Decode and validate a JWT token with comprehensive error handling.
+    Decode and validate a JWT token.
     
     Args:
-        token: JWT token string to decode and validate.
-    
+        token: JWT token string to verify
+        
     Returns:
-        Dict[str, Any]: Decoded token payload containing user claims.
-    
+        Dict[str, Any]: Decoded token payload
+        
     Raises:
-        HTTPException: 401 status for invalid, expired, or malformed tokens.
-    
-    Example:
-        >>> payload = verify_token("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...")
-        >>> user_id = payload.get("sub")
+        HTTPException: If token is invalid, expired, or malformed
     """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
     if not token or not token.strip():
-        raise credentials_exception
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=INVALID_TOKEN_MSG,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        
-        # Validate token type
-        token_type = payload.get("type")
-        if token_type != "access_token":
-            raise credentials_exception
-        
-        # Validate required claims
-        if not payload.get("sub"):
-            raise credentials_exception
-            
         return payload
-        
     except ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
+            detail=TOKEN_EXPIRED_MSG,
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except JWTError as e:
+    except (JWTError, JWTClaimsError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except Exception as e:
-        # Catch any other unexpected errors
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token validation failed",
+            detail=INVALID_TOKEN_MSG,
             headers={"WWW-Authenticate": "Bearer"},
         )
 
 
 def get_password_hash(password: str) -> str:
     """
-    Hash a password securely using bcrypt with 12 salt rounds.
+    Hash a password using bcrypt with configured salt rounds.
     
     Args:
-        password: Plain text password to hash.
-    
+        password: Plain text password to hash
+        
     Returns:
-        str: Bcrypt hashed password string.
-    
+        str: Bcrypt hashed password
+        
     Raises:
-        ValueError: If password is empty or None.
-        RuntimeError: If hashing operation fails.
-    
-    Example:
-        >>> hashed = get_password_hash("my_secure_password")
+        ValueError: If password is empty or invalid
+        RuntimeError: If hashing fails
     """
     if not password:
         raise ValueError("Password cannot be empty")
@@ -179,25 +123,22 @@ def get_password_hash(password: str) -> str:
     try:
         return pwd_context.hash(password)
     except Exception as e:
-        raise RuntimeError(f"Password hashing failed: {str(e)}")
+        raise RuntimeError(f"Failed to hash password: {str(e)}")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verify a password against its hash using timing-safe comparison.
+    Verify a plain password against a hashed password.
     
     Args:
-        plain_password: Plain text password to verify.
-        hashed_password: Stored bcrypt hash to verify against.
-    
+        plain_password: Plain text password to verify
+        hashed_password: Stored bcrypt hash to verify against
+        
     Returns:
-        bool: True if password matches hash, False otherwise.
-    
+        bool: True if password matches, False otherwise
+        
     Raises:
-        ValueError: If either parameter is empty or None.
-    
-    Example:
-        >>> is_valid = verify_password("user_input", stored_hash)
+        ValueError: If either password parameter is empty
     """
     if not plain_password or not hashed_password:
         return False
@@ -207,191 +148,157 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     
     try:
         return pwd_context.verify(plain_password, hashed_password)
+    except (InvalidHashError, ValueError):
+        # Invalid hash format or verification error
+        return False
     except Exception:
-        # Return False for any verification errors to prevent information leakage
+        # Any other unexpected error during verification
         return False
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-) -> User:
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     """
-    Extract user information from JWT token and fetch user from database.
-    
-    This function serves as a FastAPI dependency for protected routes.
-    It validates the JWT token and retrieves the corresponding user from the database.
+    FastAPI dependency to extract and return the current user from JWT token.
     
     Args:
-        token: JWT token from Authorization header (injected by oauth2_scheme).
-        db: Database session (injected by get_db dependency).
-    
+        token: JWT token from Authorization header
+        
     Returns:
-        User: User model instance from database.
-    
+        User: Current authenticated user
+        
     Raises:
-        HTTPException: 401 status for invalid tokens or non-existent users.
-    
-    Example:
-        >>> @app.get("/protected")
-        >>> async def protected_route(current_user: User = Depends(get_current_user)):
-        >>>     return {"user": current_user.username}
+        HTTPException: If token is invalid or user not found
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail=INVALID_CREDENTIALS_MSG,
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    # Verify and decode the token
-    payload = verify_token(token)
-    
-    # Extract user identifier from token
-    user_identifier: str = payload.get("sub")
-    if not user_identifier:
+    try:
+        # Verify and decode the token
+        payload = verify_token(token)
+        
+        # Extract user identifier from token
+        user_id: Optional[str] = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+            
+    except HTTPException:
+        # Re-raise HTTP exceptions from verify_token
+        raise
+    except Exception:
+        # Catch any other unexpected errors
         raise credentials_exception
     
     try:
-        # Try to find user by ID first, then by username/email
-        user = None
-        
-        # Check if identifier is numeric (user ID)
-        if user_identifier.isdigit():
-            user = db.query(User).filter(User.id == int(user_identifier)).first()
-        
-        # If not found by ID, try username or email
-        if not user:
-            user = db.query(User).filter(
-                (User.username == user_identifier) | 
-                (User.email == user_identifier)
-            ).first()
-        
-        if not user:
+        # Look up user in database
+        user = await User.get_by_id(user_id)
+        if user is None:
             raise credentials_exception
             
         return user
-        
     except Exception as e:
-        # Log the error in production, but don't expose details to client
+        # Database lookup failed
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User authentication failed",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="User lookup failed"
         )
 
 
-async def get_current_active_user(
-    current_user: User = Depends(get_current_user)
-) -> User:
+async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
     """
-    Dependency that ensures the current user is active.
-    
-    This function builds upon get_current_user to also verify that the user
-    account is active and not disabled.
+    FastAPI dependency to get current user and verify they are active.
     
     Args:
-        current_user: User instance from get_current_user dependency.
-    
+        current_user: Current user from get_current_user dependency
+        
     Returns:
-        User: Active user model instance.
-    
+        User: Current active user
+        
     Raises:
-        HTTPException: 403 status if user account is inactive/disabled.
-    
-    Example:
-        >>> @app.get("/admin")
-        >>> async def admin_route(user: User = Depends(get_current_active_user)):
-        >>>     return {"message": f"Hello active user {user.username}"}
+        HTTPException: If user is inactive
     """
     if not getattr(current_user, 'is_active', True):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user account. Please contact administrator."
+            detail=INACTIVE_USER_MSG
         )
     
     return current_user
 
 
-def authenticate_user(db: Session, username: str, password: str) -> Optional[User]:
+def create_user_token(user: User) -> str:
     """
-    Authenticate a user with username/email and password.
-    
-    This utility function handles the complete authentication flow:
-    finding the user and verifying their password.
+    Create an access token for a specific user.
     
     Args:
-        db: Database session for user lookup.
-        username: Username or email address.
-        password: Plain text password.
-    
+        user: User object to create token for
+        
     Returns:
-        Optional[User]: User instance if authentication succeeds, None otherwise.
-    
-    Example:
-        >>> user = authenticate_user(db, "john_doe", "password123")
-        >>> if user:
-        >>>     token = create_access_token({"sub": str(user.id)})
+        str: JWT access token
+        
+    Raises:
+        ValueError: If user is invalid
+        RuntimeError: If token creation fails
     """
-    if not username or not password:
-        return None
+    if not user or not hasattr(user, 'id'):
+        raise ValueError("Invalid user object")
     
-    try:
-        # Find user by username or email
-        user = db.query(User).filter(
-            (User.username == username) | (User.email == username)
-        ).first()
-        
-        if not user:
-            return None
-        
-        # Verify password
-        if not verify_password(password, user.hashed_password):
-            return None
-        
-        return user
-        
-    except Exception:
-        # Return None for any database or verification errors
-        return None
+    token_data = {
+        "sub": str(user.id),
+        "username": getattr(user, 'username', ''),
+        "email": getattr(user, 'email', ''),
+    }
+    
+    return create_access_token(token_data)
 
 
-# Utility function for token validation without database lookup
 def validate_token_format(token: str) -> bool:
     """
-    Validate JWT token format without database operations.
-    
-    Useful for lightweight token validation in middleware or
-    non-database contexts.
+    Validate JWT token format without full verification.
     
     Args:
-        token: JWT token string to validate.
-    
+        token: Token string to validate
+        
     Returns:
-        bool: True if token format is valid and not expired.
-    
-    Example:
-        >>> if validate_token_format(token):
-        >>>     # Token is structurally valid
-        >>>     pass
+        bool: True if token has valid JWT format
     """
-    try:
-        verify_token(token)
-        return True
-    except HTTPException:
+    if not token or not isinstance(token, str):
         return False
+    
+    # JWT tokens have 3 parts separated by dots
+    parts = token.split('.')
+    if len(parts) != 3:
+        return False
+    
+    # Each part should be non-empty
+    return all(part.strip() for part in parts)
 
 
-# Export main components for easy importing
-__all__ = [
-    "create_access_token",
-    "verify_token", 
-    "get_password_hash",
-    "verify_password",
-    "get_current_user",
-    "get_current_active_user",
-    "authenticate_user",
-    "validate_token_format",
-    "oauth2_scheme",
-    "TOKEN_EXPIRE_HOURS",
-    "ALGORITHM"
-]
+# Environment validation
+def validate_environment() -> None:
+    """
+    Validate required environment variables and configuration.
+    
+    Raises:
+        RuntimeError: If environment is not properly configured
+    """
+    if SECRET_KEY == "your-secret-key-change-in-production":
+        if os.getenv("ENVIRONMENT", "development") == "production":
+            raise RuntimeError(
+                "SECRET_KEY must be set to a secure value in production"
+            )
+    
+    if len(SECRET_KEY) < 32:
+        raise RuntimeError(
+            "SECRET_KEY must be at least 32 characters long"
+        )
+
+
+# Initialize environment validation
+try:
+    validate_environment()
+except RuntimeError as e:
+    # Log the error but don't crash the application during import
+    print(f"Warning: {e}")
