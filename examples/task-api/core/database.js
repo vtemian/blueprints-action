@@ -1,492 +1,502 @@
 /**
- * Core Database Module - Production-ready SQLite connection and session management
+ * Core Database Module
+ * Production-ready SQLite database connection and session management
+ * 
  * @module core.database
+ * @author Expert JavaScript Developer
  * @version 1.0.0
  */
 
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
-import { v4 as uuidv4 } from 'uuid';
-import dotenv from 'dotenv';
-import path from 'path';
-import fs from 'fs/promises';
-import { EventEmitter } from 'events';
-
-// Load environment variables
-dotenv.config();
+const Database = require('better-sqlite3');
+const { v4: uuidv4 } = require('uuid');
+const path = require('path');
+const fs = require('fs').promises;
+const EventEmitter = require('events');
 
 /**
- * Custom error classes for database operations
- */
-class DatabaseError extends Error {
-  constructor(message, code = 'DB_ERROR', originalError = null) {
-    super(message);
-    this.name = 'DatabaseError';
-    this.code = code;
-    this.originalError = originalError;
-    this.timestamp = new Date().toISOString();
-  }
-}
-
-class ConnectionError extends DatabaseError {
-  constructor(message, originalError = null) {
-    super(message, 'CONNECTION_ERROR', originalError);
-    this.name = 'ConnectionError';
-  }
-}
-
-class TransactionError extends DatabaseError {
-  constructor(message, originalError = null) {
-    super(message, 'TRANSACTION_ERROR', originalError);
-    this.name = 'TransactionError';
-  }
-}
-
-/**
- * Database configuration with environment-based settings and fallback defaults
+ * Database Configuration Class
  */
 class DatabaseConfig {
-  constructor() {
-    this.database_url = process.env.DATABASE_URL || 'sqlite:./app.db';
-    this.pool_size = parseInt(process.env.DB_POOL_SIZE) || 10;
-    this.pool_timeout = parseInt(process.env.DB_POOL_TIMEOUT) || 30000;
-    this.retry_attempts = parseInt(process.env.DB_RETRY_ATTEMPTS) || 3;
-    this.retry_delay = parseInt(process.env.DB_RETRY_DELAY) || 1000;
-    this.connection_timeout = parseInt(process.env.DB_CONNECTION_TIMEOUT) || 10000;
-    this.enable_wal = process.env.DB_ENABLE_WAL !== 'false';
-    this.busy_timeout = parseInt(process.env.DB_BUSY_TIMEOUT) || 5000;
-    this.log_level = process.env.DB_LOG_LEVEL || 'info';
-  }
-
-  /**
-   * Extract database path from URL
-   * @returns {string} Database file path
-   */
-  getDatabasePath() {
-    if (this.database_url.startsWith('sqlite:')) {
-      return this.database_url.replace('sqlite:', '');
+    constructor() {
+        this.DATABASE_URL = process.env.DATABASE_URL || './tasks.db';
+        this.MAX_CONNECTIONS = parseInt(process.env.DB_MAX_CONNECTIONS) || 10;
+        this.CONNECTION_TIMEOUT = parseInt(process.env.DB_CONNECTION_TIMEOUT) || 30000;
+        this.RETRY_ATTEMPTS = parseInt(process.env.DB_RETRY_ATTEMPTS) || 3;
+        this.RETRY_DELAY = parseInt(process.env.DB_RETRY_DELAY) || 1000;
+        this.WAL_MODE = process.env.DB_WAL_MODE !== 'false';
+        this.FOREIGN_KEYS = process.env.DB_FOREIGN_KEYS !== 'false';
+        this.BUSY_TIMEOUT = parseInt(process.env.DB_BUSY_TIMEOUT) || 5000;
     }
-    return this.database_url;
-  }
 }
 
 /**
- * Logger utility for database operations
+ * Database Connection Pool Manager
  */
-class DatabaseLogger {
-  constructor(level = 'info') {
-    this.level = level;
-    this.levels = { error: 0, warn: 1, info: 2, debug: 3 };
-  }
-
-  log(level, message, meta = {}) {
-    if (this.levels[level] <= this.levels[this.level]) {
-      const timestamp = new Date().toISOString();
-      const logEntry = {
-        timestamp,
-        level: level.toUpperCase(),
-        message,
-        ...meta
-      };
-      console.log(JSON.stringify(logEntry));
-    }
-  }
-
-  error(message, meta = {}) { this.log('error', message, meta); }
-  warn(message, meta = {}) { this.log('warn', message, meta); }
-  info(message, meta = {}) { this.log('info', message, meta); }
-  debug(message, meta = {}) { this.log('debug', message, meta); }
-}
-
-/**
- * Connection pool manager for SQLite connections
- */
-class ConnectionPool extends EventEmitter {
-  constructor(config, logger) {
-    super();
-    this.config = config;
-    this.logger = logger;
-    this.connections = new Set();
-    this.availableConnections = [];
-    this.waitingQueue = [];
-    this.isShuttingDown = false;
-  }
-
-  /**
-   * Get a connection from the pool
-   * @returns {Promise<sqlite.Database>} Database connection
-   */
-  async getConnection() {
-    if (this.isShuttingDown) {
-      throw new ConnectionError('Connection pool is shutting down');
+class DatabasePool extends EventEmitter {
+    constructor(config) {
+        super();
+        this.config = config;
+        this.connections = new Map();
+        this.activeConnections = 0;
+        this.isShuttingDown = false;
+        this.healthCheckInterval = null;
+        this.stats = {
+            totalConnections: 0,
+            activeQueries: 0,
+            errors: 0,
+            lastError: null
+        };
     }
 
-    if (this.availableConnections.length > 0) {
-      const connection = this.availableConnections.pop();
-      this.logger.debug('Reusing existing connection from pool');
-      return connection;
-    }
-
-    if (this.connections.size < this.config.pool_size) {
-      const connection = await this.createConnection();
-      this.connections.add(connection);
-      this.logger.debug('Created new connection', { poolSize: this.connections.size });
-      return connection;
-    }
-
-    // Wait for available connection
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const index = this.waitingQueue.findIndex(item => item.resolve === resolve);
-        if (index !== -1) {
-          this.waitingQueue.splice(index, 1);
+    /**
+     * Get or create a database connection
+     * @returns {Database} SQLite database instance
+     */
+    async getConnection() {
+        if (this.isShuttingDown) {
+            throw new Error('Database pool is shutting down');
         }
-        reject(new ConnectionError('Connection pool timeout'));
-      }, this.config.pool_timeout);
 
-      this.waitingQueue.push({ resolve, reject, timeout });
-    });
-  }
+        const connectionId = `conn_${Date.now()}_${Math.random()}`;
+        
+        try {
+            const db = new Database(this.config.DATABASE_URL, {
+                timeout: this.config.CONNECTION_TIMEOUT,
+                verbose: process.env.NODE_ENV === 'development' ? console.log : null
+            });
 
-  /**
-   * Return a connection to the pool
-   * @param {sqlite.Database} connection - Database connection to return
-   */
-  releaseConnection(connection) {
-    if (this.waitingQueue.length > 0) {
-      const { resolve, timeout } = this.waitingQueue.shift();
-      clearTimeout(timeout);
-      resolve(connection);
-    } else {
-      this.availableConnections.push(connection);
+            // Configure database settings
+            this.configureConnection(db);
+            
+            this.connections.set(connectionId, {
+                db,
+                created: Date.now(),
+                lastUsed: Date.now()
+            });
+
+            this.activeConnections++;
+            this.stats.totalConnections++;
+            
+            this.emit('connectionCreated', { connectionId, activeConnections: this.activeConnections });
+            
+            return { db, connectionId };
+        } catch (error) {
+            this.stats.errors++;
+            this.stats.lastError = error;
+            this.emit('connectionError', error);
+            throw new DatabaseError(`Failed to create database connection: ${error.message}`, error);
+        }
     }
-  }
 
-  /**
-   * Create a new SQLite connection
-   * @returns {Promise<sqlite.Database>} New database connection
-   */
-  async createConnection() {
-    const dbPath = this.config.getDatabasePath();
-    
-    try {
-      const db = await open({
-        filename: dbPath,
-        driver: sqlite3.Database
-      });
-
-      // Configure SQLite for better concurrency
-      if (this.config.enable_wal) {
-        await db.exec('PRAGMA journal_mode = WAL;');
-      }
-      
-      await db.exec(`PRAGMA busy_timeout = ${this.config.busy_timeout};`);
-      await db.exec('PRAGMA foreign_keys = ON;');
-      await db.exec('PRAGMA synchronous = NORMAL;');
-
-      this.logger.debug('Created new SQLite connection', { path: dbPath });
-      return db;
-    } catch (error) {
-      this.logger.error('Failed to create database connection', { error: error.message });
-      throw new ConnectionError(`Failed to create connection: ${error.message}`, error);
+    /**
+     * Configure individual database connection
+     * @param {Database} db - SQLite database instance
+     */
+    configureConnection(db) {
+        // Enable WAL mode for better concurrency
+        if (this.config.WAL_MODE) {
+            db.pragma('journal_mode = WAL');
+        }
+        
+        // Enable foreign key constraints
+        if (this.config.FOREIGN_KEYS) {
+            db.pragma('foreign_keys = ON');
+        }
+        
+        // Set busy timeout
+        db.pragma(`busy_timeout = ${this.config.BUSY_TIMEOUT}`);
+        
+        // Optimize for performance
+        db.pragma('synchronous = NORMAL');
+        db.pragma('cache_size = 1000');
+        db.pragma('temp_store = memory');
     }
-  }
 
-  /**
-   * Close all connections in the pool
-   */
-  async closeAll() {
-    this.isShuttingDown = true;
-    this.logger.info('Shutting down connection pool');
+    /**
+     * Release a database connection
+     * @param {string} connectionId - Connection identifier
+     */
+    releaseConnection(connectionId) {
+        const connection = this.connections.get(connectionId);
+        if (connection) {
+            try {
+                connection.db.close();
+                this.connections.delete(connectionId);
+                this.activeConnections--;
+                this.emit('connectionReleased', { connectionId, activeConnections: this.activeConnections });
+            } catch (error) {
+                console.error(`Error closing connection ${connectionId}:`, error);
+            }
+        }
+    }
 
-    // Reject all waiting requests
-    this.waitingQueue.forEach(({ reject, timeout }) => {
-      clearTimeout(timeout);
-      reject(new ConnectionError('Connection pool is shutting down'));
-    });
-    this.waitingQueue = [];
+    /**
+     * Start health check monitoring
+     */
+    startHealthCheck() {
+        this.healthCheckInterval = setInterval(async () => {
+            try {
+                await this.healthCheck();
+            } catch (error) {
+                this.emit('healthCheckFailed', error);
+            }
+        }, 30000); // Check every 30 seconds
+    }
 
-    // Close all connections
-    const allConnections = [...this.connections, ...this.availableConnections];
-    const closePromises = allConnections.map(async (connection) => {
-      try {
-        await connection.close();
-      } catch (error) {
-        this.logger.warn('Error closing connection', { error: error.message });
-      }
-    });
+    /**
+     * Perform database health check
+     */
+    async healthCheck() {
+        const { db, connectionId } = await this.getConnection();
+        try {
+            const result = db.prepare('SELECT 1 as health').get();
+            if (result.health !== 1) {
+                throw new Error('Health check failed');
+            }
+            this.emit('healthCheckPassed');
+        } finally {
+            this.releaseConnection(connectionId);
+        }
+    }
 
-    await Promise.all(closePromises);
-    this.connections.clear();
-    this.availableConnections = [];
-    
-    this.logger.info('Connection pool shutdown complete');
-  }
+    /**
+     * Get pool statistics
+     */
+    getStats() {
+        return {
+            ...this.stats,
+            activeConnections: this.activeConnections,
+            totalConnectionsInPool: this.connections.size
+        };
+    }
+
+    /**
+     * Gracefully shutdown the connection pool
+     */
+    async shutdown() {
+        this.isShuttingDown = true;
+        
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+        }
+
+        // Close all connections
+        const closePromises = Array.from(this.connections.entries()).map(([connectionId, connection]) => {
+            return new Promise((resolve) => {
+                try {
+                    connection.db.close();
+                    resolve();
+                } catch (error) {
+                    console.error(`Error closing connection ${connectionId}:`, error);
+                    resolve();
+                }
+            });
+        });
+
+        await Promise.all(closePromises);
+        this.connections.clear();
+        this.activeConnections = 0;
+        this.emit('shutdown');
+    }
 }
 
 /**
- * Database session wrapper for transaction management
+ * Custom Database Error Class
  */
-class DatabaseSession {
-  constructor(connection, pool, logger) {
-    this.connection = connection;
-    this.pool = pool;
-    this.logger = logger;
-    this.isInTransaction = false;
-    this.isClosed = false;
-  }
-
-  /**
-   * Execute a SQL query
-   * @param {string} sql - SQL query
-   * @param {Array} params - Query parameters
-   * @returns {Promise<any>} Query result
-   */
-  async execute(sql, params = []) {
-    if (this.isClosed) {
-      throw new DatabaseError('Session is closed');
+class DatabaseError extends Error {
+    constructor(message, originalError = null) {
+        super(message);
+        this.name = 'DatabaseError';
+        this.originalError = originalError;
+        this.timestamp = new Date().toISOString();
     }
-
-    try {
-      this.logger.debug('Executing SQL query', { sql, params });
-      const result = await this.connection.run(sql, params);
-      return result;
-    } catch (error) {
-      this.logger.error('SQL execution failed', { sql, params, error: error.message });
-      throw new DatabaseError(`Query execution failed: ${error.message}`, 'QUERY_ERROR', error);
-    }
-  }
-
-  /**
-   * Fetch all rows from a query
-   * @param {string} sql - SQL query
-   * @param {Array} params - Query parameters
-   * @returns {Promise<Array>} Query results
-   */
-  async fetchAll(sql, params = []) {
-    if (this.isClosed) {
-      throw new DatabaseError('Session is closed');
-    }
-
-    try {
-      this.logger.debug('Fetching all rows', { sql, params });
-      const rows = await this.connection.all(sql, params);
-      return rows;
-    } catch (error) {
-      this.logger.error('Fetch all failed', { sql, params, error: error.message });
-      throw new DatabaseError(`Fetch failed: ${error.message}`, 'QUERY_ERROR', error);
-    }
-  }
-
-  /**
-   * Fetch one row from a query
-   * @param {string} sql - SQL query
-   * @param {Array} params - Query parameters
-   * @returns {Promise<Object|null>} Query result
-   */
-  async fetchOne(sql, params = []) {
-    if (this.isClosed) {
-      throw new DatabaseError('Session is closed');
-    }
-
-    try {
-      this.logger.debug('Fetching one row', { sql, params });
-      const row = await this.connection.get(sql, params);
-      return row || null;
-    } catch (error) {
-      this.logger.error('Fetch one failed', { sql, params, error: error.message });
-      throw new DatabaseError(`Fetch failed: ${error.message}`, 'QUERY_ERROR', error);
-    }
-  }
-
-  /**
-   * Begin a database transaction
-   */
-  async beginTransaction() {
-    if (this.isInTransaction) {
-      throw new TransactionError('Transaction already in progress');
-    }
-
-    try {
-      await this.connection.exec('BEGIN TRANSACTION;');
-      this.isInTransaction = true;
-      this.logger.debug('Transaction started');
-    } catch (error) {
-      throw new TransactionError(`Failed to begin transaction: ${error.message}`, error);
-    }
-  }
-
-  /**
-   * Commit the current transaction
-   */
-  async commit() {
-    if (!this.isInTransaction) {
-      throw new TransactionError('No transaction in progress');
-    }
-
-    try {
-      await this.connection.exec('COMMIT;');
-      this.isInTransaction = false;
-      this.logger.debug('Transaction committed');
-    } catch (error) {
-      this.isInTransaction = false;
-      throw new TransactionError(`Failed to commit transaction: ${error.message}`, error);
-    }
-  }
-
-  /**
-   * Rollback the current transaction
-   */
-  async rollback() {
-    if (!this.isInTransaction) {
-      throw new TransactionError('No transaction in progress');
-    }
-
-    try {
-      await this.connection.exec('ROLLBACK;');
-      this.isInTransaction = false;
-      this.logger.debug('Transaction rolled back');
-    } catch (error) {
-      this.isInTransaction = false;
-      throw new TransactionError(`Failed to rollback transaction: ${error.message}`, error);
-    }
-  }
-
-  /**
-   * Execute a function within a transaction
-   * @param {Function} fn - Function to execute in transaction
-   * @returns {Promise<any>} Function result
-   */
-  async transaction(fn) {
-    await this.beginTransaction();
-    
-    try {
-      const result = await fn(this);
-      await this.commit();
-      return result;
-    } catch (error) {
-      await this.rollback();
-      throw error;
-    }
-  }
-
-  /**
-   * Close the session and return connection to pool
-   */
-  async close() {
-    if (this.isClosed) {
-      return;
-    }
-
-    if (this.isInTransaction) {
-      this.logger.warn('Closing session with active transaction, rolling back');
-      await this.rollback();
-    }
-
-    this.pool.releaseConnection(this.connection);
-    this.isClosed = true;
-    this.logger.debug('Session closed');
-  }
 }
 
 /**
- * Base model class with common fields and utilities
+ * Base Model Class for common database operations
  */
 class BaseModel {
-  constructor(data = {}) {
-    this.id = data.id || uuidv4();
-    this.created_at = data.created_at || new Date().toISOString();
-    this.updated_at = data.updated_at || new Date().toISOString();
-    
-    // Copy other properties
-    Object.keys(data).forEach(key => {
-      if (!['id', 'created_at', 'updated_at'].includes(key)) {
-        this[key] = data[key];
-      }
-    });
-  }
+    constructor(tableName, db) {
+        this.tableName = tableName;
+        this.db = db;
+        this.fields = ['id', 'created_at', 'updated_at'];
+    }
 
-  /**
-   * Update the updated_at timestamp
-   */
-  touch() {
-    this.updated_at = new Date().toISOString();
-  }
+    /**
+     * Create a new record
+     * @param {Object} data - Record data
+     * @returns {Object} Created record
+     */
+    async create(data) {
+        const now = new Date().toISOString();
+        const recordData = {
+            id: uuidv4(),
+            created_at: now,
+            updated_at: now,
+            ...data
+        };
 
-  /**
-   * Convert model to plain object
-   * @returns {Object} Plain object representation
-   */
-  toObject() {
-    const obj = {};
-    Object.keys(this).forEach(key => {
-      if (typeof this[key] !== 'function') {
-        obj[key] = this[key];
-      }
-    });
-    return obj;
-  }
+        const fields = Object.keys(recordData);
+        const placeholders = fields.map(() => '?').join(', ');
+        const values = Object.values(recordData);
 
-  /**
-   * Get base table schema SQL
-   * @param {string} tableName - Name of the table
-   * @returns {string} CREATE TABLE SQL
-   */
-  static getBaseSchema(tableName) {
-    return `
-      CREATE TABLE IF NOT EXISTS ${tableName} (
-        id TEXT PRIMARY KEY,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
-  }
+        const query = `
+            INSERT INTO ${this.tableName} (${fields.join(', ')})
+            VALUES (${placeholders})
+        `;
+
+        try {
+            const stmt = this.db.prepare(query);
+            stmt.run(values);
+            return this.findById(recordData.id);
+        } catch (error) {
+            throw new DatabaseError(`Failed to create record in ${this.tableName}: ${error.message}`, error);
+        }
+    }
+
+    /**
+     * Find record by ID
+     * @param {string} id - Record ID
+     * @returns {Object|null} Found record or null
+     */
+    async findById(id) {
+        try {
+            const stmt = this.db.prepare(`SELECT * FROM ${this.tableName} WHERE id = ?`);
+            return stmt.get(id) || null;
+        } catch (error) {
+            throw new DatabaseError(`Failed to find record by ID in ${this.tableName}: ${error.message}`, error);
+        }
+    }
+
+    /**
+     * Find records with conditions
+     * @param {Object} conditions - Where conditions
+     * @param {Object} options - Query options (limit, offset, orderBy)
+     * @returns {Array} Found records
+     */
+    async find(conditions = {}, options = {}) {
+        try {
+            let query = `SELECT * FROM ${this.tableName}`;
+            const values = [];
+
+            // Build WHERE clause
+            if (Object.keys(conditions).length > 0) {
+                const whereClause = Object.keys(conditions)
+                    .map(key => `${key} = ?`)
+                    .join(' AND ');
+                query += ` WHERE ${whereClause}`;
+                values.push(...Object.values(conditions));
+            }
+
+            // Add ORDER BY
+            if (options.orderBy) {
+                query += ` ORDER BY ${options.orderBy}`;
+            }
+
+            // Add LIMIT and OFFSET
+            if (options.limit) {
+                query += ` LIMIT ${parseInt(options.limit)}`;
+                if (options.offset) {
+                    query += ` OFFSET ${parseInt(options.offset)}`;
+                }
+            }
+
+            const stmt = this.db.prepare(query);
+            return stmt.all(values);
+        } catch (error) {
+            throw new DatabaseError(`Failed to find records in ${this.tableName}: ${error.message}`, error);
+        }
+    }
+
+    /**
+     * Update record by ID
+     * @param {string} id - Record ID
+     * @param {Object} data - Update data
+     * @returns {Object|null} Updated record or null
+     */
+    async update(id, data) {
+        const updateData = {
+            ...data,
+            updated_at: new Date().toISOString()
+        };
+
+        const fields = Object.keys(updateData);
+        const setClause = fields.map(field => `${field} = ?`).join(', ');
+        const values = [...Object.values(updateData), id];
+
+        const query = `
+            UPDATE ${this.tableName}
+            SET ${setClause}
+            WHERE id = ?
+        `;
+
+        try {
+            const stmt = this.db.prepare(query);
+            const result = stmt.run(values);
+            
+            if (result.changes === 0) {
+                return null;
+            }
+            
+            return this.findById(id);
+        } catch (error) {
+            throw new DatabaseError(`Failed to update record in ${this.tableName}: ${error.message}`, error);
+        }
+    }
+
+    /**
+     * Delete record by ID
+     * @param {string} id - Record ID
+     * @returns {boolean} Success status
+     */
+    async delete(id) {
+        try {
+            const stmt = this.db.prepare(`DELETE FROM ${this.tableName} WHERE id = ?`);
+            const result = stmt.run(id);
+            return result.changes > 0;
+        } catch (error) {
+            throw new DatabaseError(`Failed to delete record in ${this.tableName}: ${error.message}`, error);
+        }
+    }
+
+    /**
+     * Count records with conditions
+     * @param {Object} conditions - Where conditions
+     * @returns {number} Record count
+     */
+    async count(conditions = {}) {
+        try {
+            let query = `SELECT COUNT(*) as count FROM ${this.tableName}`;
+            const values = [];
+
+            if (Object.keys(conditions).length > 0) {
+                const whereClause = Object.keys(conditions)
+                    .map(key => `${key} = ?`)
+                    .join(' AND ');
+                query += ` WHERE ${whereClause}`;
+                values.push(...Object.values(conditions));
+            }
+
+            const stmt = this.db.prepare(query);
+            const result = stmt.get(values);
+            return result.count;
+        } catch (error) {
+            throw new DatabaseError(`Failed to count records in ${this.tableName}: ${error.message}`, error);
+        }
+    }
 }
 
 /**
- * Main Database class - Singleton pattern for connection management
+ * Database Manager - Main class for database operations
  */
-class Database extends EventEmitter {
-  constructor() {
-    super();
-    
-    if (Database.instance) {
-      return Database.instance;
+class DatabaseManager {
+    constructor() {
+        this.config = new DatabaseConfig();
+        this.pool = new DatabasePool(this.config);
+        this.isInitialized = false;
+        this.currentConnection = null;
+        
+        // Setup event listeners
+        this.setupEventListeners();
     }
 
-    this.config = new DatabaseConfig();
-    this.logger = new DatabaseLogger(this.config.log_level);
-    this.pool = new ConnectionPool(this.config, this.logger);
-    this.isInitialized = false;
-    this.healthCheckInterval = null;
+    /**
+     * Setup event listeners for monitoring
+     */
+    setupEventListeners() {
+        this.pool.on('connectionError', (error) => {
+            console.error('Database connection error:', error);
+        });
 
-    // Singleton instance
-    Database.instance = this;
+        this.pool.on('healthCheckFailed', (error) => {
+            console.error('Database health check failed:', error);
+        });
 
-    // Graceful shutdown handling
-    process.on('SIGINT', () => this.close());
-    process.on('SIGTERM', () => this.close());
-  }
-
-  /**
-   * Initialize the database
-   * @param {Object} options - Initialization options
-   * @returns {Promise<void>}
-   */
-  async init(options = {}) {
-    if (this.isInitialized) {
-      this.logger.warn('Database already initialized');
-      return;
+        this.pool.on('shutdown', () => {
+            console.log('Database pool shutdown completed');
+        });
     }
 
-    try {
-      this.logger.info('Initializing database', { config: this.config });
+    /**
+     * Initialize database with retry logic
+     */
+    async initDb() {
+        if (this.isInitialized) {
+            return;
+        }
 
-      // Ensure database directory exists
-      const dbPath = this.config.getDatabasePath();
-      const dbDir = path.dirname(dbPath);
-      
-      try {
-        await fs.access(dbDir);
-      } catch {
-        await fs.mkdir(db
+        let lastError;
+        for (let attempt = 1; attempt <= this.config.RETRY_ATTEMPTS; attempt++) {
+            try {
+                console.log(`Initializing database (attempt ${attempt}/${this.config.RETRY_ATTEMPTS})...`);
+                
+                // Ensure database directory exists
+                const dbDir = path.dirname(this.config.DATABASE_URL);
+                await fs.mkdir(dbDir, { recursive: true });
+
+                // Get connection and create tables
+                const { db, connectionId } = await this.pool.getConnection();
+                this.currentConnection = { db, connectionId };
+
+                await this.createTables(db);
+                await this.runMigrations(db);
+
+                this.isInitialized = true;
+                this.pool.startHealthCheck();
+                
+                console.log('Database initialized successfully');
+                return;
+            } catch (error) {
+                lastError = error;
+                console.error(`Database initialization attempt ${attempt} failed:`, error.message);
+                
+                if (attempt < this.config.RETRY_ATTEMPTS) {
+                    await this.delay(this.config.RETRY_DELAY * attempt);
+                }
+            }
+        }
+
+        throw new DatabaseError(`Failed to initialize database after ${this.config.RETRY_ATTEMPTS} attempts`, lastError);
+    }
+
+    /**
+     * Create database tables
+     * @param {Database} db - Database instance
+     */
+    async createTables(db) {
+        const tables = [
+            // Tasks table example
+            `CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'pending',
+                priority INTEGER DEFAULT 1,
+                due_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )`,
+            
+            // Users table example
+            `CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                is_active BOOLEAN DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )`,
+
+            // Sessions table for session management
+            `CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                session_data TEXT,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            )`
+        ];

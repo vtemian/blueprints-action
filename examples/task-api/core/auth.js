@@ -1,384 +1,319 @@
+/**
+ * Core Authentication Module
+ * Provides JWT token management and password security utilities
+ * @module core.auth
+ */
+
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import dotenv from 'dotenv';
-import User from '../models/user.js';
 
 // Load environment variables
 dotenv.config();
 
-// Environment variable validation
-if (!process.env.JWT_SECRET) {
+// Configuration constants
+const AUTH_CONFIG = {
+  JWT_SECRET: process.env.JWT_SECRET,
+  JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '24h',
+  BCRYPT_SALT_ROUNDS: 12,
+  JWT_ALGORITHM: 'HS256'
+};
+
+// Validate required environment variables
+if (!AUTH_CONFIG.JWT_SECRET) {
   throw new Error('JWT_SECRET environment variable is required');
 }
 
-// Constants
-const JWT_SECRET = process.env.JWT_SECRET;
-const TOKEN_EXPIRATION = '24h';
-const SALT_ROUNDS = 12;
-const BEARER_PREFIX = 'Bearer ';
-
 /**
- * Custom error classes for authentication
+ * Custom Authentication Error Classes
  */
-export class AuthenticationError extends Error {
-  constructor(message) {
+class AuthenticationError extends Error {
+  constructor(message, code = 'AUTH_ERROR') {
     super(message);
     this.name = 'AuthenticationError';
+    this.code = code;
   }
 }
 
-export class TokenExpiredError extends Error {
-  constructor(message = 'Token has expired') {
-    super(message);
-    this.name = 'TokenExpiredError';
+class TokenError extends AuthenticationError {
+  constructor(message, code = 'TOKEN_ERROR') {
+    super(message, code);
+    this.name = 'TokenError';
   }
 }
 
-export class InvalidTokenError extends Error {
-  constructor(message = 'Invalid token') {
-    super(message);
-    this.name = 'InvalidTokenError';
-  }
-}
-
-export class UserNotFoundError extends Error {
-  constructor(message = 'User not found') {
-    super(message);
-    this.name = 'UserNotFoundError';
-  }
-}
-
-export class InactiveUserError extends Error {
-  constructor(message = 'User account is inactive') {
-    super(message);
-    this.name = 'InactiveUserError';
+class PasswordError extends AuthenticationError {
+  constructor(message, code = 'PASSWORD_ERROR') {
+    super(message, code);
+    this.name = 'PasswordError';
   }
 }
 
 /**
- * Generate JWT access token with 24-hour expiration
- * @param {Object} data - Payload data to include in token
- * @returns {Promise<string>} Generated JWT token
- * @throws {Error} If data is invalid or token generation fails
+ * Input validation helper
+ * @private
+ * @param {*} value - Value to validate
+ * @param {string} paramName - Parameter name for error messages
+ * @param {string} expectedType - Expected type
+ * @throws {AuthenticationError} When validation fails
  */
-export async function createAccessToken(data) {
-  try {
-    if (!data || typeof data !== 'object') {
-      throw new Error('Token data must be a valid object');
-    }
-
-    const token = jwt.sign(data, JWT_SECRET, {
-      algorithm: 'HS256',
-      expiresIn: TOKEN_EXPIRATION
-    });
-
-    return token;
-  } catch (error) {
-    if (error.name === 'JsonWebTokenError') {
-      throw new InvalidTokenError('Failed to create token: ' + error.message);
-    }
-    throw error;
+function validateInput(value, paramName, expectedType = 'string') {
+  if (value === null || value === undefined) {
+    throw new AuthenticationError(`${paramName} is required`);
+  }
+  
+  if (expectedType === 'string' && (typeof value !== 'string' || value.trim() === '')) {
+    throw new AuthenticationError(`${paramName} must be a non-empty string`);
+  }
+  
+  if (expectedType === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
+    throw new AuthenticationError(`${paramName} must be an object`);
   }
 }
 
 /**
- * Verify and decode JWT token
+ * Creates a JWT access token with user data
+ * @param {Object} data - User data to include in token payload
+ * @param {string|number} data.userId - User ID
+ * @param {string} data.email - User email
+ * @param {string} [data.role] - User role
+ * @param {Object} [options] - Additional token options
+ * @param {string} [options.expiresIn] - Token expiration time
+ * @returns {Promise<string>} JWT access token
+ * @throws {AuthenticationError} When data is invalid
+ * @throws {TokenError} When token creation fails
+ */
+export async function createAccessToken(data, options = {}) {
+  try {
+    validateInput(data, 'data', 'object');
+    validateInput(data.userId, 'data.userId');
+    validateInput(data.email, 'data.email');
+
+    const payload = {
+      userId: data.userId,
+      email: data.email,
+      role: data.role || 'user',
+      iat: Math.floor(Date.now() / 1000),
+      type: 'access'
+    };
+
+    const tokenOptions = {
+      algorithm: AUTH_CONFIG.JWT_ALGORITHM,
+      expiresIn: options.expiresIn || AUTH_CONFIG.JWT_EXPIRES_IN,
+      issuer: 'core.auth',
+      audience: 'api'
+    };
+
+    return new Promise((resolve, reject) => {
+      jwt.sign(payload, AUTH_CONFIG.JWT_SECRET, tokenOptions, (err, token) => {
+        if (err) {
+          reject(new TokenError('Failed to create access token', 'TOKEN_CREATION_FAILED'));
+        } else {
+          resolve(token);
+        }
+      });
+    });
+  } catch (error) {
+    if (error instanceof AuthenticationError) {
+      throw error;
+    }
+    throw new TokenError('Unexpected error during token creation', 'TOKEN_CREATION_ERROR');
+  }
+}
+
+/**
+ * Verifies and decodes a JWT token
  * @param {string} token - JWT token to verify
  * @returns {Promise<Object>} Decoded token payload
- * @throws {TokenExpiredError} If token has expired
- * @throws {InvalidTokenError} If token is invalid or malformed
+ * @throws {TokenError} When token is invalid, expired, or malformed
  */
 export async function verifyToken(token) {
   try {
-    if (!token || typeof token !== 'string') {
-      throw new InvalidTokenError('Token must be a valid string');
-    }
+    validateInput(token, 'token');
 
-    const decoded = jwt.verify(token, JWT_SECRET, {
-      algorithms: ['HS256']
+    const verifyOptions = {
+      algorithms: [AUTH_CONFIG.JWT_ALGORITHM],
+      issuer: 'core.auth',
+      audience: 'api'
+    };
+
+    return new Promise((resolve, reject) => {
+      jwt.verify(token, AUTH_CONFIG.JWT_SECRET, verifyOptions, (err, decoded) => {
+        if (err) {
+          if (err.name === 'TokenExpiredError') {
+            reject(new TokenError('Token has expired', 'TOKEN_EXPIRED'));
+          } else if (err.name === 'JsonWebTokenError') {
+            reject(new TokenError('Invalid token format', 'TOKEN_INVALID'));
+          } else if (err.name === 'NotBeforeError') {
+            reject(new TokenError('Token not active yet', 'TOKEN_NOT_ACTIVE'));
+          } else {
+            reject(new TokenError('Token verification failed', 'TOKEN_VERIFICATION_FAILED'));
+          }
+        } else {
+          // Validate token type
+          if (decoded.type !== 'access') {
+            reject(new TokenError('Invalid token type', 'TOKEN_TYPE_INVALID'));
+          } else {
+            resolve(decoded);
+          }
+        }
+      });
     });
-
-    return decoded;
   } catch (error) {
-    if (error.name === 'TokenExpiredError') {
-      throw new TokenExpiredError();
+    if (error instanceof AuthenticationError) {
+      throw error;
     }
-    if (error.name === 'JsonWebTokenError') {
-      throw new InvalidTokenError('Invalid token: ' + error.message);
-    }
-    if (error.name === 'NotBeforeError') {
-      throw new InvalidTokenError('Token not active yet');
-    }
-    throw error;
+    throw new TokenError('Unexpected error during token verification', 'TOKEN_VERIFICATION_ERROR');
   }
 }
 
 /**
- * Hash password using bcrypt with 12 salt rounds
+ * Hashes a password using bcrypt
  * @param {string} password - Plain text password to hash
  * @returns {Promise<string>} Hashed password
- * @throws {Error} If password is invalid or hashing fails
+ * @throws {PasswordError} When password is invalid or hashing fails
  */
 export async function getPasswordHash(password) {
   try {
-    if (!password || typeof password !== 'string') {
-      throw new Error('Password must be a valid string');
+    validateInput(password, 'password');
+
+    if (password.length < 1) {
+      throw new PasswordError('Password cannot be empty', 'PASSWORD_EMPTY');
     }
 
-    if (password.length === 0) {
-      throw new Error('Password cannot be empty');
+    if (password.length > 128) {
+      throw new PasswordError('Password too long (max 128 characters)', 'PASSWORD_TOO_LONG');
     }
 
-    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-    return hashedPassword;
+    const hash = await bcrypt.hash(password, AUTH_CONFIG.BCRYPT_SALT_ROUNDS);
+    return hash;
   } catch (error) {
-    if (error.message.includes('data and salt arguments required')) {
-      throw new Error('Invalid password format');
+    if (error instanceof AuthenticationError) {
+      throw error;
     }
-    throw error;
+    throw new PasswordError('Failed to hash password', 'PASSWORD_HASH_FAILED');
   }
 }
 
 /**
- * Verify plain password against hashed password
- * @param {string} plainPassword - Plain text password
+ * Verifies a plain password against a hashed password
+ * @param {string} plainPassword - Plain text password to verify
  * @param {string} hashedPassword - Hashed password to compare against
  * @returns {Promise<boolean>} True if passwords match, false otherwise
- * @throws {Error} If parameters are invalid or verification fails
+ * @throws {PasswordError} When parameters are invalid or verification fails
  */
 export async function verifyPassword(plainPassword, hashedPassword) {
   try {
-    if (!plainPassword || typeof plainPassword !== 'string') {
-      throw new Error('Plain password must be a valid string');
+    validateInput(plainPassword, 'plainPassword');
+    validateInput(hashedPassword, 'hashedPassword');
+
+    if (plainPassword.length < 1) {
+      throw new PasswordError('Password cannot be empty', 'PASSWORD_EMPTY');
     }
 
-    if (!hashedPassword || typeof hashedPassword !== 'string') {
-      throw new Error('Hashed password must be a valid string');
+    if (plainPassword.length > 128) {
+      throw new PasswordError('Password too long (max 128 characters)', 'PASSWORD_TOO_LONG');
     }
 
-    const isMatch = await bcrypt.compare(plainPassword, hashedPassword);
-    return isMatch;
+    // Validate hash format (bcrypt hashes start with $2a$, $2b$, or $2y$)
+    if (!hashedPassword.match(/^\$2[aby]\$\d{2}\$.{53}$/)) {
+      throw new PasswordError('Invalid hash format', 'INVALID_HASH_FORMAT');
+    }
+
+    const isValid = await bcrypt.compare(plainPassword, hashedPassword);
+    return isValid;
   } catch (error) {
-    if (error.message.includes('data and hash arguments required')) {
-      throw new Error('Invalid password format for comparison');
+    if (error instanceof AuthenticationError) {
+      throw error;
     }
-    throw error;
+    throw new PasswordError('Failed to verify password', 'PASSWORD_VERIFICATION_FAILED');
   }
 }
 
 /**
- * Extract and return user data from JWT token
+ * Extracts and returns current user data from a valid JWT token
  * @param {string} token - JWT token containing user data
- * @returns {Promise<Object>} User data from token payload
- * @throws {TokenExpiredError} If token has expired
- * @throws {InvalidTokenError} If token is invalid
- * @throws {UserNotFoundError} If user doesn't exist
+ * @returns {Promise<Object>} User data object
+ * @throws {TokenError} When token is invalid or user data extraction fails
  */
 export async function getCurrentUser(token) {
   try {
-    const payload = await verifyToken(token);
+    const decoded = await verifyToken(token);
     
-    if (!payload.userId && !payload.id) {
-      throw new InvalidTokenError('Token does not contain valid user identifier');
+    // Extract user data from token payload
+    const userData = {
+      userId: decoded.userId,
+      email: decoded.email,
+      role: decoded.role,
+      iat: decoded.iat,
+      exp: decoded.exp
+    };
+
+    // Validate required user data
+    if (!userData.userId || !userData.email) {
+      throw new TokenError('Invalid user data in token', 'INVALID_USER_DATA');
     }
 
-    const userId = payload.userId || payload.id;
-    const user = await User.findById(userId);
-    
-    if (!user) {
-      throw new UserNotFoundError();
-    }
-
-    return user;
+    return userData;
   } catch (error) {
-    if (error instanceof TokenExpiredError || 
-        error instanceof InvalidTokenError || 
-        error instanceof UserNotFoundError) {
+    if (error instanceof AuthenticationError) {
       throw error;
     }
-    throw new AuthenticationError('Failed to get current user: ' + error.message);
+    throw new TokenError('Failed to extract user data from token', 'USER_EXTRACTION_FAILED');
   }
 }
 
 /**
- * OAuth2 Bearer token extraction middleware
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
- * @returns {void}
+ * Utility function to check if a token is expired without throwing
+ * @param {string} token - JWT token to check
+ * @returns {Promise<boolean>} True if token is expired, false if valid
  */
-export function oauth2Scheme(req, res, next) {
+export async function isTokenExpired(token) {
   try {
-    const authHeader = req.headers.authorization;
-    
-    if (!authHeader) {
-      return res.status(401).json({ 
-        error: 'Authorization header missing',
-        detail: 'Bearer token required'
-      });
-    }
-
-    if (!authHeader.startsWith(BEARER_PREFIX)) {
-      return res.status(401).json({ 
-        error: 'Invalid authorization header format',
-        detail: 'Bearer token required'
-      });
-    }
-
-    const token = authHeader.slice(BEARER_PREFIX.length);
-    
-    if (!token) {
-      return res.status(401).json({ 
-        error: 'Token missing',
-        detail: 'Bearer token required'
-      });
-    }
-
-    req.token = token;
-    next();
+    await verifyToken(token);
+    return false;
   } catch (error) {
-    return res.status(500).json({ 
-      error: 'Authentication processing error',
-      detail: 'Internal server error'
-    });
+    if (error instanceof TokenError && error.code === 'TOKEN_EXPIRED') {
+      return true;
+    }
+    // For other errors, consider token as invalid/expired
+    return true;
   }
 }
 
 /**
- * Middleware to get current user from token
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
- * @returns {void}
+ * Utility function to decode token without verification (for debugging)
+ * @param {string} token - JWT token to decode
+ * @returns {Object|null} Decoded token payload or null if invalid
  */
-export async function getCurrentUserMiddleware(req, res, next) {
+export function decodeTokenUnsafe(token) {
   try {
-    if (!req.token) {
-      return res.status(401).json({ 
-        error: 'Token not found',
-        detail: 'Use oauth2Scheme middleware first'
-      });
-    }
-
-    const user = await getCurrentUser(req.token);
-    req.user = user;
-    next();
+    validateInput(token, 'token');
+    return jwt.decode(token);
   } catch (error) {
-    if (error instanceof TokenExpiredError) {
-      return res.status(401).json({ 
-        error: 'Token expired',
-        detail: error.message
-      });
-    }
-    if (error instanceof InvalidTokenError) {
-      return res.status(401).json({ 
-        error: 'Invalid token',
-        detail: error.message
-      });
-    }
-    if (error instanceof UserNotFoundError) {
-      return res.status(404).json({ 
-        error: 'User not found',
-        detail: error.message
-      });
-    }
-    return res.status(500).json({ 
-      error: 'Authentication error',
-      detail: 'Internal server error'
-    });
-  }
-}
-
-/**
- * Middleware to get current active user from token
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
- * @returns {void}
- */
-export async function getCurrentActiveUser(req, res, next) {
-  try {
-    if (!req.token) {
-      return res.status(401).json({ 
-        error: 'Token not found',
-        detail: 'Use oauth2Scheme middleware first'
-      });
-    }
-
-    const user = await getCurrentUser(req.token);
-    
-    // Check if user is active (assuming user model has isActive property)
-    if (user.isActive === false || user.status === 'inactive') {
-      throw new InactiveUserError();
-    }
-
-    req.user = user;
-    next();
-  } catch (error) {
-    if (error instanceof TokenExpiredError) {
-      return res.status(401).json({ 
-        error: 'Token expired',
-        detail: error.message
-      });
-    }
-    if (error instanceof InvalidTokenError) {
-      return res.status(401).json({ 
-        error: 'Invalid token',
-        detail: error.message
-      });
-    }
-    if (error instanceof UserNotFoundError) {
-      return res.status(404).json({ 
-        error: 'User not found',
-        detail: error.message
-      });
-    }
-    if (error instanceof InactiveUserError) {
-      return res.status(403).json({ 
-        error: 'User inactive',
-        detail: error.message
-      });
-    }
-    return res.status(500).json({ 
-      error: 'Authentication error',
-      detail: 'Internal server error'
-    });
-  }
-}
-
-/**
- * Utility function to extract token from authorization header
- * @param {string} authHeader - Authorization header value
- * @returns {string|null} Extracted token or null if invalid
- */
-export function extractTokenFromHeader(authHeader) {
-  if (!authHeader || typeof authHeader !== 'string') {
     return null;
   }
-
-  if (!authHeader.startsWith(BEARER_PREFIX)) {
-    return null;
-  }
-
-  const token = authHeader.slice(BEARER_PREFIX.length);
-  return token || null;
 }
 
-// Export all functions and middleware
+// Export error classes for external use
+export {
+  AuthenticationError,
+  TokenError,
+  PasswordError,
+  AUTH_CONFIG
+};
+
+// Default export with all functions
 export default {
   createAccessToken,
   verifyToken,
   getPasswordHash,
   verifyPassword,
   getCurrentUser,
-  oauth2Scheme,
-  getCurrentUserMiddleware,
-  getCurrentActiveUser,
-  extractTokenFromHeader,
-  // Error classes
+  isTokenExpired,
+  decodeTokenUnsafe,
   AuthenticationError,
-  TokenExpiredError,
-  InvalidTokenError,
-  UserNotFoundError,
-  InactiveUserError
+  TokenError,
+  PasswordError,
+  AUTH_CONFIG
 };

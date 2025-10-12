@@ -1,84 +1,93 @@
 /**
- * User Model - Production-ready User management with authentication
- * @fileoverview Complete User model with Sequelize ORM, authentication, and validation
+ * User Model
+ * @module models/user
+ * @description User model definition with Sequelize ORM
  */
 
-import { DataTypes, Model } from 'sequelize';
-import bcrypt from 'bcrypt';
-import { v4 as uuidv4 } from 'uuid';
-import validator from 'validator';
-import { sequelize } from '@core/database';
-import logger from '@utils/logger';
-
-// Constants
-const SALT_ROUNDS = 12;
-const PASSWORD_MIN_LENGTH = 8;
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const { DataTypes, Model } = require('sequelize');
+const bcrypt = require('bcrypt');
+const { v4: uuidv4 } = require('uuid');
+const { sequelize } = require('../core/database');
 
 /**
  * User Model Class
- * Handles user authentication, profile management, and database operations
+ * @class User
+ * @extends {Model}
  */
 class User extends Model {
   /**
    * Hash and set user password
    * @param {string} password - Plain text password
-   * @throws {Error} If password doesn't meet requirements
+   * @throws {Error} When password is invalid or hashing fails
    * @returns {Promise<void>}
    */
   async setPassword(password) {
     try {
-      // Validate password strength
+      // Validate password input
       if (!password || typeof password !== 'string') {
         throw new Error('Password must be a non-empty string');
       }
-      
-      if (password.length < PASSWORD_MIN_LENGTH) {
-        throw new Error(`Password must be at least ${PASSWORD_MIN_LENGTH} characters long`);
+
+      if (password.length < 6) {
+        throw new Error('Password must be at least 6 characters long');
       }
 
-      // Additional password strength validation
-      if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(password)) {
-        throw new Error('Password must contain at least one uppercase letter, one lowercase letter, and one number');
-      }
-
-      // Hash password with salt
-      const saltRounds = SALT_ROUNDS;
-      this.password_hash = await bcrypt.hash(password, saltRounds);
+      // Hash password with salt rounds of 12
+      const saltRounds = 12;
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
       
-      logger.info(`Password updated for user: ${this.email}`);
+      // Store hashed password
+      this.password_hash = hashedPassword;
     } catch (error) {
-      logger.error(`Password setting failed for user ${this.email}: ${error.message}`);
-      throw error;
+      if (error.message.includes('Password must be')) {
+        throw error;
+      }
+      throw new Error(`Password hashing failed: ${error.message}`);
     }
   }
 
   /**
-   * Verify user password
+   * Check if provided password matches stored hash
    * @param {string} password - Plain text password to verify
-   * @returns {Promise<boolean>} True if password matches
+   * @returns {Promise<boolean>} True if password matches, false otherwise
+   * @throws {Error} When password comparison fails
    */
   async checkPassword(password) {
     try {
-      if (!password || !this.password_hash) {
-        logger.warn(`Password check failed - missing data for user: ${this.email}`);
+      // Validate input
+      if (!password || typeof password !== 'string') {
         return false;
       }
 
-      const isValid = await bcrypt.compare(password, this.password_hash);
-      
-      if (isValid) {
-        // Update last login timestamp
-        await this.updateLastLogin();
-        logger.info(`Successful authentication for user: ${this.email}`);
-      } else {
-        logger.warn(`Failed authentication attempt for user: ${this.email}`);
+      if (!this.password_hash) {
+        throw new Error('No password hash found for user');
       }
 
-      return isValid;
+      // Compare password with stored hash
+      const isMatch = await bcrypt.compare(password, this.password_hash);
+      return isMatch;
     } catch (error) {
-      logger.error(`Password verification error for user ${this.email}: ${error.message}`);
-      return false;
+      if (error.message.includes('No password hash')) {
+        throw error;
+      }
+      throw new Error(`Password verification failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Convert user instance to plain object (excluding sensitive data)
+   * @returns {Object} User object without password_hash
+   */
+  toDict() {
+    try {
+      const userObject = this.toJSON();
+      
+      // Remove sensitive information
+      delete userObject.password_hash;
+      
+      return userObject;
+    } catch (error) {
+      throw new Error(`Failed to convert user to dictionary: ${error.message}`);
     }
   }
 
@@ -89,359 +98,196 @@ class User extends Model {
   async updateLastLogin() {
     try {
       this.last_login = new Date();
-      await this.save({ fields: ['last_login'] });
+      await this.save();
     } catch (error) {
-      logger.error(`Failed to update last login for user ${this.email}: ${error.message}`);
+      throw new Error(`Failed to update last login: ${error.message}`);
     }
   }
 
   /**
-   * Serialize user data for API responses
-   * @param {boolean} includeTimestamps - Include created_at/updated_at
-   * @returns {Object} Sanitized user object
+   * Define model associations
+   * @param {Object} models - All models object
    */
-  toDict(includeTimestamps = true) {
-    const baseData = {
-      id: this.id,
-      email: this.email,
-      name: this.name,
-      is_active: this.is_active,
-      last_login: this.last_login
-    };
-
-    if (includeTimestamps) {
-      baseData.created_at = this.created_at;
-      baseData.updated_at = this.updated_at;
-    }
-
-    return baseData;
-  }
-
-  /**
-   * Get user's public profile data
-   * @returns {Object} Public user data
-   */
-  getPublicProfile() {
-    return {
-      id: this.id,
-      name: this.name,
-      is_active: this.is_active
-    };
-  }
-
-  /**
-   * Check if user account is active and valid
-   * @returns {boolean} True if user can authenticate
-   */
-  canAuthenticate() {
-    return this.is_active && this.password_hash;
-  }
-
-  // Static Methods
-
-  /**
-   * Find user by email address
-   * @param {string} email - User email
-   * @returns {Promise<User|null>} User instance or null
-   */
-  static async findByEmail(email) {
-    try {
-      if (!email || !validator.isEmail(email)) {
-        return null;
-      }
-
-      const user = await this.findOne({
-        where: { 
-          email: email.toLowerCase().trim() 
-        }
-      });
-
-      return user;
-    } catch (error) {
-      logger.error(`Error finding user by email ${email}: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Find active users only
-   * @param {Object} options - Query options
-   * @returns {Promise<User[]>} Array of active users
-   */
-  static async findActiveUsers(options = {}) {
-    try {
-      return await this.findAll({
-        where: { is_active: true },
-        ...options
-      });
-    } catch (error) {
-      logger.error(`Error finding active users: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Create new user with validation
-   * @param {Object} userData - User data object
-   * @returns {Promise<User>} Created user instance
-   */
-  static async createUser(userData) {
-    try {
-      const { email, password, name } = userData;
-
-      // Validate required fields
-      if (!email || !password || !name) {
-        throw new Error('Email, password, and name are required');
-      }
-
-      // Check if user already exists
-      const existingUser = await this.findByEmail(email);
-      if (existingUser) {
-        throw new Error('User with this email already exists');
-      }
-
-      // Create user instance
-      const user = await this.create({
-        id: uuidv4(),
-        email: email.toLowerCase().trim(),
-        name: name.trim(),
-        is_active: true
-      });
-
-      // Set password (will be hashed)
-      await user.setPassword(password);
-      await user.save();
-
-      logger.info(`New user created: ${user.email}`);
-      return user;
-    } catch (error) {
-      logger.error(`User creation failed: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Authenticate user with email and password
-   * @param {string} email - User email
-   * @param {string} password - User password
-   * @returns {Promise<User|null>} Authenticated user or null
-   */
-  static async authenticate(email, password) {
-    try {
-      const user = await this.findByEmail(email);
-      
-      if (!user || !user.canAuthenticate()) {
-        logger.warn(`Authentication failed - user not found or inactive: ${email}`);
-        return null;
-      }
-
-      const isValidPassword = await user.checkPassword(password);
-      return isValidPassword ? user : null;
-    } catch (error) {
-      logger.error(`Authentication error for ${email}: ${error.message}`);
-      return null;
-    }
+  static associate(models) {
+    // User has many Tasks
+    User.hasMany(models.Task, {
+      foreignKey: 'user_id',
+      as: 'tasks',
+      onDelete: 'CASCADE',
+      onUpdate: 'CASCADE'
+    });
   }
 }
 
-// Model Definition and Configuration
-User.init({
-  id: {
-    type: DataTypes.UUID,
-    defaultValue: DataTypes.UUIDV4,
-    primaryKey: true,
-    allowNull: false
-  },
-  email: {
-    type: DataTypes.STRING(255),
-    allowNull: false,
-    unique: {
-      name: 'users_email_unique',
-      msg: 'Email address already exists'
+// Initialize User model
+User.init(
+  {
+    // Primary key with UUID
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: () => uuidv4(),
+      primaryKey: true,
+      allowNull: false,
+      validate: {
+        isUUID: 4
+      }
     },
-    validate: {
-      isEmail: {
-        msg: 'Must be a valid email address'
+
+    // Email field with validation
+    email: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      unique: {
+        name: 'users_email_unique',
+        msg: 'Email address already exists'
       },
-      len: {
-        args: [1, 255],
-        msg: 'Email must be between 1 and 255 characters'
+      validate: {
+        notNull: {
+          msg: 'Email is required'
+        },
+        notEmpty: {
+          msg: 'Email cannot be empty'
+        },
+        isEmail: {
+          msg: 'Must be a valid email address'
+        },
+        len: {
+          args: [1, 255],
+          msg: 'Email must be between 1 and 255 characters'
+        }
       }
     },
-    set(value) {
-      // Always store email in lowercase
-      this.setDataValue('email', value ? value.toLowerCase().trim() : value);
-    }
-  },
-  password_hash: {
-    type: DataTypes.STRING(255),
-    allowNull: false,
-    validate: {
-      len: {
-        args: [1, 255],
-        msg: 'Password hash is required'
+
+    // Password hash field
+    password_hash: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      validate: {
+        notNull: {
+          msg: 'Password hash is required'
+        },
+        notEmpty: {
+          msg: 'Password hash cannot be empty'
+        }
+      }
+    },
+
+    // User name field
+    name: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+      validate: {
+        notNull: {
+          msg: 'Name is required'
+        },
+        notEmpty: {
+          msg: 'Name cannot be empty'
+        },
+        len: {
+          args: [1, 100],
+          msg: 'Name must be between 1 and 100 characters'
+        }
+      }
+    },
+
+    // Active status flag
+    is_active: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+      validate: {
+        isIn: {
+          args: [[true, false]],
+          msg: 'is_active must be true or false'
+        }
+      }
+    },
+
+    // Last login timestamp
+    last_login: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      validate: {
+        isDate: {
+          msg: 'last_login must be a valid date'
+        }
       }
     }
   },
-  name: {
-    type: DataTypes.STRING(100),
-    allowNull: false,
-    validate: {
-      len: {
-        args: [1, 100],
-        msg: 'Name must be between 1 and 100 characters'
+  {
+    // Model configuration
+    sequelize,
+    modelName: 'User',
+    tableName: 'users',
+    
+    // Enable automatic timestamps
+    timestamps: true,
+    createdAt: 'created_at',
+    updatedAt: 'updated_at',
+
+    // Indexes
+    indexes: [
+      {
+        unique: true,
+        fields: ['email'],
+        name: 'users_email_index'
       },
-      notEmpty: {
-        msg: 'Name cannot be empty'
+      {
+        fields: ['is_active'],
+        name: 'users_is_active_index'
+      },
+      {
+        fields: ['created_at'],
+        name: 'users_created_at_index'
+      }
+    ],
+
+    // Hooks for additional validation and processing
+    hooks: {
+      beforeValidate: (user, options) => {
+        // Normalize email to lowercase
+        if (user.email) {
+          user.email = user.email.toLowerCase().trim();
+        }
+
+        // Trim name
+        if (user.name) {
+          user.name = user.name.trim();
+        }
+      },
+
+      beforeCreate: (user, options) => {
+        // Ensure UUID is set
+        if (!user.id) {
+          user.id = uuidv4();
+        }
       }
     },
-    set(value) {
-      // Always trim whitespace
-      this.setDataValue('name', value ? value.trim() : value);
-    }
-  },
-  is_active: {
-    type: DataTypes.BOOLEAN,
-    allowNull: false,
-    defaultValue: true
-  },
-  last_login: {
-    type: DataTypes.DATE,
-    allowNull: true,
-    validate: {
-      isDate: {
-        msg: 'Last login must be a valid date'
-      }
-    }
-  },
-  created_at: {
-    type: DataTypes.DATE,
-    allowNull: false,
-    defaultValue: DataTypes.NOW
-  },
-  updated_at: {
-    type: DataTypes.DATE,
-    allowNull: false,
-    defaultValue: DataTypes.NOW
-  }
-}, {
-  sequelize,
-  modelName: 'User',
-  tableName: 'users',
-  timestamps: true,
-  createdAt: 'created_at',
-  updatedAt: 'updated_at',
-  indexes: [
-    {
-      unique: true,
-      fields: ['email'],
-      name: 'users_email_idx'
-    },
-    {
-      fields: ['is_active'],
-      name: 'users_is_active_idx'
-    },
-    {
-      fields: ['created_at'],
-      name: 'users_created_at_idx'
-    }
-  ],
-  defaultScope: {
-    attributes: {
-      exclude: ['password_hash']
-    }
-  },
-  scopes: {
-    withPassword: {
-      attributes: {}
-    },
-    active: {
-      where: {
-        is_active: true
-      }
-    }
-  },
-  hooks: {
-    beforeValidate: (user) => {
-      // Ensure email is lowercase and trimmed
-      if (user.email) {
-        user.email = user.email.toLowerCase().trim();
-      }
-      // Ensure name is trimmed
-      if (user.name) {
-        user.name = user.name.trim();
+
+    // Default scope excludes password_hash
+    defaultScope: {
+      attributes: {
+        exclude: ['password_hash']
       }
     },
-    afterCreate: (user) => {
-      logger.info(`User created successfully: ${user.email}`);
-    },
-    afterUpdate: (user) => {
-      logger.info(`User updated: ${user.email}`);
-    },
-    afterDestroy: (user) => {
-      logger.info(`User deleted: ${user.email}`);
+
+    // Scopes for different query needs
+    scopes: {
+      withPassword: {
+        attributes: {}
+      },
+      active: {
+        where: {
+          is_active: true
+        }
+      },
+      inactive: {
+        where: {
+          is_active: false
+        }
+      }
     }
   }
-});
+);
 
-// Define Associations
-User.associate = (models) => {
-  // One-to-many relationship with Tasks
-  User.hasMany(models.Task, {
-    foreignKey: 'user_id',
-    as: 'tasks',
-    onDelete: 'CASCADE',
-    onUpdate: 'CASCADE'
-  });
-};
-
-// Export the model
-export default User;
-
-// Named export for convenience
-export { User };
-
-/**
- * Migration Schema Definition
- * Use this for creating the users table migration
- */
-export const userMigrationSchema = {
-  id: {
-    type: DataTypes.UUID,
-    defaultValue: DataTypes.UUIDV4,
-    primaryKey: true,
-    allowNull: false
-  },
-  email: {
-    type: DataTypes.STRING(255),
-    allowNull: false,
-    unique: true
-  },
-  password_hash: {
-    type: DataTypes.STRING(255),
-    allowNull: false
-  },
-  name: {
-    type: DataTypes.STRING(100),
-    allowNull: false
-  },
-  is_active: {
-    type: DataTypes.BOOLEAN,
-    allowNull: false,
-    defaultValue: true
-  },
-  last_login: {
-    type: DataTypes.DATE,
-    allowNull: true
-  },
-  created_at: {
-    type: DataTypes.DATE,
-    allowNull: false,
-    defaultValue: DataTypes.NOW
-  },
-  updated_at: {
-    type: DataTypes.DATE,
-    allowNull: false,
-    defaultValue: DataTypes.NOW
-  }
-};
+module.exports = User;
