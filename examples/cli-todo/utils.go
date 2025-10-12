@@ -1,6 +1,3 @@
-// Package utils provides utility functions for argument parsing and display formatting.
-// It includes functions for parsing command-line arguments, extracting flags and values,
-// and formatting data for terminal display with proper alignment and color support.
 package utils
 
 import (
@@ -11,114 +8,102 @@ import (
 	"time"
 )
 
-// ParseArgs extracts command, text, and flags from command-line arguments.
-// The first non-flag argument is treated as the command.
-// Remaining non-flag arguments are joined as text.
-// Flags are parsed as key-value pairs (--key=value or --key value).
-func ParseArgs(args []string) (command, text string, flags map[string]string) {
-	if len(args) == 0 {
-		return "", "", make(map[string]string)
+// ANSI color constants
+const (
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorBlue   = "\033[34m"
+	ColorPurple = "\033[35m"
+	ColorCyan   = "\033[36m"
+	ColorWhite  = "\033[37m"
+)
+
+// Todo represents a todo item structure
+type Todo struct {
+	ID          int
+	Text        string
+	Completed   bool
+	Priority    string
+	CreatedAt   time.Time
+	CompletedAt *time.Time
+}
+
+var (
+	// colorsEnabled determines if ANSI colors should be used
+	colorsEnabled = supportsColor()
+)
+
+// supportsColor checks if the terminal supports ANSI colors
+func supportsColor() bool {
+	term := os.Getenv("TERM")
+	if term == "" || term == "dumb" {
+		return false
 	}
+	
+	// Check if output is being redirected
+	if fileInfo, _ := os.Stdout.Stat(); (fileInfo.Mode() & os.ModeCharDevice) == 0 {
+		return false
+	}
+	
+	return true
+}
 
-	flags = make(map[string]string)
+// Colorize applies ANSI color to text if colors are enabled
+func Colorize(text, color string) string {
+	if !colorsEnabled {
+		return text
+	}
+	return color + text + ColorReset
+}
+
+// ParseArgs extracts command, text, and flags from string slice
+func ParseArgs(args []string) (command string, text string, flags []string) {
+	if len(args) == 0 {
+		return "", "", []string{}
+	}
+	
+	command = args[0]
 	var textParts []string
-	commandSet := false
-
-	for i := 0; i < len(args); i++ {
+	
+	for i := 1; i < len(args); i++ {
 		arg := args[i]
-
-		// Check if it's a flag
-		if strings.HasPrefix(arg, "--") || strings.HasPrefix(arg, "-") {
-			flagName, flagValue := parseFlag(args, i)
-			if flagValue != "" {
-				flags[flagName] = flagValue
-				// Skip next argument if it was used as flag value
-				if i+1 < len(args) && !strings.Contains(arg, "=") && 
-				   !strings.HasPrefix(args[i+1], "-") {
-					i++
-				}
-			} else {
-				flags[flagName] = "true"
-			}
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
 		} else {
-			// Non-flag argument
-			if !commandSet {
-				command = arg
-				commandSet = true
-			} else {
-				textParts = append(textParts, arg)
-			}
+			textParts = append(textParts, arg)
 		}
 	}
-
+	
 	text = strings.Join(textParts, " ")
 	return command, text, flags
 }
 
-// parseFlag extracts flag name and value from arguments starting at index i.
-func parseFlag(args []string, i int) (name, value string) {
-	arg := args[i]
-	
-	// Remove leading dashes
-	if strings.HasPrefix(arg, "--") {
-		arg = arg[2:]
-	} else if strings.HasPrefix(arg, "-") {
-		arg = arg[1:]
-	}
-
-	// Check for --key=value format
-	if strings.Contains(arg, "=") {
-		parts := strings.SplitN(arg, "=", 2)
-		return parts[0], parts[1]
-	}
-
-	// Check for --key value format
-	if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-		return arg, args[i+1]
-	}
-
-	// Flag without value
-	return arg, ""
-}
-
-// GetFlag checks if a flag exists in the arguments.
-// Supports both --flag and -flag formats.
+// GetFlag checks if a flag exists in args
 func GetFlag(args []string, flag string) bool {
-	if len(args) == 0 || flag == "" {
-		return false
+	if !strings.HasPrefix(flag, "-") {
+		flag = "-" + flag
 	}
-
+	
 	for _, arg := range args {
-		if arg == "--"+flag || arg == "-"+flag {
-			return true
-		}
-		// Check for --flag=value format
-		if strings.HasPrefix(arg, "--"+flag+"=") || strings.HasPrefix(arg, "-"+flag+"=") {
+		if arg == flag {
 			return true
 		}
 	}
 	return false
 }
 
-// GetFlagValue returns the value associated with a flag.
-// Returns empty string if flag is not found or has no value.
+// GetFlagValue gets the value after a specified flag
 func GetFlagValue(args []string, flag string) string {
-	if len(args) == 0 || flag == "" {
-		return ""
+	if !strings.HasPrefix(flag, "-") {
+		flag = "-" + flag
 	}
-
+	
 	for i, arg := range args {
-		// Check for --flag=value format
-		if strings.HasPrefix(arg, "--"+flag+"=") {
-			return strings.TrimPrefix(arg, "--"+flag+"=")
-		}
-		if strings.HasPrefix(arg, "-"+flag+"=") {
-			return strings.TrimPrefix(arg, "-"+flag+"=")
-		}
-
-		// Check for --flag value format
-		if (arg == "--"+flag || arg == "-"+flag) && i+1 < len(args) {
+		if arg == flag && i+1 < len(args) {
 			nextArg := args[i+1]
+			// Don't return another flag as a value
 			if !strings.HasPrefix(nextArg, "-") {
 				return nextArg
 			}
@@ -127,179 +112,154 @@ func GetFlagValue(args []string, flag string) string {
 	return ""
 }
 
-// ParseIDs extracts all numeric IDs from arguments.
-// Skips invalid numbers and returns only valid integers.
+// ParseIDs extracts numeric IDs from arguments
 func ParseIDs(args []string) []int {
-	if len(args) == 0 {
-		return []int{}
-	}
-
 	var ids []int
+	
 	for _, arg := range args {
-		// Skip flags
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-
-		if id, err := strconv.Atoi(arg); err == nil {
+		if id, err := strconv.Atoi(arg); err == nil && id > 0 {
 			ids = append(ids, id)
 		}
 	}
+	
 	return ids
 }
 
-// FormatTable creates an aligned ASCII table with proper padding and separators.
-// Uses | separators and - and + for borders with proper column alignment.
+// FormatTable creates an aligned ASCII table with borders
 func FormatTable(headers []string, rows [][]string) string {
 	if len(headers) == 0 {
 		return ""
 	}
-
+	
 	// Calculate column widths
 	colWidths := make([]int, len(headers))
+	
+	// Initialize with header lengths
 	for i, header := range headers {
 		colWidths[i] = len(header)
 	}
-
-	// Check all rows for maximum width
+	
+	// Check row lengths and update column widths
 	for _, row := range rows {
 		for i, cell := range row {
-			if i < len(colWidths) && len(cell) > colWidths[i] {
-				colWidths[i] = len(cell)
+			if i < len(colWidths) {
+				// Remove ANSI color codes for width calculation
+				cleanCell := removeANSICodes(cell)
+				if len(cleanCell) > colWidths[i] {
+					colWidths[i] = len(cleanCell)
+				}
 			}
 		}
 	}
-
-	var result strings.Builder
-
-	// Build top border
-	result.WriteString("+")
-	for _, width := range colWidths {
-		result.WriteString(strings.Repeat("-", width+2))
-		result.WriteString("+")
-	}
-	result.WriteString("\n")
-
+	
+	var builder strings.Builder
+	
 	// Build header row
-	result.WriteString("|")
 	for i, header := range headers {
-		result.WriteString(" ")
-		result.WriteString(header)
-		result.WriteString(strings.Repeat(" ", colWidths[i]-len(header)+1))
-		result.WriteString("|")
+		if i > 0 {
+			builder.WriteString(" | ")
+		}
+		builder.WriteString(padRight(header, colWidths[i]))
 	}
-	result.WriteString("\n")
-
-	// Build separator
-	result.WriteString("+")
-	for _, width := range colWidths {
-		result.WriteString(strings.Repeat("-", width+2))
-		result.WriteString("+")
+	builder.WriteString("\n")
+	
+	// Build separator row
+	for i := range headers {
+		if i > 0 {
+			builder.WriteString("-+-")
+		}
+		builder.WriteString(strings.Repeat("-", colWidths[i]))
 	}
-	result.WriteString("\n")
-
+	builder.WriteString("\n")
+	
 	// Build data rows
 	for _, row := range rows {
-		result.WriteString("|")
-		for i := 0; i < len(colWidths); i++ {
-			result.WriteString(" ")
+		for i := 0; i < len(headers); i++ {
+			if i > 0 {
+				builder.WriteString(" | ")
+			}
+			
 			cell := ""
 			if i < len(row) {
 				cell = row[i]
 			}
-			result.WriteString(cell)
-			result.WriteString(strings.Repeat(" ", colWidths[i]-len(cell)+1))
-			result.WriteString("|")
+			
+			// Pad considering ANSI codes
+			cleanCell := removeANSICodes(cell)
+			padding := colWidths[i] - len(cleanCell)
+			builder.WriteString(cell)
+			if padding > 0 {
+				builder.WriteString(strings.Repeat(" ", padding))
+			}
 		}
-		result.WriteString("\n")
+		builder.WriteString("\n")
 	}
-
-	// Build bottom border
-	result.WriteString("+")
-	for _, width := range colWidths {
-		result.WriteString(strings.Repeat("-", width+2))
-		result.WriteString("+")
-	}
-
-	return result.String()
+	
+	return builder.String()
 }
 
-// FormatTodo formats a single todo item for display.
-// Status formatting: [ ] for incomplete, [✓] for complete.
-// Includes color support for status and priority.
-func FormatTodo(id int, status string, priority string, todo string) string {
-	if todo == "" {
+// FormatTodo formats a single todo item for display
+func FormatTodo(todo Todo) string {
+	status := "[ ]"
+	if todo.Completed {
+		status = "[✓]"
+	}
+	
+	// Apply colors based on status and priority
+	statusColored := status
+	priorityColored := todo.Priority
+	textColored := todo.Text
+	
+	if colorsEnabled {
+		if todo.Completed {
+			statusColored = Colorize(status, ColorGreen)
+			textColored = Colorize(todo.Text, ColorGreen)
+		} else if todo.Priority == "high" {
+			priorityColored = Colorize(todo.Priority, ColorRed)
+		} else if todo.Priority == "medium" {
+			priorityColored = Colorize(todo.Priority, ColorYellow)
+		}
+	}
+	
+	return fmt.Sprintf("%d | %s | %s | %s",
+		todo.ID,
+		statusColored,
+		priorityColored,
+		textColored,
+	)
+}
+
+// Truncate shortens text with ellipsis if needed
+func Truncate(text string, maxLen int) string {
+	if maxLen <= 0 {
 		return ""
 	}
-
-	var statusSymbol string
-	var statusColor string
-
-	switch strings.ToLower(status) {
-	case "complete", "done", "finished":
-		statusSymbol = "[✓]"
-		statusColor = "green"
-	default:
-		statusSymbol = "[ ]"
-		statusColor = "reset"
-	}
-
-	var priorityColor string
-	switch strings.ToLower(priority) {
-	case "high", "urgent":
-		priorityColor = "red"
-	case "medium":
-		priorityColor = "reset"
-	case "low":
-		priorityColor = "green"
-	default:
-		priorityColor = "reset"
-	}
-
-	var result strings.Builder
-	result.WriteString(fmt.Sprintf("%d. ", id))
-	result.WriteString(colorize(statusSymbol, statusColor))
-	result.WriteString(" ")
 	
-	if priority != "" {
-		result.WriteString("[")
-		result.WriteString(colorize(strings.ToUpper(priority), priorityColor))
-		result.WriteString("] ")
-	}
-	
-	result.WriteString(todo)
-
-	return result.String()
-}
-
-// Truncate shortens text with "..." if longer than maxLen.
-// Returns original text if maxLen is less than 4 or text is shorter.
-func Truncate(text string, maxLen int) string {
-	if maxLen < 4 || len(text) <= maxLen {
+	if len(text) <= maxLen {
 		return text
 	}
+	
+	if maxLen <= 3 {
+		return text[:maxLen]
+	}
+	
 	return text[:maxLen-3] + "..."
 }
 
-// FormatDate converts time to relative format.
-// Returns "X minutes ago", "X hours ago", "X days ago", or "YYYY-MM-DD" for older dates.
+// FormatDate converts time to relative format
 func FormatDate(date time.Time) string {
-	if date.IsZero() {
-		return ""
-	}
-
 	now := time.Now()
-	diff := now.Sub(date)
-
-	if diff < 0 {
-		// Future date, return formatted date
+	duration := now.Sub(date)
+	
+	if duration < 0 {
+		// Future date, return absolute format
 		return date.Format("2006-01-02")
 	}
-
-	minutes := int(diff.Minutes())
-	hours := int(diff.Hours())
-	days := int(diff.Hours() / 24)
-
+	
+	minutes := int(duration.Minutes())
+	hours := int(duration.Hours())
+	days := int(duration.Hours() / 24)
+	
 	switch {
 	case minutes < 60:
 		if minutes <= 1 {
@@ -311,7 +271,7 @@ func FormatDate(date time.Time) string {
 			return "1 hour ago"
 		}
 		return fmt.Sprintf("%d hours ago", hours)
-	case days < 30:
+	case days < 7:
 		if days == 1 {
 			return "1 day ago"
 		}
@@ -321,59 +281,47 @@ func FormatDate(date time.Time) string {
 	}
 }
 
-// colorize applies ANSI color codes to text.
-// Supports colors: green, red, reset.
-// Detects terminal color support and gracefully falls back.
-func colorize(text, color string) string {
-	// Check if terminal supports colors
-	if !supportsColor() {
+// Helper functions
+
+// padRight pads a string to the right with spaces
+func padRight(text string, width int) string {
+	if len(text) >= width {
 		return text
 	}
-
-	var colorCode string
-	switch strings.ToLower(color) {
-	case "green":
-		colorCode = "\033[32m"
-	case "red":
-		colorCode = "\033[31m"
-	case "yellow":
-		colorCode = "\033[33m"
-	case "blue":
-		colorCode = "\033[34m"
-	case "reset":
-		return text
-	default:
-		return text
-	}
-
-	return colorCode + text + "\033[0m"
+	return text + strings.Repeat(" ", width-len(text))
 }
 
-// supportsColor detects if the terminal supports ANSI colors.
-func supportsColor() bool {
-	term := os.Getenv("TERM")
-	if term == "" {
-		return false
-	}
-
-	// Common terminals that support colors
-	colorTerms := []string{
-		"xterm", "xterm-color", "xterm-256color",
-		"screen", "screen-256color",
-		"tmux", "tmux-256color",
-		"rxvt", "ansi", "cygwin",
-	}
-
-	for _, colorTerm := range colorTerms {
-		if strings.Contains(term, colorTerm) {
-			return true
+// removeANSICodes removes ANSI escape sequences from text for length calculation
+func removeANSICodes(text string) string {
+	// Simple ANSI code removal - matches \033[...m patterns
+	result := strings.Builder{}
+	inEscape := false
+	
+	for i := 0; i < len(text); i++ {
+		if i < len(text)-1 && text[i] == '\033' && text[i+1] == '[' {
+			inEscape = true
+			continue
 		}
+		
+		if inEscape {
+			if text[i] == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		
+		result.WriteByte(text[i])
 	}
+	
+	return result.String()
+}
 
-	// Check for explicit color support environment variables
-	if os.Getenv("COLORTERM") != "" {
-		return true
-	}
+// SetColorsEnabled allows manual control over color output
+func SetColorsEnabled(enabled bool) {
+	colorsEnabled = enabled
+}
 
-	return false
+// IsColorsEnabled returns whether colors are currently enabled
+func IsColorsEnabled() bool {
+	return colorsEnabled
 }
