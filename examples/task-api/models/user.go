@@ -2,9 +2,7 @@ package models
 
 import (
 	"errors"
-	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,174 +10,107 @@ import (
 	"gorm.io/gorm"
 )
 
-// User represents a user in the system
+// User represents a user in the system with authentication and profile information.
+// It includes fields for authentication, user metadata, and audit timestamps.
 type User struct {
-	ID           uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Email        string     `gorm:"type:varchar(255);uniqueIndex;not null" json:"email" validate:"required,email,max=255"`
-	PasswordHash string     `gorm:"type:varchar(255);not null" json:"-" validate:"required,max=255"`
-	Name         string     `gorm:"type:varchar(100);not null" json:"name" validate:"required,max=100"`
-	IsActive     bool       `gorm:"default:true;not null" json:"is_active"`
-	LastLogin    *time.Time `gorm:"type:timestamp" json:"last_login,omitempty"`
-	CreatedAt    time.Time  `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt    time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
+	// ID is the unique identifier for the user using UUID v4
+	ID uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
 	
-	// Relationships
-	Tasks []Task `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;" json:"tasks,omitempty"`
+	// Email is the user's email address, must be unique and valid format
+	Email string `gorm:"type:varchar(255);uniqueIndex;not null" json:"email" validate:"required,email,max=255"`
+	
+	// PasswordHash stores the bcrypt hash of the user's password
+	PasswordHash string `gorm:"type:varchar(255);not null;column:password_hash" json:"-" validate:"required,max=255"`
+	
+	// Name is the user's display name
+	Name string `gorm:"type:varchar(100);not null" json:"name" validate:"required,max=100"`
+	
+	// IsActive indicates whether the user account is active
+	IsActive bool `gorm:"default:true;not null" json:"is_active"`
+	
+	// LastLogin tracks the user's most recent login time (nullable)
+	LastLogin *time.Time `gorm:"type:timestamp" json:"last_login"`
+	
+	// CreatedAt is automatically set when the record is created
+	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
+	
+	// UpdatedAt is automatically updated when the record is modified
+	UpdatedAt time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+	
+	// Tasks represents the one-to-many relationship with Task model
+	Tasks []Task `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE" json:"tasks,omitempty"`
 }
 
-// Task represents a task associated with a user (placeholder for relationship)
+// Task represents a task associated with a user (for relationship demonstration)
 type Task struct {
-	ID     uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	UserID uuid.UUID `gorm:"type:uuid;not null;index" json:"user_id"`
-	Title  string    `gorm:"type:varchar(255);not null" json:"title"`
-	// Add other task fields as needed
+	ID          uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	UserID      uuid.UUID  `gorm:"type:uuid;not null;index" json:"user_id"`
+	Title       string     `gorm:"type:varchar(255);not null" json:"title"`
+	Description string     `gorm:"type:text" json:"description"`
+	Completed   bool       `gorm:"default:false" json:"completed"`
+	CreatedAt   time.Time  `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt   time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
+	User        User       `gorm:"foreignKey:UserID" json:"user,omitempty"`
 }
 
-// Constants for validation and security
-const (
-	MinPasswordLength = 8
-	BcryptCost       = 12
-	MaxEmailLength   = 255
-	MaxNameLength    = 100
-	MaxPasswordLength = 255
-)
-
-// Regular expression for email validation
-var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-
-// Custom errors
-var (
-	ErrInvalidEmail      = errors.New("invalid email format")
-	ErrEmailTooLong      = errors.New("email exceeds maximum length of 255 characters")
-	ErrNameRequired      = errors.New("name is required")
-	ErrNameTooLong       = errors.New("name exceeds maximum length of 100 characters")
-	ErrPasswordTooShort  = errors.New("password must be at least 8 characters long")
-	ErrPasswordTooLong   = errors.New("password exceeds maximum length of 255 characters")
-	ErrPasswordRequired  = errors.New("password is required")
-	ErrHashingPassword   = errors.New("failed to hash password")
-	ErrInvalidPassword   = errors.New("invalid password")
-)
-
-// TableName specifies the table name for GORM
+// TableName specifies the table name for the User model
 func (User) TableName() string {
 	return "users"
 }
 
-// BeforeCreate is a GORM hook that runs before creating a user
+// TableName specifies the table name for the Task model
+func (Task) TableName() string {
+	return "tasks"
+}
+
+// BeforeCreate is a GORM hook that runs before creating a new user record
 func (u *User) BeforeCreate(tx *gorm.DB) error {
-	// Generate UUID if not set
 	if u.ID == uuid.Nil {
 		u.ID = uuid.New()
 	}
-	
-	// Validate the user data
-	if err := u.Validate(); err != nil {
-		return err
-	}
-	
-	// Set timestamps
-	now := time.Now()
-	u.CreatedAt = now
-	u.UpdatedAt = now
-	
 	return nil
 }
 
-// BeforeUpdate is a GORM hook that runs before updating a user
-func (u *User) BeforeUpdate(tx *gorm.DB) error {
-	// Validate the user data
-	if err := u.Validate(); err != nil {
-		return err
-	}
-	
-	// Update timestamp
-	u.UpdatedAt = time.Now()
-	
-	return nil
-}
-
-// Validate performs comprehensive validation on user data
-func (u *User) Validate() error {
-	// Validate email
-	if err := u.validateEmail(); err != nil {
-		return err
-	}
-	
-	// Validate name
-	if err := u.validateName(); err != nil {
-		return err
-	}
-	
-	// Validate password hash (should exist if user is being created/updated)
-	if strings.TrimSpace(u.PasswordHash) == "" {
-		return ErrPasswordRequired
-	}
-	
-	if len(u.PasswordHash) > MaxPasswordLength {
-		return ErrPasswordTooLong
-	}
-	
-	return nil
-}
-
-// validateEmail validates the email field
-func (u *User) validateEmail() error {
-	email := strings.TrimSpace(u.Email)
-	if email == "" {
-		return ErrInvalidEmail
-	}
-	
-	if len(email) > MaxEmailLength {
-		return ErrEmailTooLong
-	}
-	
-	if !emailRegex.MatchString(email) {
-		return ErrInvalidEmail
-	}
-	
-	// Normalize email to lowercase
-	u.Email = strings.ToLower(email)
-	
-	return nil
-}
-
-// validateName validates the name field
-func (u *User) validateName() error {
-	name := strings.TrimSpace(u.Name)
-	if name == "" {
-		return ErrNameRequired
-	}
-	
-	if len(name) > MaxNameLength {
-		return ErrNameTooLong
-	}
-	
-	// Normalize name
-	u.Name = name
-	
-	return nil
-}
-
-// SetPassword hashes the provided password and stores it in PasswordHash
+// SetPassword hashes the provided password and stores it in PasswordHash field.
+// It validates the email format and password strength before hashing.
+//
+// Parameters:
+//   - password: The plain text password to hash and store
+//
+// Returns:
+//   - error: Returns an error if validation fails or hashing encounters an issue
 func (u *User) SetPassword(password string) error {
-	// Validate password
-	if err := validatePassword(password); err != nil {
-		return err
+	// Validate password length
+	if len(password) < 8 {
+		return errors.New("password must be at least 8 characters long")
 	}
 	
-	// Hash the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
+	// Validate email format if email is set
+	if u.Email != "" {
+		if err := u.validateEmail(); err != nil {
+			return err
+		}
+	}
+	
+	// Hash the password using bcrypt with cost factor 12
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), 12)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrHashingPassword, err)
+		return errors.New("failed to hash password")
 	}
 	
 	u.PasswordHash = string(hashedPassword)
 	return nil
 }
 
-// CheckPassword verifies the provided password against the stored hash
+// CheckPassword verifies if the provided password matches the stored hash.
+//
+// Parameters:
+//   - password: The plain text password to verify
+//
+// Returns:
+//   - bool: Returns true if password matches, false otherwise
 func (u *User) CheckPassword(password string) bool {
-	if password == "" || u.PasswordHash == "" {
+	if u.PasswordHash == "" || password == "" {
 		return false
 	}
 	
@@ -187,7 +118,11 @@ func (u *User) CheckPassword(password string) bool {
 	return err == nil
 }
 
-// ToDict serializes user data to a map, excluding sensitive fields
+// ToDict converts the User struct to a map representation for serialization.
+// The password hash is excluded for security reasons.
+//
+// Returns:
+//   - map[string]interface{}: A map containing all user fields except password_hash
 func (u *User) ToDict() map[string]interface{} {
 	result := map[string]interface{}{
 		"id":         u.ID,
@@ -198,15 +133,78 @@ func (u *User) ToDict() map[string]interface{} {
 		"updated_at": u.UpdatedAt,
 	}
 	
-	// Include last_login only if it's not nil
+	// Handle nullable LastLogin field
 	if u.LastLogin != nil {
 		result["last_login"] = *u.LastLogin
+	} else {
+		result["last_login"] = nil
+	}
+	
+	// Include tasks if loaded
+	if len(u.Tasks) > 0 {
+		tasks := make([]map[string]interface{}, len(u.Tasks))
+		for i, task := range u.Tasks {
+			tasks[i] = map[string]interface{}{
+				"id":          task.ID,
+				"title":       task.Title,
+				"description": task.Description,
+				"completed":   task.Completed,
+				"created_at":  task.CreatedAt,
+				"updated_at":  task.UpdatedAt,
+			}
+		}
+		result["tasks"] = tasks
 	}
 	
 	return result
 }
 
-// UpdateLastLogin updates the LastLogin timestamp to the current time
+// validateEmail checks if the email field contains a valid email format
+func (u *User) validateEmail() error {
+	if u.Email == "" {
+		return errors.New("email is required")
+	}
+	
+	// Regular expression for basic email validation
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+	if !emailRegex.MatchString(u.Email) {
+		return errors.New("invalid email format")
+	}
+	
+	if len(u.Email) > 255 {
+		return errors.New("email must not exceed 255 characters")
+	}
+	
+	return nil
+}
+
+// Validate performs comprehensive validation on the User struct
+func (u *User) Validate() error {
+	// Validate email
+	if err := u.validateEmail(); err != nil {
+		return err
+	}
+	
+	// Validate name
+	if u.Name == "" {
+		return errors.New("name is required")
+	}
+	if len(u.Name) > 100 {
+		return errors.New("name must not exceed 100 characters")
+	}
+	
+	// Validate password hash exists (for existing users)
+	if u.PasswordHash == "" {
+		return errors.New("password hash is required")
+	}
+	if len(u.PasswordHash) > 255 {
+		return errors.New("password hash must not exceed 255 characters")
+	}
+	
+	return nil
+}
+
+// UpdateLastLogin sets the LastLogin field to the current time
 func (u *User) UpdateLastLogin() {
 	now := time.Now()
 	u.LastLogin = &now
@@ -215,94 +213,14 @@ func (u *User) UpdateLastLogin() {
 // IsValidForCreation checks if the user has all required fields for creation
 func (u *User) IsValidForCreation() error {
 	if u.Email == "" {
-		return ErrInvalidEmail
+		return errors.New("email is required for user creation")
 	}
-	
 	if u.Name == "" {
-		return ErrNameRequired
+		return errors.New("name is required for user creation")
 	}
-	
 	if u.PasswordHash == "" {
-		return ErrPasswordRequired
+		return errors.New("password must be set before user creation")
 	}
 	
 	return u.Validate()
-}
-
-// Deactivate sets the user as inactive
-func (u *User) Deactivate() {
-	u.IsActive = false
-}
-
-// Activate sets the user as active
-func (u *User) Activate() {
-	u.IsActive = true
-}
-
-// validatePassword validates password strength and requirements
-func validatePassword(password string) error {
-	if password == "" {
-		return ErrPasswordRequired
-	}
-	
-	if len(password) < MinPasswordLength {
-		return ErrPasswordTooShort
-	}
-	
-	if len(password) > MaxPasswordLength {
-		return ErrPasswordTooLong
-	}
-	
-	return nil
-}
-
-// NewUser creates a new user with the provided details
-func NewUser(email, password, name string) (*User, error) {
-	user := &User{
-		ID:       uuid.New(),
-		Email:    email,
-		Name:     name,
-		IsActive: true,
-	}
-	
-	// Set password (this will validate and hash it)
-	if err := user.SetPassword(password); err != nil {
-		return nil, err
-	}
-	
-	// Validate the user
-	if err := user.IsValidForCreation(); err != nil {
-		return nil, err
-	}
-	
-	return user, nil
-}
-
-// UserRepository defines the interface for user database operations
-type UserRepository interface {
-	Create(user *User) error
-	GetByID(id uuid.UUID) (*User, error)
-	GetByEmail(email string) (*User, error)
-	Update(user *User) error
-	Delete(id uuid.UUID) error
-	List(limit, offset int) ([]*User, error)
-}
-
-// Migration function to create the users table with proper indexes
-func MigrateUser(db *gorm.DB) error {
-	// Auto migrate the User model
-	if err := db.AutoMigrate(&User{}); err != nil {
-		return fmt.Errorf("failed to migrate User model: %w", err)
-	}
-	
-	// Create additional indexes if needed
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active)").Error; err != nil {
-		return fmt.Errorf("failed to create is_active index: %w", err)
-	}
-	
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)").Error; err != nil {
-		return fmt.Errorf("failed to create created_at index: %w", err)
-	}
-	
-	return nil
 }
