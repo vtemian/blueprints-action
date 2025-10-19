@@ -1,34 +1,25 @@
 """
-FastAPI Application Configuration Module
-
-This module sets up the main FastAPI application with all necessary middleware,
-routers, and event handlers for the Task Management API.
+FastAPI Application Configuration and Setup
+Production-ready Task Management API with proper middleware, authentication, and error handling.
 """
 
 import logging
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Import routers
-try:
-    from api.tasks import router as tasks_router
-    from api.users import router as users_router
-except ImportError as e:
-    logging.error(f"Failed to import API routers: {e}")
-    raise ImportError(f"Required API modules not found: {e}")
+from api.tasks import router as tasks_router
+from api.users import router as users_router
 
 # Import core modules
-try:
-    from core.database import init_database, close_database, check_database_connection
-    from core.auth import get_current_user, JWTAuthenticationMiddleware
-except ImportError as e:
-    logging.error(f"Failed to import core modules: {e}")
-    raise ImportError(f"Required core modules not found: {e}")
+from core.database import DatabaseManager, get_database_status
+from core.auth import JWTAuthMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -37,222 +28,272 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Global database manager instance
+db_manager = DatabaseManager()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Application lifespan manager for startup and shutdown events.
-    
-    Handles database initialization on startup and cleanup on shutdown.
+    Lifespan context manager for startup and shutdown events.
+    Handles database initialization and cleanup.
     """
     # Startup
-    logger.info("Starting up Task Management API...")
+    logger.info("Starting Task Management API...")
+    
     try:
-        await init_database()
-        logger.info("Database initialized successfully")
+        # Initialize database connection pool
+        await db_manager.initialize()
+        logger.info("Database connection pool initialized successfully")
         
-        # Verify database connection
-        if not await check_database_connection():
-            raise ConnectionError("Database connection verification failed")
-            
+        # Create database tables
+        await db_manager.create_tables()
+        logger.info("Database tables created/verified successfully")
+        
+        # Test database connectivity
+        db_status = await get_database_status()
+        if db_status != "connected":
+            raise Exception(f"Database connectivity test failed: {db_status}")
+        
         logger.info("Application startup completed successfully")
+        
     except Exception as e:
-        logger.error(f"Failed to initialize database during startup: {e}")
-        raise RuntimeError(f"Application startup failed: {e}")
+        logger.error(f"Failed to initialize application: {str(e)}")
+        # In production, you might want to exit the application
+        # For now, we'll log the error and continue
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable due to startup failure"
+        )
     
     yield
     
     # Shutdown
     logger.info("Shutting down Task Management API...")
     try:
-        await close_database()
+        await db_manager.close()
         logger.info("Database connections closed successfully")
     except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
+        logger.error(f"Error during shutdown: {str(e)}")
 
 
-def create_application() -> FastAPI:
-    """
-    Application factory function that creates and configures the FastAPI instance.
-    
-    Returns:
-        FastAPI: Configured FastAPI application instance
-    """
-    # Initialize FastAPI application
-    app = FastAPI(
-        title="Task Management API",
-        version="1.0.0",
-        description="A comprehensive task management system with user authentication",
-        docs_url="/docs",
-        redoc_url="/redoc",
-        lifespan=lifespan
-    )
-    
-    # Configure CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:3000"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"]
-    )
-    
-    # Add trusted host middleware for security
-    app.add_middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=["localhost", "127.0.0.1", "*.localhost"]
-    )
-    
-    # Add JWT authentication middleware
-    try:
-        app.add_middleware(JWTAuthenticationMiddleware)
-        logger.info("JWT authentication middleware added successfully")
-    except Exception as e:
-        logger.error(f"Failed to add JWT middleware: {e}")
-        raise RuntimeError(f"Authentication middleware setup failed: {e}")
-    
-    # Include API routers with prefix
-    try:
-        app.include_router(
-            tasks_router,
-            prefix="/api",
-            tags=["tasks"]
-        )
-        app.include_router(
-            users_router,
-            prefix="/api",
-            tags=["users"]
-        )
-        logger.info("API routers included successfully")
-    except Exception as e:
-        logger.error(f"Failed to include routers: {e}")
-        raise RuntimeError(f"Router configuration failed: {e}")
-    
-    return app
+# Create FastAPI application instance
+app = FastAPI(
+    title="Task Management API",
+    version="1.0.0",
+    description="A production-ready task management API with user authentication",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan
+)
 
 
-# Create the FastAPI application instance
-app = create_application()
+# Configure CORS middleware (must be added first)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Development frontend
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# Add JWT authentication middleware for protected routes
+app.add_middleware(JWTAuthMiddleware)
 
 
+# Global exception handlers
 @app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Custom HTTP exception handler for consistent error responses."""
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Handle HTTP exceptions with consistent JSON response format."""
+    logger.warning(f"HTTP {exc.status_code} error on {request.url}: {exc.detail}")
+    
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "error": True,
-            "message": exc.detail,
-            "status_code": exc.status_code,
-            "path": request.url.path
+            "error": {
+                "code": exc.status_code,
+                "message": exc.detail,
+                "type": "http_error"
+            },
+            "path": str(request.url),
+            "method": request.method
         }
     )
 
 
-@app.exception_handler(500)
-async def internal_server_error_handler(request: Request, exc: Exception):
-    """Handle internal server errors with proper logging."""
-    logger.error(f"Internal server error on {request.url.path}: {exc}")
+@app.exception_handler(StarletteHTTPException)
+async def starlette_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Handle Starlette HTTP exceptions."""
+    logger.warning(f"Starlette HTTP {exc.status_code} error on {request.url}: {exc.detail}")
+    
     return JSONResponse(
-        status_code=500,
+        status_code=exc.status_code,
         content={
-            "error": True,
-            "message": "Internal server error",
-            "status_code": 500,
-            "path": request.url.path
+            "error": {
+                "code": exc.status_code,
+                "message": exc.detail,
+                "type": "http_error"
+            },
+            "path": str(request.url),
+            "method": request.method
         }
     )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Handle request validation errors with detailed field information."""
+    logger.warning(f"Validation error on {request.url}: {exc.errors()}")
+    
+    # Format validation errors for better client understanding
+    formatted_errors = []
+    for error in exc.errors():
+        formatted_errors.append({
+            "field": " -> ".join(str(loc) for loc in error["loc"]),
+            "message": error["msg"],
+            "type": error["type"]
+        })
+    
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": {
+                "code": 422,
+                "message": "Validation error",
+                "type": "validation_error",
+                "details": formatted_errors
+            },
+            "path": str(request.url),
+            "method": request.method
+        }
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Handle unexpected exceptions."""
+    logger.error(f"Unexpected error on {request.url}: {str(exc)}", exc_info=True)
+    
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": {
+                "code": 500,
+                "message": "Internal server error",
+                "type": "internal_error"
+            },
+            "path": str(request.url),
+            "method": request.method
+        }
+    )
+
+
+# Include API routers
+app.include_router(
+    tasks_router,
+    prefix="/api/tasks",
+    tags=["tasks"]
+)
+
+app.include_router(
+    users_router,
+    prefix="/api/users",
+    tags=["users"]
+)
+
+
+# Health check endpoint
 @app.get("/health", tags=["health"])
 async def health_check() -> Dict[str, Any]:
     """
-    Health check endpoint to verify API and database connectivity.
-    
-    Returns:
-        Dict[str, Any]: Health status information
-        
-    Raises:
-        HTTPException: If database connection fails
+    Health check endpoint that verifies API and database connectivity.
+    Returns detailed status information for monitoring systems.
     """
     try:
-        # Check database connection
-        db_connected = await check_database_connection()
+        # Test database connectivity
+        db_status = await get_database_status()
         
-        if not db_connected:
-            logger.error("Health check failed: Database connection unavailable")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Database connection failed"
-            )
+        # Determine overall health
+        is_healthy = db_status == "connected"
         
-        logger.info("Health check passed successfully")
-        return {
-            "status": "healthy",
-            "database": "connected",
-            "api_version": "1.0.0",
-            "timestamp": "2024-01-01T00:00:00Z"  # In production, use actual timestamp
+        response = {
+            "status": "healthy" if is_healthy else "unhealthy",
+            "database": db_status,
+            "timestamp": db_manager.get_current_timestamp(),
+            "version": "1.0.0"
         }
         
-    except HTTPException:
-        raise
+        # Return appropriate HTTP status
+        status_code = status.HTTP_200_OK if is_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
+        
+        return JSONResponse(
+            status_code=status_code,
+            content=response
+        )
+        
     except Exception as e:
-        logger.error(f"Health check failed with unexpected error: {e}")
-        raise HTTPException(
+        logger.error(f"Health check failed: {str(e)}")
+        return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Health check failed: {str(e)}"
+            content={
+                "status": "unhealthy",
+                "database": "error",
+                "error": str(e),
+                "timestamp": db_manager.get_current_timestamp(),
+                "version": "1.0.0"
+            }
         )
 
 
+# Root endpoint
 @app.get("/", tags=["root"])
 async def root() -> Dict[str, str]:
-    """
-    Root endpoint providing basic API information.
-    
-    Returns:
-        Dict[str, str]: Basic API information
-    """
+    """Root endpoint with API information."""
     return {
-        "message": "Welcome to Task Management API",
+        "message": "Task Management API",
         "version": "1.0.0",
         "docs": "/docs",
         "health": "/health"
     }
 
 
-# Request logging middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all incoming requests for monitoring purposes."""
-    start_time = time.time()
-    
-    # Log request
-    logger.info(f"Request: {request.method} {request.url.path}")
-    
-    # Process request
-    response = await call_next(request)
-    
-    # Log response
-    process_time = time.time() - start_time
-    logger.info(
-        f"Response: {response.status_code} - "
-        f"Process time: {process_time:.4f}s"
-    )
-    
-    return response
-
-
-# Import time for request logging
-import time
+# Additional utility endpoints for monitoring
+@app.get("/api/status", tags=["monitoring"])
+async def api_status() -> Dict[str, Any]:
+    """
+    Detailed API status endpoint for monitoring and debugging.
+    """
+    try:
+        db_status = await get_database_status()
+        db_pool_info = await db_manager.get_pool_status()
+        
+        return {
+            "api": {
+                "status": "running",
+                "version": "1.0.0",
+                "environment": "production"  # This could be configurable
+            },
+            "database": {
+                "status": db_status,
+                "pool": db_pool_info
+            },
+            "timestamp": db_manager.get_current_timestamp()
+        }
+        
+    except Exception as e:
+        logger.error(f"Status check failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to retrieve system status"
+        )
 
 
 if __name__ == "__main__":
     import uvicorn
     
-    logger.info("Starting Task Management API server...")
+    # Development server configuration
     uvicorn.run(
-        "app:app",
+        "main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,

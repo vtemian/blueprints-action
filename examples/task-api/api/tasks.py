@@ -1,85 +1,65 @@
 """
-Task Management API Module
+Task management API endpoints module.
 
-This module provides FastAPI endpoints for task management operations including
-CRUD operations, filtering, pagination, and task completion tracking.
-All endpoints require authentication and implement strict ownership verification.
+This module provides REST API endpoints for task CRUD operations with
+authentication, authorization, and proper data validation.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
 
 from models.task import Task, TaskStatus, TaskPriority
 from core.auth import get_current_user
 from core.database import get_db
-from models.user import User
-
-# Initialize FastAPI router
-router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
-# Pydantic Models for Request/Response
-class TaskCreate(BaseModel):
-    """Request model for creating a new task"""
+# Pydantic Models
+class TaskBase(BaseModel):
+    """Base task model with common fields."""
     title: str = Field(..., min_length=1, max_length=200, description="Task title")
-    description: str = Field(..., min_length=1, max_length=2000, description="Task description")
-    priority: Optional[TaskPriority] = Field(TaskPriority.MEDIUM, description="Task priority level")
-    due_date: Optional[datetime] = Field(None, description="Task due date (ISO format)")
-
-    @validator('title', 'description')
-    def validate_strings(cls, v):
-        """Validate and sanitize string fields"""
-        if v:
-            v = v.strip()
-            if not v:
-                raise ValueError("Field cannot be empty or contain only whitespace")
-        return v
+    description: str = Field(..., min_length=1, max_length=1000, description="Task description")
+    priority: Optional[TaskPriority] = Field(default=TaskPriority.MEDIUM, description="Task priority")
+    due_date: Optional[datetime] = Field(default=None, description="Task due date")
 
     @validator('due_date')
     def validate_due_date(cls, v):
-        """Validate due date is not in the past"""
-        if v and v.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-            raise ValueError("Due date cannot be in the past")
+        """Validate that due date is not in the past."""
+        if v and v < datetime.utcnow():
+            raise ValueError('Due date cannot be in the past')
         return v
+
+
+class TaskCreate(TaskBase):
+    """Model for creating a new task."""
+    pass
 
 
 class TaskUpdate(BaseModel):
-    """Request model for updating an existing task"""
-    title: Optional[str] = Field(None, min_length=1, max_length=200, description="Task title")
-    description: Optional[str] = Field(None, min_length=1, max_length=2000, description="Task description")
-    priority: Optional[TaskPriority] = Field(None, description="Task priority level")
-    due_date: Optional[datetime] = Field(None, description="Task due date (ISO format)")
-    status: Optional[TaskStatus] = Field(None, description="Task status")
-
-    @validator('title', 'description')
-    def validate_strings(cls, v):
-        """Validate and sanitize string fields"""
-        if v is not None:
-            v = v.strip()
-            if not v:
-                raise ValueError("Field cannot be empty or contain only whitespace")
-        return v
+    """Model for updating an existing task."""
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, min_length=1, max_length=1000)
+    priority: Optional[TaskPriority] = None
+    due_date: Optional[datetime] = None
+    status: Optional[TaskStatus] = None
 
     @validator('due_date')
     def validate_due_date(cls, v):
-        """Validate due date is not in the past for new dates"""
-        if v and v.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-            raise ValueError("Due date cannot be in the past")
+        """Validate that due date is not in the past."""
+        if v and v < datetime.utcnow():
+            raise ValueError('Due date cannot be in the past')
         return v
 
 
 class TaskResponse(BaseModel):
-    """Response model for task data"""
+    """Model for task response data."""
     id: int
     title: str
     description: str
-    priority: TaskPriority
     status: TaskStatus
+    priority: TaskPriority
     due_date: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -90,41 +70,52 @@ class TaskResponse(BaseModel):
         from_attributes = True
 
 
-class TaskList(BaseModel):
-    """Response model for paginated task list"""
+class TaskListResponse(BaseModel):
+    """Model for paginated task list response."""
     tasks: List[TaskResponse]
     total: int
     page: int
     limit: int
-    has_next: bool
-    has_prev: bool
+    total_pages: int
 
 
-# Dependency Functions
+class TaskCompleteResponse(BaseModel):
+    """Model for task completion response."""
+    id: int
+    status: TaskStatus
+    completed_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Router initialization
+router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+
+# Dependency functions
 async def get_task_by_id(
     task_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> Task:
     """
-    Dependency to get a task by ID with ownership verification.
+    Get task by ID with ownership verification.
     
     Args:
         task_id: The task ID to retrieve
-        db: Database session
         current_user: Current authenticated user
+        db: Database session
         
     Returns:
-        Task: The requested task
+        Task object if found and owned by user
         
     Raises:
-        HTTPException: 404 if task not found, 403 if not owned by user
+        HTTPException: If task not found or access denied
     """
     task = db.query(Task).filter(
-        and_(
-            Task.id == task_id,
-            Task.deleted_at.is_(None)  # Exclude soft-deleted tasks
-        )
+        Task.id == task_id,
+        Task.is_deleted == False
     ).first()
     
     if not task:
@@ -133,40 +124,38 @@ async def get_task_by_id(
             detail="Task not found"
         )
     
-    # Verify ownership
-    if task.user_id != current_user.id:
+    if task.user_id != current_user["id"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have permission to access this task"
+            detail="Access denied: You don't own this task"
         )
     
     return task
 
 
 # API Endpoints
-@router.get("/", response_model=TaskList, status_code=status.HTTP_200_OK)
+@router.get("/", response_model=TaskListResponse, status_code=status.HTTP_200_OK)
 async def list_tasks(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
-    limit: int = Query(20, ge=1, le=100, description="Number of items per page (max 100)"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
     status_filter: Optional[TaskStatus] = Query(None, alias="status", description="Filter by task status"),
     priority: Optional[TaskPriority] = Query(None, description="Filter by task priority"),
     due_before: Optional[datetime] = Query(None, description="Filter tasks due before this date"),
-    due_after: Optional[datetime] = Query(None, description="Filter tasks due after this date")
-) -> TaskList:
+    due_after: Optional[datetime] = Query(None, description="Filter tasks due after this date"),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> TaskListResponse:
     """
-    List tasks with filtering and pagination.
+    Retrieve a paginated list of user's tasks with optional filtering.
     
-    Returns paginated list of tasks owned by the current user with optional filtering.
+    Supports filtering by status, priority, and due date range.
+    Results are paginated with configurable page size (max 100 items).
     """
     try:
-        # Build base query for user's non-deleted tasks
+        # Build base query
         query = db.query(Task).filter(
-            and_(
-                Task.user_id == current_user.id,
-                Task.deleted_at.is_(None)
-            )
+            Task.user_id == current_user["id"],
+            Task.is_deleted == False
         )
         
         # Apply filters
@@ -177,44 +166,44 @@ async def list_tasks(
             query = query.filter(Task.priority == priority)
         
         if due_before:
-            query = query.filter(Task.due_date < due_before)
+            query = query.filter(Task.due_date <= due_before)
         
         if due_after:
-            query = query.filter(Task.due_date > due_after)
+            query = query.filter(Task.due_date >= due_after)
         
         # Get total count for pagination
         total = query.count()
         
-        # Apply pagination and ordering
+        # Apply pagination
         offset = (page - 1) * limit
         tasks = query.order_by(Task.created_at.desc()).offset(offset).limit(limit).all()
         
-        # Calculate pagination metadata
-        has_next = offset + limit < total
-        has_prev = page > 1
+        # Calculate total pages
+        total_pages = (total + limit - 1) // limit
         
-        return TaskList(
+        return TaskListResponse(
             tasks=tasks,
             total=total,
             page=page,
             limit=limit,
-            has_next=has_next,
-            has_prev=has_prev
+            total_pages=total_pages
         )
         
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while retrieving tasks"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Error processing request: {str(e)}"
         )
 
 
 @router.get("/{task_id}", response_model=TaskResponse, status_code=status.HTTP_200_OK)
-async def get_task(task: Task = Depends(get_task_by_id)) -> TaskResponse:
+async def get_task(
+    task: Task = Depends(get_task_by_id)
+) -> TaskResponse:
     """
-    Get a single task by ID.
+    Retrieve a specific task by ID.
     
-    Returns the task details if the user owns the task.
+    Requires task ownership by the authenticated user.
     """
     return TaskResponse.from_orm(task)
 
@@ -222,25 +211,25 @@ async def get_task(task: Task = Depends(get_task_by_id)) -> TaskResponse:
 @router.post("/", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
 async def create_task(
     task_data: TaskCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> TaskResponse:
     """
-    Create a new task.
+    Create a new task for the authenticated user.
     
-    Creates a new task owned by the current user with the provided data.
+    Requires title and description. Priority defaults to MEDIUM if not specified.
     """
     try:
         # Create new task instance
         new_task = Task(
             title=task_data.title,
             description=task_data.description,
-            priority=task_data.priority,
+            priority=task_data.priority or TaskPriority.MEDIUM,
             due_date=task_data.due_date,
             status=TaskStatus.PENDING,
-            user_id=current_user.id,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc)
+            user_id=current_user["id"],
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
         )
         
         # Save to database
@@ -253,8 +242,8 @@ async def create_task(
     except Exception as e:
         db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while creating the task"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Error creating task: {str(e)}"
         )
 
 
@@ -267,14 +256,14 @@ async def update_task(
     """
     Update an existing task.
     
-    Updates the task with provided data. User ID cannot be changed.
-    Only the task owner can update the task.
+    Only updates provided fields. Requires task ownership by authenticated user.
+    User ID cannot be changed through this endpoint.
     """
     try:
         # Update only provided fields
         update_data = task_data.dict(exclude_unset=True)
         
-        # Prevent user_id modification
+        # Prevent user_id changes
         if 'user_id' in update_data:
             del update_data['user_id']
         
@@ -283,7 +272,7 @@ async def update_task(
             setattr(task, field, value)
         
         # Update timestamp
-        task.updated_at = datetime.now(timezone.utc)
+        task.updated_at = datetime.utcnow()
         
         # Save changes
         db.commit()
@@ -294,8 +283,8 @@ async def update_task(
     except Exception as e:
         db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while updating the task"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Error updating task: {str(e)}"
         )
 
 
@@ -303,40 +292,39 @@ async def update_task(
 async def delete_task(
     task: Task = Depends(get_task_by_id),
     db: Session = Depends(get_db)
-) -> Response:
+) -> None:
     """
     Soft delete a task.
     
-    Marks the task as deleted by setting deleted_at timestamp.
-    Only the task owner can delete the task.
+    Marks the task as deleted instead of removing it from the database.
+    Requires task ownership by authenticated user.
     """
     try:
         # Perform soft delete
-        task.deleted_at = datetime.now(timezone.utc)
-        task.updated_at = datetime.now(timezone.utc)
+        task.is_deleted = True
+        task.updated_at = datetime.utcnow()
         
+        # Save changes
         db.commit()
-        
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
         
     except Exception as e:
         db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while deleting the task"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Error deleting task: {str(e)}"
         )
 
 
-@router.post("/{task_id}/complete", response_model=TaskResponse, status_code=status.HTTP_200_OK)
+@router.post("/{task_id}/complete", response_model=TaskCompleteResponse, status_code=status.HTTP_200_OK)
 async def complete_task(
     task: Task = Depends(get_task_by_id),
     db: Session = Depends(get_db)
-) -> TaskResponse:
+) -> TaskCompleteResponse:
     """
     Mark a task as completed.
     
     Sets the task status to COMPLETED and records the completion timestamp.
-    Only the task owner can complete the task.
+    Requires task ownership by authenticated user.
     """
     try:
         # Check if task is already completed
@@ -347,28 +335,26 @@ async def complete_task(
             )
         
         # Mark as completed
+        completion_time = datetime.utcnow()
         task.status = TaskStatus.COMPLETED
-        task.completed_at = datetime.now(timezone.utc)
-        task.updated_at = datetime.now(timezone.utc)
+        task.completed_at = completion_time
+        task.updated_at = completion_time
         
+        # Save changes
         db.commit()
         db.refresh(task)
         
-        return TaskResponse.from_orm(task)
+        return TaskCompleteResponse(
+            id=task.id,
+            status=task.status,
+            completed_at=task.completed_at
+        )
         
     except HTTPException:
-        # Re-raise HTTP exceptions
         raise
     except Exception as e:
         db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while completing the task"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Error completing task: {str(e)}"
         )
-
-
-# Health check endpoint for the tasks module
-@router.get("/health", status_code=status.HTTP_200_OK)
-async def health_check():
-    """Health check endpoint for the tasks API module"""
-    return {"status": "healthy", "module": "tasks", "timestamp": datetime.now(timezone.utc)}

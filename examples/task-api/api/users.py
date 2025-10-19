@@ -1,347 +1,475 @@
 """
-FastAPI User Management and Authentication API Module
+FastAPI User Management Module
 
-This module provides user registration, authentication, and profile management
-endpoints with proper security practices and error handling.
+This module provides comprehensive user management functionality including
+registration, authentication, profile management, and password operations.
 """
 
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Optional, Annotated
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field, validator
-from sqlalchemy.exc import IntegrityError
+from passlib.context import CryptContext
+from jose import JWTError, jwt
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
-from core.auth import (
-    create_access_token,
-    get_current_user,
-    get_password_hash,
-    verify_password,
-)
-from core.database import get_db
-from models.user import User
+# Assuming these imports exist in your project structure
+from database import get_db  # Database session dependency
+from models.user import User  # SQLAlchemy User model
+from config import settings  # Configuration settings
 
-# Initialize router and security
-router = APIRouter(prefix="/api/users", tags=["users"])
+# Security configuration
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
+# JWT Configuration
+SECRET_KEY = settings.SECRET_KEY  # Should be loaded from environment
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Pydantic Models
-class UserRegisterRequest(BaseModel):
-    """Request model for user registration"""
-    email: EmailStr = Field(..., description="User email address")
-    password: str = Field(..., min_length=8, description="User password (minimum 8 characters)")
-    name: str = Field(..., min_length=1, max_length=100, description="User full name")
+# Create router instance
+router = APIRouter(prefix="/api/users", tags=["users"])
 
+
+# ================================
+# PYDANTIC SCHEMAS
+# ================================
+
+class UserRegisterSchema(BaseModel):
+    """Schema for user registration"""
+    email: EmailStr = Field(..., description="User's email address")
+    password: str = Field(..., min_length=8, description="User's password (minimum 8 characters)")
+    name: str = Field(..., min_length=2, max_length=100, description="User's full name")
+    
     @validator('password')
     def validate_password(cls, v):
+        """Validate password strength"""
         if len(v) < 8:
             raise ValueError('Password must be at least 8 characters long')
+        if not re.search(r'[A-Za-z]', v):
+            raise ValueError('Password must contain at least one letter')
+        if not re.search(r'\d', v):
+            raise ValueError('Password must contain at least one digit')
+        return v
+    
+    @validator('name')
+    def validate_name(cls, v):
+        """Validate name format"""
+        if not v.strip():
+            raise ValueError('Name cannot be empty')
+        return v.strip()
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "email": "user@example.com",
+                "password": "securepass123",
+                "name": "John Doe"
+            }
+        }
+
+
+class UserLoginSchema(BaseModel):
+    """Schema for user login"""
+    email: EmailStr = Field(..., description="User's email address")
+    password: str = Field(..., description="User's password")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "email": "user@example.com",
+                "password": "securepass123"
+            }
+        }
+
+
+class UserUpdateSchema(BaseModel):
+    """Schema for updating user profile"""
+    name: Optional[str] = Field(None, min_length=2, max_length=100, description="User's full name")
+    email: Optional[EmailStr] = Field(None, description="User's new email address")
+    password_confirmation: Optional[str] = Field(None, description="Current password (required when changing email)")
+    
+    @validator('name')
+    def validate_name(cls, v):
+        """Validate name format"""
+        if v is not None and not v.strip():
+            raise ValueError('Name cannot be empty')
+        return v.strip() if v else v
+    
+    @validator('password_confirmation')
+    def validate_password_confirmation(cls, v, values):
+        """Require password confirmation when changing email"""
+        if values.get('email') and not v:
+            raise ValueError('Password confirmation is required when changing email')
         return v
 
-
-class UserLoginRequest(BaseModel):
-    """Request model for user login"""
-    email: EmailStr = Field(..., description="User email address")
-    password: str = Field(..., description="User password")
-
-
-class UserUpdateRequest(BaseModel):
-    """Request model for user profile update"""
-    name: Optional[str] = Field(None, min_length=1, max_length=100, description="User full name")
-    email: Optional[EmailStr] = Field(None, description="User email address")
-    password: Optional[str] = Field(None, description="Current password (required for email changes)")
-
-    @validator('email')
-    def validate_email_with_password(cls, v, values):
-        if v is not None and 'password' not in values:
-            raise ValueError('Password is required when changing email')
-        return v
+    class Config:
+        schema_extra = {
+            "example": {
+                "name": "John Smith",
+                "email": "newemail@example.com",
+                "password_confirmation": "currentpassword"
+            }
+        }
 
 
-class ChangePasswordRequest(BaseModel):
-    """Request model for password change"""
+class PasswordChangeSchema(BaseModel):
+    """Schema for changing password"""
     current_password: str = Field(..., description="Current password")
     new_password: str = Field(..., min_length=8, description="New password (minimum 8 characters)")
-
+    
     @validator('new_password')
     def validate_new_password(cls, v):
+        """Validate new password strength"""
         if len(v) < 8:
             raise ValueError('New password must be at least 8 characters long')
+        if not re.search(r'[A-Za-z]', v):
+            raise ValueError('New password must contain at least one letter')
+        if not re.search(r'\d', v):
+            raise ValueError('New password must contain at least one digit')
         return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "current_password": "oldpassword123",
+                "new_password": "newpassword456"
+            }
+        }
 
 
 class UserResponse(BaseModel):
-    """Response model for user data (without password)"""
+    """Schema for user response (excludes sensitive data)"""
     id: int
     email: str
     name: str
     created_at: datetime
-    last_login: Optional[datetime]
+    last_login: Optional[datetime] = None
+    is_active: bool = True
 
     class Config:
         from_attributes = True
+        schema_extra = {
+            "example": {
+                "id": 1,
+                "email": "user@example.com",
+                "name": "John Doe",
+                "created_at": "2023-01-01T00:00:00",
+                "last_login": "2023-01-01T12:00:00",
+                "is_active": True
+            }
+        }
 
 
 class AuthResponse(BaseModel):
-    """Response model for authentication endpoints"""
+    """Schema for authentication response"""
+    user: UserResponse
     access_token: str
     token_type: str = "bearer"
-    user: UserResponse
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "user": {
+                    "id": 1,
+                    "email": "user@example.com",
+                    "name": "John Doe",
+                    "created_at": "2023-01-01T00:00:00",
+                    "last_login": "2023-01-01T12:00:00",
+                    "is_active": True
+                },
+                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "token_type": "bearer"
+            }
+        }
 
 
 class MessageResponse(BaseModel):
-    """Response model for simple messages"""
+    """Schema for simple message responses"""
     message: str
 
+    class Config:
+        schema_extra = {
+            "example": {
+                "message": "Operation completed successfully"
+            }
+        }
 
-# Helper Functions
+
+# ================================
+# UTILITY FUNCTIONS
+# ================================
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt with 12 rounds"""
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against its hash"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a JWT access token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
     """Get user by email address"""
     return db.query(User).filter(User.email == email).first()
 
 
-def create_user(db: Session, user_data: UserRegisterRequest) -> User:
-    """Create a new user in the database"""
-    hashed_password = get_password_hash(user_data.password)
-    db_user = User(
-        email=user_data.email,
-        name=user_data.name,
-        hashed_password=hashed_password,
-        created_at=datetime.utcnow()
+def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
+    """Get user by ID"""
+    return db.query(User).filter(User.id == user_id).first()
+
+
+# ================================
+# DEPENDENCY FUNCTIONS
+# ================================
+
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    db: Annotated[Session, Depends(get_db)]
+) -> User:
+    """
+    Dependency to get the current authenticated user from JWT token
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
     )
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
+    
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
+    user = get_user_by_id(db, user_id=user_id)
+    if user is None:
+        raise credentials_exception
+    
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Inactive user"
+        )
+    
+    return user
 
 
-def update_last_login(db: Session, user: User) -> None:
-    """Update user's last login timestamp"""
-    user.last_login = datetime.utcnow()
-    db.commit()
+# ================================
+# ENDPOINT HANDLERS
+# ================================
 
-
-# API Endpoints
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(
-    user_data: UserRegisterRequest,
-    db: Session = Depends(get_db)
-):
+    user_data: UserRegisterSchema,
+    db: Annotated[Session, Depends(get_db)]
+) -> AuthResponse:
     """
     Register a new user account
     
     Creates a new user with the provided email, password, and name.
-    Returns user information and JWT access token upon successful registration.
+    Returns the user data along with an access token for immediate authentication.
+    
+    - **email**: Valid email address (must be unique)
+    - **password**: Minimum 8 characters with at least one letter and one digit
+    - **name**: User's full name (2-100 characters)
+    
+    Raises:
+        - 400: Email already registered or validation errors
+        - 500: Server error during user creation
     """
     try:
         # Check if user already exists
         existing_user = get_user_by_email(db, user_data.email)
         if existing_user:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Email address is already registered"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
             )
         
         # Create new user
-        new_user = create_user(db, user_data)
+        hashed_password = hash_password(user_data.password)
+        db_user = User(
+            email=user_data.email,
+            name=user_data.name,
+            hashed_password=hashed_password,
+            created_at=datetime.utcnow(),
+            is_active=True
+        )
         
-        # Generate access token
-        access_token = create_access_token(data={"sub": str(new_user.id)})
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        
+        # Create access token
+        access_token = create_access_token(data={"sub": db_user.id})
         
         return AuthResponse(
-            access_token=access_token,
-            user=UserResponse.from_orm(new_user)
+            user=UserResponse.from_orm(db_user),
+            access_token=access_token
         )
         
     except IntegrityError:
         db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email address is already registered"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
         )
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred during registration"
+            detail="Failed to create user account"
         )
 
 
 @router.post("/login", response_model=AuthResponse)
 async def login_user(
-    login_data: UserLoginRequest,
-    db: Session = Depends(get_db)
-):
+    login_data: UserLoginSchema,
+    db: Annotated[Session, Depends(get_db)]
+) -> AuthResponse:
     """
     Authenticate user and return access token
     
-    Verifies user credentials and returns JWT access token and user information
-    upon successful authentication.
+    Validates user credentials and returns user data with access token.
+    Updates the user's last_login timestamp upon successful authentication.
+    
+    - **email**: User's registered email address
+    - **password**: User's password
+    
+    Raises:
+        - 401: Invalid email or password
+        - 401: User account is inactive
     """
-    try:
-        # Get user by email
-        user = get_user_by_email(db, login_data.email)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password"
-            )
-        
-        # Verify password
-        if not verify_password(login_data.password, user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password"
-            )
-        
-        # Update last login
-        update_last_login(db, user)
-        
-        # Generate access token
-        access_token = create_access_token(data={"sub": str(user.id)})
-        
-        return AuthResponse(
-            access_token=access_token,
-            user=UserResponse.from_orm(user)
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
+    # Get user by email
+    user = get_user_by_email(db, login_data.email)
+    if not user:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred during login"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
         )
+    
+    # Verify password
+    if not verify_password(login_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+    
+    # Check if user is active
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is inactive"
+        )
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    
+    # Create access token
+    access_token = create_access_token(data={"sub": user.id})
+    
+    return AuthResponse(
+        user=UserResponse.from_orm(user),
+        access_token=access_token
+    )
 
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_profile(
-    current_user: User = Depends(get_current_user)
-):
+    current_user: Annotated[User, Depends(get_current_user)]
+) -> UserResponse:
     """
-    Get current user profile
+    Get current user's profile information
     
-    Returns the profile information of the currently authenticated user.
+    Returns the authenticated user's profile data (excluding sensitive information).
     Requires valid JWT token in Authorization header.
+    
+    Raises:
+        - 401: Invalid or expired token
+        - 401: User account is inactive
     """
     return UserResponse.from_orm(current_user)
 
 
 @router.put("/me", response_model=UserResponse)
 async def update_user_profile(
-    update_data: UserUpdateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+    update_data: UserUpdateSchema,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)]
+) -> UserResponse:
     """
-    Update current user profile
+    Update current user's profile information
     
-    Updates the profile information of the currently authenticated user.
-    Email changes require password confirmation for security.
+    Updates the authenticated user's profile. When changing email,
+    password confirmation is required for security.
+    
+    - **name**: New name (optional)
+    - **email**: New email address (optional, requires password_confirmation)
+    - **password_confirmation**: Current password (required when changing email)
+    
+    Raises:
+        - 400: Email already in use or validation errors
+        - 401: Invalid password confirmation
+        - 401: Invalid or expired token
     """
     try:
-        # If email is being changed, verify current password
-        if update_data.email and update_data.email != current_user.email:
-            if not update_data.password:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Current password is required to change email"
-                )
-            
-            if not verify_password(update_data.password, current_user.hashed_password):
+        update_fields = {}
+        
+        # Update name if provided
+        if update_data.name is not None:
+            update_fields['name'] = update_data.name
+        
+        # Update email if provided
+        if update_data.email is not None:
+            # Verify password confirmation
+            if not verify_password(update_data.password_confirmation, current_user.hashed_password):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Current password is incorrect"
+                    detail="Invalid password confirmation"
                 )
             
-            # Check if new email is already taken
+            # Check if new email is already in use
             existing_user = get_user_by_email(db, update_data.email)
             if existing_user and existing_user.id != current_user.id:
                 raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Email address is already in use"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email already in use"
                 )
             
-            current_user.email = update_data.email
+            update_fields['email'] = update_data.email
         
-        # Update name if provided
-        if update_data.name:
-            current_user.name = update_data.name
+        # Apply updates
+        for field, value in update_fields.items():
+            setattr(current_user, field, value)
         
         db.commit()
         db.refresh(current_user)
         
         return UserResponse.from_orm(current_user)
         
-    except HTTPException:
-        db.rollback()
-        raise
     except IntegrityError:
         db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email address is already in use"
-        )
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while updating profile"
-        )
-
-
-@router.post("/change-password", response_model=MessageResponse)
-async def change_password(
-    password_data: ChangePasswordRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Change user password
-    
-    Changes the password for the currently authenticated user.
-    Requires current password verification for security.
-    """
-    try:
-        # Verify current password
-        if not verify_password(password_data.current_password, current_user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Current password is incorrect"
-            )
-        
-        # Check if new password is different from current
-        if verify_password(password_data.new_password, current_user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="New password must be different from current password"
-            )
-        
-        # Hash and save new password
-        current_user.hashed_password = get_password_hash(password_data.new_password)
-        db.commit()
-        
-        return MessageResponse(message="Password changed successfully")
-        
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while changing password"
-        )
-
-
-# Error handlers for common validation errors
-@router.exception_handler(ValueError)
-async def validation_exception_handler(request, exc):
-    """Handle validation errors"""
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail=str(exc)
-    )
+            status_code=status.HTTP_400_BAD_REQUEST,

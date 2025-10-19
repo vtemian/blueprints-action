@@ -1,19 +1,28 @@
 """
-Core database module for async SQLAlchemy operations with SQLite.
+Database connection and session management module for FastAPI application.
 
-This module provides database connection management, session handling, and base models
-for a FastAPI application using async SQLAlchemy with SQLite backend.
+This module provides async database connectivity using SQLAlchemy 2.0+ with SQLite,
+including proper session management, connection pooling, and error handling.
 """
 
+import logging
 import os
 import uuid
-import logging
-from datetime import datetime
-from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import AsyncGenerator, Optional
 
-import sqlalchemy as sa
-from sqlalchemy import event, pool
+from databases import Database
+from sqlalchemy import (
+    Column,
+    DateTime,
+    String,
+    create_engine,
+    event,
+    pool,
+)
+from sqlalchemy.dialects.sqlite import UUID
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -22,308 +31,220 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.dialects.sqlite import UUID as SQLiteUUID
-from sqlalchemy.sql import func
-from sqlalchemy.exc import SQLAlchemyError, DisconnectionError
+from sqlalchemy.pool import StaticPool
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Database configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tasks.db")
+ASYNC_DATABASE_URL = DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://")
 
-class DatabaseError(Exception):
-    """Base exception for database operations."""
-    pass
-
-
-class ConnectionError(DatabaseError):
-    """Raised when database connection fails."""
-    pass
-
-
-class SessionError(DatabaseError):
-    """Raised when session operations fail."""
-    pass
+# Global database instances
+database: Optional[Database] = None
+async_engine: Optional[AsyncEngine] = None
+async_session_factory: Optional[async_sessionmaker[AsyncSession]] = None
 
 
 class Base(DeclarativeBase):
+    """SQLAlchemy declarative base class."""
+    pass
+
+
+class BaseModel(Base):
     """
-    Base class for all database models.
+    Abstract base model with common fields for all database models.
     
-    Provides common fields and functionality for all models including:
+    Provides:
     - UUID primary key
-    - Created and updated timestamps
-    - Proper type annotations
+    - Created and updated timestamps with automatic management
+    - Proper SQLAlchemy 2.0 syntax with type annotations
     """
+    __abstract__ = True
     
-    # Use UUID as primary key for all models
     id: Mapped[str] = mapped_column(
-        SQLiteUUID(as_uuid=False),
+        UUID(as_uuid=False),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
         nullable=False,
-        index=True,
         doc="Unique identifier for the record"
     )
     
-    # Timestamp fields with automatic management
     created_at: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        server_default=func.now(),
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
         nullable=False,
-        doc="Timestamp when record was created"
+        doc="Timestamp when the record was created"
     )
     
     updated_at: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
-        doc="Timestamp when record was last updated"
+        doc="Timestamp when the record was last updated"
     )
-
+    
     def __repr__(self) -> str:
-        """String representation of the model."""
+        """String representation of the model instance."""
         return f"<{self.__class__.__name__}(id={self.id})>"
 
 
-class DatabaseManager:
+def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:
     """
-    Manages database connections, sessions, and lifecycle operations.
+    Configure SQLite connection settings for optimal performance and reliability.
     
-    This class encapsulates all database-related functionality including
-    engine creation, session management, and cleanup operations.
+    Args:
+        dbapi_connection: The raw database connection
+        connection_record: SQLAlchemy connection record
     """
-    
-    def __init__(self, database_url: Optional[str] = None, echo: bool = False):
-        """
-        Initialize database manager.
+    try:
+        # Enable foreign key constraints
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
         
-        Args:
-            database_url: Database connection URL. If None, uses environment variable
-                         or defaults to SQLite file database.
-            echo: Whether to echo SQL statements to logs.
-        """
-        self.database_url = self._get_database_url(database_url)
-        self.echo = echo or os.getenv("DATABASE_ECHO", "false").lower() == "true"
-        self.engine: Optional[AsyncEngine] = None
-        self.session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+        # Set WAL mode for better concurrency
+        dbapi_connection.execute("PRAGMA journal_mode=WAL")
         
-        logger.info(f"Database manager initialized with URL: {self._mask_url(self.database_url)}")
-    
-    def _get_database_url(self, url: Optional[str]) -> str:
-        """
-        Get database URL from parameter, environment, or default.
+        # Set synchronous mode for better performance
+        dbapi_connection.execute("PRAGMA synchronous=NORMAL")
         
-        Args:
-            url: Explicit database URL
-            
-        Returns:
-            Validated database URL
-            
-        Raises:
-            DatabaseError: If URL format is invalid
-        """
-        if url:
-            database_url = url
-        else:
-            database_url = os.getenv("DATABASE_URL", "sqlite:///./tasks.db")
+        # Set cache size (negative value means KB)
+        dbapi_connection.execute("PRAGMA cache_size=-64000")  # 64MB
         
-        # Convert SQLite URL to async format if needed
-        if database_url.startswith("sqlite:///"):
-            database_url = database_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
-        elif database_url.startswith("sqlite://"):
-            database_url = database_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+        # Set temp store to memory
+        dbapi_connection.execute("PRAGMA temp_store=MEMORY")
         
-        # Validate URL format
-        if not database_url.startswith("sqlite+aiosqlite://"):
-            raise DatabaseError(f"Unsupported database URL format: {self._mask_url(database_url)}")
+        # Set busy timeout
+        dbapi_connection.execute("PRAGMA busy_timeout=30000")  # 30 seconds
         
-        return database_url
-    
-    def _mask_url(self, url: str) -> str:
-        """Mask sensitive information in database URL for logging."""
-        if "://" in url:
-            scheme, rest = url.split("://", 1)
-            if "@" in rest:
-                credentials, host_part = rest.rsplit("@", 1)
-                return f"{scheme}://***@{host_part}"
-        return url
-    
-    async def initialize(self) -> None:
-        """
-        Initialize database engine and session factory.
+        logger.debug("SQLite connection configured successfully")
         
-        Raises:
-            ConnectionError: If database connection cannot be established
-        """
-        try:
-            # Create async engine with optimized settings for SQLite
-            self.engine = create_async_engine(
-                self.database_url,
-                echo=self.echo,
-                # SQLite-specific connection arguments
-                connect_args={
-                    "check_same_thread": False,  # Allow multiple threads
-                    "timeout": 30,  # Connection timeout in seconds
-                },
-                # Connection pool settings
-                poolclass=pool.StaticPool,  # Use static pool for SQLite
-                pool_pre_ping=True,  # Verify connections before use
-                pool_recycle=3600,  # Recycle connections every hour
-                # Async-specific settings
-                future=True,  # Use SQLAlchemy 2.0 style
-            )
-            
-            # Configure SQLite-specific settings
-            await self._configure_sqlite_settings()
-            
-            # Create session factory
-            self.session_factory = async_sessionmaker(
-                bind=self.engine,
-                class_=AsyncSession,
-                expire_on_commit=False,  # Keep objects accessible after commit
-                autoflush=True,  # Auto-flush before queries
-                autocommit=False,  # Manual transaction control
-            )
-            
-            logger.info("Database engine and session factory initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            raise ConnectionError(f"Database initialization failed: {e}") from e
-    
-    async def _configure_sqlite_settings(self) -> None:
-        """Configure SQLite-specific settings for optimal performance."""
-        if not self.engine:
-            return
-        
-        @event.listens_for(self.engine.sync_engine, "connect")
-        def set_sqlite_pragma(dbapi_connection, connection_record):
-            """Set SQLite pragmas for better performance and reliability."""
-            cursor = dbapi_connection.cursor()
-            
-            # Enable foreign key constraints
-            cursor.execute("PRAGMA foreign_keys=ON")
-            
-            # Set WAL mode for better concurrency
-            cursor.execute("PRAGMA journal_mode=WAL")
-            
-            # Set synchronous mode for balance of safety and performance
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            
-            # Set cache size (negative value = KB, positive = pages)
-            cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
-            
-            # Set busy timeout for handling locks
-            cursor.execute("PRAGMA busy_timeout=30000")  # 30 seconds
-            
-            cursor.close()
-    
-    async def create_tables(self) -> None:
-        """
-        Create all database tables defined in models.
-        
-        Raises:
-            DatabaseError: If table creation fails
-        """
-        if not self.engine:
-            raise DatabaseError("Database engine not initialized")
-        
-        try:
-            async with self.engine.begin() as conn:
-                # Create all tables defined in Base metadata
-                await conn.run_sync(Base.metadata.create_all)
-            
-            logger.info("Database tables created successfully")
-            
-        except SQLAlchemyError as e:
-            logger.error(f"Failed to create database tables: {e}")
-            raise DatabaseError(f"Table creation failed: {e}") from e
-    
-    async def drop_tables(self) -> None:
-        """
-        Drop all database tables. Use with caution!
-        
-        Raises:
-            DatabaseError: If table dropping fails
-        """
-        if not self.engine:
-            raise DatabaseError("Database engine not initialized")
-        
-        try:
-            async with self.engine.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-            
-            logger.warning("All database tables dropped")
-            
-        except SQLAlchemyError as e:
-            logger.error(f"Failed to drop database tables: {e}")
-            raise DatabaseError(f"Table dropping failed: {e}") from e
-    
-    @asynccontextmanager
-    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
-        """
-        Get database session with automatic cleanup.
-        
-        Yields:
-            AsyncSession: Database session
-            
-        Raises:
-            SessionError: If session creation or management fails
-        """
-        if not self.session_factory:
-            raise SessionError("Session factory not initialized")
-        
-        session = self.session_factory()
-        try:
-            yield session
-            await session.commit()
-            
-        except Exception as e:
-            await session.rollback()
-            logger.error(f"Session error, rolled back: {e}")
-            raise SessionError(f"Session operation failed: {e}") from e
-            
-        finally:
-            await session.close()
-    
-    async def close(self) -> None:
-        """
-        Close database engine and cleanup resources.
-        
-        Should be called during application shutdown.
-        """
-        if self.engine:
-            try:
-                await self.engine.dispose()
-                logger.info("Database engine closed successfully")
-            except Exception as e:
-                logger.error(f"Error closing database engine: {e}")
-            finally:
-                self.engine = None
-                self.session_factory = None
+    except Exception as e:
+        logger.error(f"Failed to configure SQLite connection: {e}")
+        raise
 
 
-# Global database manager instance
-db_manager = DatabaseManager()
+def _ensure_database_directory() -> None:
+    """
+    Ensure the database directory exists and has proper permissions.
+    
+    Raises:
+        PermissionError: If unable to create directory or set permissions
+        OSError: If directory creation fails
+    """
+    try:
+        if DATABASE_URL.startswith("sqlite:///"):
+            db_path = DATABASE_URL.replace("sqlite:///", "")
+            if not db_path.startswith("/"):  # Relative path
+                db_path = Path(db_path)
+                db_dir = db_path.parent
+                
+                if not db_dir.exists():
+                    db_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Created database directory: {db_dir}")
+                
+                # Ensure directory is writable
+                if not os.access(db_dir, os.W_OK):
+                    raise PermissionError(f"Database directory is not writable: {db_dir}")
+                    
+    except Exception as e:
+        logger.error(f"Failed to ensure database directory: {e}")
+        raise
+
+
+def get_engine() -> AsyncEngine:
+    """
+    Get the configured async database engine.
+    
+    Returns:
+        AsyncEngine: The configured SQLAlchemy async engine
+        
+    Raises:
+        RuntimeError: If engine is not initialized
+    """
+    if async_engine is None:
+        raise RuntimeError("Database engine not initialized. Call init_db() first.")
+    return async_engine
+
+
+def _create_async_engine() -> AsyncEngine:
+    """
+    Create and configure the async SQLAlchemy engine.
+    
+    Returns:
+        AsyncEngine: Configured async database engine
+        
+    Raises:
+        Exception: If engine creation fails
+    """
+    try:
+        _ensure_database_directory()
+        
+        # Engine configuration for SQLite
+        engine_kwargs = {
+            "echo": os.getenv("DATABASE_ECHO", "false").lower() == "true",
+            "future": True,
+            "poolclass": StaticPool,
+            "connect_args": {
+                "check_same_thread": False,
+                "timeout": 30,
+            },
+        }
+        
+        # Create async engine
+        engine = create_async_engine(ASYNC_DATABASE_URL, **engine_kwargs)
+        
+        # Configure SQLite-specific settings for sync connections
+        sync_engine = create_engine(DATABASE_URL, **engine_kwargs)
+        event.listen(sync_engine, "connect", _configure_sqlite_connection)
+        
+        logger.info(f"Database engine created successfully: {ASYNC_DATABASE_URL}")
+        return engine
+        
+    except Exception as e:
+        logger.error(f"Failed to create database engine: {e}")
+        raise
 
 
 async def init_db() -> None:
     """
-    Initialize database connection and create tables.
+    Initialize the database connection and create all tables.
     
     This function should be called during application startup.
     
     Raises:
-        DatabaseError: If initialization fails
+        Exception: If database initialization fails
     """
+    global database, async_engine, async_session_factory
+    
     try:
-        await db_manager.initialize()
-        await db_manager.create_tables()
-        logger.info("Database initialization completed")
+        logger.info("Initializing database...")
+        
+        # Create async engine
+        async_engine = _create_async_engine()
+        
+        # Create session factory
+        async_session_factory = async_sessionmaker(
+            bind=async_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=True,
+            autocommit=False,
+        )
+        
+        # Create database instance for raw queries if needed
+        database = Database(ASYNC_DATABASE_URL)
+        await database.connect()
+        
+        # Create all tables
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        
+        logger.info("Database initialized successfully")
         
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.error(f"Failed to initialize database: {e}")
+        await close_db()  # Cleanup on failure
         raise
 
 
@@ -333,71 +254,142 @@ async def close_db() -> None:
     
     This function should be called during application shutdown.
     """
+    global database, async_engine, async_session_factory
+    
     try:
-        await db_manager.close()
-        logger.info("Database cleanup completed")
+        logger.info("Closing database connections...")
+        
+        # Close database connection
+        if database is not None:
+            await database.disconnect()
+            database = None
+            
+        # Dispose of async engine
+        if async_engine is not None:
+            await async_engine.dispose()
+            async_engine = None
+            
+        # Clear session factory
+        async_session_factory = None
+        
+        logger.info("Database connections closed successfully")
         
     except Exception as e:
-        logger.error(f"Database cleanup failed: {e}")
+        logger.error(f"Error closing database connections: {e}")
+
+
+@asynccontextmanager
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Context manager for database sessions with automatic cleanup.
+    
+    Yields:
+        AsyncSession: Database session
+        
+    Raises:
+        RuntimeError: If session factory is not initialized
+        Exception: If session creation or cleanup fails
+    """
+    if async_session_factory is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    
+    session = async_session_factory()
+    try:
+        logger.debug("Database session created")
+        yield session
+        await session.commit()
+        logger.debug("Database session committed")
+    except Exception as e:
+        logger.error(f"Database session error: {e}")
+        await session.rollback()
+        raise
+    finally:
+        await session.close()
+        logger.debug("Database session closed")
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    FastAPI dependency for getting database sessions.
+    FastAPI dependency for database sessions.
+    
+    This function provides database sessions to FastAPI route handlers
+    with automatic cleanup and error handling.
     
     Yields:
-        AsyncSession: Database session for request handling
-        
-    Raises:
-        SessionError: If session cannot be created
+        AsyncSession: Database session for the request
         
     Example:
-        ```python
         @app.get("/items/")
         async def get_items(db: AsyncSession = Depends(get_db)):
-            result = await db.execute(select(Item))
-            return result.scalars().all()
-        ```
+            # Use db session here
+            pass
     """
-    async with db_manager.get_session() as session:
-        try:
-            yield session
-        except DisconnectionError as e:
-            logger.error(f"Database disconnection error: {e}")
-            raise SessionError("Database connection lost") from e
-        except SQLAlchemyError as e:
-            logger.error(f"Database session error: {e}")
-            raise SessionError(f"Database operation failed: {e}") from e
+    async with get_db_session() as session:
+        yield session
 
 
-async def health_check() -> bool:
+# Health check function
+async def check_database_health() -> bool:
     """
-    Check database connectivity and health.
+    Check if the database connection is healthy.
     
     Returns:
-        bool: True if database is healthy, False otherwise
+        bool: True if database is accessible, False otherwise
     """
     try:
-        async with db_manager.get_session() as session:
-            # Simple query to test connectivity
-            result = await session.execute(sa.text("SELECT 1"))
-            return result.scalar() == 1
+        if database is None:
+            return False
             
+        # Simple query to check connectivity
+        await database.fetch_one("SELECT 1")
+        return True
+        
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         return False
 
 
-# Export commonly used components
+# Utility function for raw queries
+async def execute_raw_query(query: str, values: Optional[dict] = None) -> list:
+    """
+    Execute a raw SQL query.
+    
+    Args:
+        query: SQL query string
+        values: Optional query parameters
+        
+    Returns:
+        list: Query results
+        
+    Raises:
+        RuntimeError: If database is not initialized
+        Exception: If query execution fails
+    """
+    if database is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    
+    try:
+        if values:
+            result = await database.fetch_all(query, values)
+        else:
+            result = await database.fetch_all(query)
+        return result
+    except Exception as e:
+        logger.error(f"Raw query execution failed: {e}")
+        raise
+
+
+# Export commonly used items
 __all__ = [
     "Base",
-    "DatabaseManager",
-    "DatabaseError",
-    "ConnectionError", 
-    "SessionError",
+    "BaseModel", 
     "init_db",
     "close_db",
     "get_db",
-    "health_check",
-    "db_manager",
+    "get_db_session",
+    "get_engine",
+    "check_database_health",
+    "execute_raw_query",
+    "DATABASE_URL",
+    "ASYNC_DATABASE_URL",
 ]
