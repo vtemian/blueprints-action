@@ -1,98 +1,98 @@
 #!/usr/bin/env python3
 """
-Todo CLI Application - Main Entry Point
+Todo CLI Application Entry Point
 
-A command-line todo application that allows users to manage their tasks
-through simple commands like add, list, done, and remove.
+A simple command-line todo application that supports adding, listing,
+completing, and removing todo items.
 """
 
 import sys
-from typing import List, Optional
-
-try:
-    import app
-    import commands
-except ImportError as e:
-    print(f"Error: Failed to import required modules: {e}", file=sys.stderr)
-    print("Please ensure all application modules are available.", file=sys.stderr)
-    sys.exit(1)
+import app
+import commands
 
 
-def main() -> None:
-    """
-    Main entry point for the Todo CLI application.
-    
-    Parses command line arguments and routes to appropriate command handlers.
-    Handles various error conditions and provides appropriate exit codes.
-    """
-    # Parse command line arguments
-    args: List[str] = sys.argv[1:]
-    command: Optional[str] = args[0] if args else None
-    command_args: List[str] = args[1:] if len(args) > 1 else []
-    
-    # Command routing dictionary
-    command_map = {
-        "add": commands.add,
-        "list": commands.list,
-        "done": commands.done,
-        "remove": commands.remove,
-        "help": commands.help
-    }
-    
+def main():
+    """Main entry point for the Todo CLI application."""
     try:
-        # Handle no command or help command
-        if command is None or command == "help":
+        # Handle case where no arguments are provided
+        if len(sys.argv) < 2:
             commands.help()
             sys.exit(0)
         
-        # Check if command exists
-        if command not in command_map:
-            print("Invalid command", file=sys.stderr)
+        # Get the command (case-insensitive)
+        command = sys.argv[1].lower()
+        args = sys.argv[2:]  # Remaining arguments
+        
+        # Route commands to appropriate handlers
+        if command == "add":
+            if not args:
+                print("Error: 'add' command requires a todo item description.")
+                print("Usage: python main.py add <description>")
+                sys.exit(1)
+            # Join all arguments to support multi-word descriptions
+            description = " ".join(args)
+            commands.add(description)
+            
+        elif command == "list":
+            commands.list()
+            
+        elif command == "done":
+            if not args:
+                print("Error: 'done' command requires a todo item ID.")
+                print("Usage: python main.py done <id>")
+                sys.exit(1)
+            try:
+                todo_id = int(args[0])
+                commands.done(todo_id)
+            except ValueError:
+                print("Error: Todo ID must be a valid number.")
+                print("Usage: python main.py done <id>")
+                sys.exit(1)
+                
+        elif command == "remove":
+            if not args:
+                print("Error: 'remove' command requires a todo item ID.")
+                print("Usage: python main.py remove <id>")
+                sys.exit(1)
+            try:
+                todo_id = int(args[0])
+                commands.remove(todo_id)
+            except ValueError:
+                print("Error: Todo ID must be a valid number.")
+                print("Usage: python main.py remove <id>")
+                sys.exit(1)
+                
+        elif command == "help":
+            commands.help()
+            
+        else:
+            print(f"Error: Unknown command '{command}'")
+            print()
             commands.help()
             sys.exit(1)
-        
-        # Execute the command with arguments
-        command_function = command_map[command]
-        
-        # Handle commands that require arguments
-        if command in ["add", "done", "remove"] and not command_args:
-            print(f"Usage: {sys.argv[0]} {command} <arguments>", file=sys.stderr)
-            print(f"Error: '{command}' command requires additional arguments", file=sys.stderr)
-            sys.exit(1)
-        
-        # Execute the command
-        if command_args:
-            command_function(*command_args)
-        else:
-            command_function()
-        
+            
+        # If we reach here, command executed successfully
         sys.exit(0)
-    
-    except ImportError as e:
-        print(f"Error: Missing required dependencies: {e}", file=sys.stderr)
-        sys.exit(1)
-    
+        
     except FileNotFoundError as e:
-        print(f"Error: File not found: {e}", file=sys.stderr)
-        print("The todo data file may not exist or is inaccessible.", file=sys.stderr)
+        print(f"Error: Could not access todo file - {e}")
         sys.exit(1)
-    
+        
     except PermissionError as e:
-        print(f"Error: Permission denied: {e}", file=sys.stderr)
-        print("Check file permissions for the todo data file.", file=sys.stderr)
+        print(f"Error: Permission denied accessing todo file - {e}")
         sys.exit(1)
-    
+        
+    except IOError as e:
+        print(f"Error: File I/O error - {e}")
+        sys.exit(1)
+        
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user.", file=sys.stderr)
+        print("\nOperation cancelled by user.")
         sys.exit(1)
-    
-    except ValueError as e:
-        print(f"Error: Invalid input: {e}", file=sys.stderr)
-        sys.exit(1)
-    
+        
     except Exception as e:
-        print(f"Error: An unexpected error occurred: {e}", file=sys.stderr)
-        print("Please try again or contact support if the problem persists.", file=sys.stderr)
+        print(f"Error: An unexpected error occurred - {e}")
+        print("Please try again or use 'help' for usage information.")
         sys.exit(1)
 
 
