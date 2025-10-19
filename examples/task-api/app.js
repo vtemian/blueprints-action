@@ -1,33 +1,32 @@
 /**
  * Task Management API - Main Application Entry Point
- * Express.js application with authentication, rate limiting, and database integration
- * @version 1.0.0
+ * Express.js FastAPI-equivalent implementation
+ * Version: 1.0.0
  */
 
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const compression = require('compression');
+const morgan = require('morgan');
+const { createServer } = require('http');
+require('dotenv').config();
 
-// Local module imports
-import tasksRouter from './api/tasks.js';
-import usersRouter from './api/users.js';
-import { initializeDatabase, checkDatabaseConnection } from './core/database.js';
-import { authenticateJWT, createAuthMiddleware } from './core/auth.js';
-
-// Get current directory for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// Import custom modules
+const { initializeDatabase, getDbConnection, testDbConnection } = require('./core/database');
+const { authenticateToken, optionalAuth } = require('./core/auth');
+const tasksRouter = require('./api/tasks');
+const usersRouter = require('./api/users');
+const logger = require('./core/logger');
 
 /**
- * Application configuration
+ * Application Configuration
  */
 const APP_CONFIG = {
   title: 'Task Management API',
   version: '1.0.0',
-  port: process.env.PORT || 3000,
+  port: process.env.PORT || 8000,
   nodeEnv: process.env.NODE_ENV || 'development'
 };
 
@@ -37,34 +36,44 @@ const APP_CONFIG = {
 const app = express();
 
 /**
- * Set application metadata
+ * Security Middleware Configuration
  */
-app.set('title', APP_CONFIG.title);
-app.set('version', APP_CONFIG.version);
+// Helmet for security headers
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"]
+    }
+  }
+}));
 
-/**
- * Rate limiting configuration
- */
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  max: process.env.NODE_ENV === 'production' ? 100 : 1000, // requests per window
   message: {
-    error: 'Too many requests from this IP, please try again later.',
+    error: 'Too many requests',
+    message: 'Rate limit exceeded. Please try again later.',
     retryAfter: '15 minutes'
   },
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders: false
 });
 
+app.use('/api/', limiter);
+
 /**
- * CORS configuration
+ * CORS Configuration
  */
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       'http://localhost:3000',
-      'http://localhost:3001',
-      ...(process.env.ALLOWED_ORIGINS?.split(',') || [])
+      'http://127.0.0.1:3000',
+      ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [])
     ];
     
     // Allow requests with no origin (mobile apps, Postman, etc.)
@@ -73,88 +82,108 @@ const corsOptions = {
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      callback(new Error('Not allowed by CORS policy'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: [
+    'Origin',
+    'X-Requested-With',
+    'Content-Type',
+    'Accept',
+    'Authorization',
+    'Cache-Control',
+    'Pragma'
+  ],
+  exposedHeaders: ['X-Total-Count', 'X-Page-Count'],
+  maxAge: 86400 // 24 hours
 };
 
-/**
- * Security and parsing middleware (order is critical)
- */
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-    },
-  },
-  crossOriginEmbedderPolicy: false
-}));
-
 app.use(cors(corsOptions));
-app.use(limiter);
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 /**
- * Request logging middleware (development only)
+ * General Middleware Stack
  */
-if (APP_CONFIG.nodeEnv === 'development') {
-  app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-    next();
-  });
+// Compression middleware
+app.use(compression());
+
+// Logging middleware
+if (APP_CONFIG.nodeEnv === 'production') {
+  app.use(morgan('combined', { stream: { write: message => logger.info(message.trim()) } }));
+} else {
+  app.use(morgan('dev'));
 }
 
+// Body parsing middleware with size limits
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    try {
+      JSON.parse(buf);
+    } catch (e) {
+      res.status(400).json({
+        error: 'Invalid JSON',
+        message: 'Request body contains invalid JSON'
+      });
+      throw new Error('Invalid JSON');
+    }
+  }
+}));
+
+app.use(express.urlencoded({ 
+  extended: true, 
+  limit: '10mb' 
+}));
+
+// Request ID middleware for tracing
+app.use((req, res, next) => {
+  req.id = require('crypto').randomUUID();
+  res.setHeader('X-Request-ID', req.id);
+  next();
+});
+
 /**
- * Health check endpoint
- * @route GET /health
- * @returns {Object} Health status and database connection status
+ * Health Check Endpoint
  */
 app.get('/health', async (req, res) => {
   try {
-    const dbStatus = await checkDatabaseConnection();
-    
+    const dbStatus = await testDbConnection();
     const healthCheck = {
       status: 'healthy',
+      version: APP_CONFIG.version,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      version: APP_CONFIG.version,
       database: dbStatus ? 'connected' : 'disconnected',
-      environment: APP_CONFIG.nodeEnv
+      environment: APP_CONFIG.nodeEnv,
+      memory: {
+        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024 * 100) / 100,
+        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024 * 100) / 100
+      }
     };
 
-    if (!dbStatus) {
-      return res.status(503).json({
-        ...healthCheck,
-        status: 'unhealthy',
-        message: 'Database connection failed'
-      });
-    }
-
-    res.status(200).json(healthCheck);
+    const statusCode = dbStatus ? 200 : 503;
+    res.status(statusCode).json(healthCheck);
   } catch (error) {
-    console.error('Health check failed:', error);
+    logger.error('Health check failed:', error);
     res.status(503).json({
       status: 'unhealthy',
+      version: APP_CONFIG.version,
       timestamp: new Date().toISOString(),
-      error: 'Health check failed',
-      message: error.message
+      database: 'disconnected',
+      error: 'Health check failed'
     });
   }
 });
 
 /**
- * API route registration
- * Protected routes use JWT authentication middleware
+ * API Routes Registration
  */
+// Public routes (no authentication required)
 app.use('/api/users', usersRouter);
-app.use('/api/tasks', authenticateJWT, tasksRouter);
+
+// Protected routes (authentication required)
+app.use('/api/tasks', authenticateToken, tasksRouter);
 
 /**
  * Root endpoint
@@ -163,136 +192,133 @@ app.get('/', (req, res) => {
   res.json({
     message: `Welcome to ${APP_CONFIG.title}`,
     version: APP_CONFIG.version,
-    documentation: '/api/docs', // TODO: Add API documentation endpoint
-    health: '/health'
+    documentation: '/api/docs',
+    health: '/health',
+    timestamp: new Date().toISOString()
   });
 });
 
 /**
- * 404 handler for undefined routes
+ * 404 Handler - Must be after all routes
  */
 app.use('*', (req, res) => {
   res.status(404).json({
-    error: 'Route not found',
-    message: `The requested endpoint ${req.method} ${req.originalUrl} does not exist`,
-    availableEndpoints: [
-      'GET /',
-      'GET /health',
-      'POST /api/users/register',
-      'POST /api/users/login',
-      'GET /api/tasks',
-      'POST /api/tasks'
-    ]
+    error: 'Not Found',
+    message: `Route ${req.method} ${req.originalUrl} not found`,
+    timestamp: new Date().toISOString(),
+    requestId: req.id
   });
 });
 
 /**
- * Async error wrapper utility
- * @param {Function} fn - Async function to wrap
- * @returns {Function} Express middleware function
- */
-export const asyncHandler = (fn) => (req, res, next) => {
-  Promise.resolve(fn(req, res, next)).catch(next);
-};
-
-/**
- * Global error handling middleware (must be last)
+ * Global Error Handler - Must be last middleware
  */
 app.use((error, req, res, next) => {
-  console.error('Global error handler:', error);
-
-  // CORS error
-  if (error.message === 'Not allowed by CORS') {
-    return res.status(403).json({
-      error: 'CORS Error',
-      message: 'Origin not allowed by CORS policy'
-    });
-  }
-
-  // JWT authentication errors
-  if (error.name === 'JsonWebTokenError') {
-    return res.status(401).json({
-      error: 'Authentication Error',
-      message: 'Invalid token'
-    });
-  }
-
-  if (error.name === 'TokenExpiredError') {
-    return res.status(401).json({
-      error: 'Authentication Error',
-      message: 'Token expired'
-    });
-  }
-
-  // Validation errors
-  if (error.name === 'ValidationError') {
-    return res.status(400).json({
-      error: 'Validation Error',
-      message: error.message,
-      details: error.details || null
-    });
-  }
-
-  // Database errors
-  if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-    return res.status(503).json({
-      error: 'Database Error',
-      message: 'Database connection failed'
-    });
-  }
-
-  // Default server error
-  const statusCode = error.statusCode || error.status || 500;
-  res.status(statusCode).json({
-    error: 'Internal Server Error',
-    message: APP_CONFIG.nodeEnv === 'development' ? error.message : 'Something went wrong',
-    ...(APP_CONFIG.nodeEnv === 'development' && { stack: error.stack })
+  // Log error details
+  logger.error('Global error handler:', {
+    error: error.message,
+    stack: error.stack,
+    url: req.originalUrl,
+    method: req.method,
+    ip: req.ip,
+    userAgent: req.get('User-Agent'),
+    requestId: req.id
   });
+
+  // Handle specific error types
+  let statusCode = 500;
+  let message = 'Internal Server Error';
+
+  if (error.name === 'ValidationError') {
+    statusCode = 400;
+    message = 'Validation Error';
+  } else if (error.name === 'UnauthorizedError' || error.message.includes('jwt')) {
+    statusCode = 401;
+    message = 'Unauthorized';
+  } else if (error.name === 'ForbiddenError') {
+    statusCode = 403;
+    message = 'Forbidden';
+  } else if (error.name === 'NotFoundError') {
+    statusCode = 404;
+    message = 'Not Found';
+  } else if (error.code === 'LIMIT_FILE_SIZE') {
+    statusCode = 413;
+    message = 'File too large';
+  } else if (error.type === 'entity.parse.failed') {
+    statusCode = 400;
+    message = 'Invalid JSON in request body';
+  }
+
+  // Prepare error response
+  const errorResponse = {
+    error: message,
+    message: APP_CONFIG.nodeEnv === 'development' ? error.message : message,
+    timestamp: new Date().toISOString(),
+    requestId: req.id,
+    path: req.originalUrl
+  };
+
+  // Include stack trace in development
+  if (APP_CONFIG.nodeEnv === 'development') {
+    errorResponse.stack = error.stack;
+  }
+
+  res.status(statusCode).json(errorResponse);
 });
 
 /**
- * Database initialization and server startup
+ * Database Initialization and Server Startup
  */
-const startServer = async () => {
+async function startServer() {
   try {
-    console.log(`🚀 Starting ${APP_CONFIG.title} v${APP_CONFIG.version}...`);
-    
     // Initialize database connection and create tables
-    console.log('📊 Initializing database...');
+    logger.info('Initializing database connection...');
     await initializeDatabase();
-    console.log('✅ Database initialized successfully');
+    logger.info('Database initialized successfully');
 
-    // Start the server
-    const server = app.listen(APP_CONFIG.port, () => {
-      console.log(`🌟 Server running on port ${APP_CONFIG.port}`);
-      console.log(`📍 Environment: ${APP_CONFIG.nodeEnv}`);
-      console.log(`🔗 Health check: http://localhost:${APP_CONFIG.port}/health`);
+    // Create HTTP server
+    const server = createServer(app);
+
+    // Start server
+    server.listen(APP_CONFIG.port, () => {
+      logger.info(`🚀 ${APP_CONFIG.title} v${APP_CONFIG.version} started successfully`);
+      logger.info(`📡 Server running on port ${APP_CONFIG.port}`);
+      logger.info(`🌍 Environment: ${APP_CONFIG.nodeEnv}`);
+      logger.info(`📋 Health check available at: http://localhost:${APP_CONFIG.port}/health`);
+      
+      if (APP_CONFIG.nodeEnv === 'development') {
+        logger.info(`📖 API Base URL: http://localhost:${APP_CONFIG.port}/api`);
+      }
     });
 
-    // Graceful shutdown handling
-    const gracefulShutdown = (signal) => {
-      console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
+    /**
+     * Graceful Shutdown Handlers
+     */
+    const gracefulShutdown = async (signal) => {
+      logger.info(`Received ${signal}. Starting graceful shutdown...`);
       
-      server.close(async (err) => {
-        if (err) {
-          console.error('❌ Error during server shutdown:', err);
-          process.exit(1);
-        }
+      server.close(async () => {
+        logger.info('HTTP server closed');
         
         try {
-          // TODO: Close database connections
-          // await closeDatabaseConnections();
-          console.log('✅ Graceful shutdown completed');
+          // Close database connections
+          const db = getDbConnection();
+          if (db) {
+            await db.end();
+            logger.info('Database connections closed');
+          }
+          
+          logger.info('Graceful shutdown completed');
           process.exit(0);
-        } catch (shutdownError) {
-          console.error('❌ Error during shutdown:', shutdownError);
+        } catch (error) {
+          logger.error('Error during graceful shutdown:', error);
           process.exit(1);
         }
       });
 
-      // Force shutdown after 30 seconds
+      // Force close after 30 seconds
       setTimeout(() => {
-        console.error('⚠️  Forced shutdown after timeout');
+        logger.error('Could not close connections in time, forcefully shutting down');
         process.exit(1);
       }, 30000);
     };
@@ -303,35 +329,30 @@ const startServer = async () => {
 
     // Handle uncaught exceptions
     process.on('uncaughtException', (error) => {
-      console.error('💥 Uncaught Exception:', error);
-      gracefulShutdown('UNCAUGHT_EXCEPTION');
+      logger.error('Uncaught Exception:', error);
+      gracefulShutdown('uncaughtException');
     });
 
+    // Handle unhandled promise rejections
     process.on('unhandledRejection', (reason, promise) => {
-      console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-      gracefulShutdown('UNHANDLED_REJECTION');
+      logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+      gracefulShutdown('unhandledRejection');
     });
+
+    return server;
 
   } catch (error) {
-    console.error('❌ Failed to start server:', error);
+    logger.error('Failed to start server:', error);
     process.exit(1);
   }
-};
+}
 
-// Start the server if this file is run directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+/**
+ * Start the application
+ */
+if (require.main === module) {
   startServer();
 }
 
-// Export app instance for testing and deployment
-export default app;
-
-/* 
-TODO: Create the following files for complete functionality:
-- ./api/tasks.js - Tasks router with CRUD operations
-- ./api/users.js - Users router with authentication endpoints
-- ./core/database.js - Database connection and initialization
-- ./core/auth.js - JWT authentication middleware
-- package.json - Dependencies and scripts configuration
-- .env - Environment variables configuration
-*/
+// Export app for testing
+module.exports = { app, startServer, APP_CONFIG };

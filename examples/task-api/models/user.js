@@ -1,13 +1,12 @@
 /**
  * User Model
+ * Defines the User entity with authentication capabilities and relationships
  * @module models/user
- * @description User model definition with Sequelize ORM
  */
 
-const { DataTypes, Model } = require('sequelize');
-const bcrypt = require('bcrypt');
-const { v4: uuidv4 } = require('uuid');
-const { sequelize } = require('../core/database');
+import { DataTypes, Model } from 'sequelize';
+import bcrypt from 'bcrypt';
+import { sequelize } from '@core/database';
 
 /**
  * User Model Class
@@ -17,15 +16,19 @@ const { sequelize } = require('../core/database');
 class User extends Model {
   /**
    * Hash and set user password
-   * @param {string} password - Plain text password
+   * @param {string} password - Plain text password to hash
    * @throws {Error} When password is invalid or hashing fails
    * @returns {Promise<void>}
    */
   async setPassword(password) {
     try {
-      // Validate password input
+      // Input validation
       if (!password || typeof password !== 'string') {
         throw new Error('Password must be a non-empty string');
+      }
+
+      if (password.trim().length === 0) {
+        throw new Error('Password cannot be empty or whitespace only');
       }
 
       if (password.length < 6) {
@@ -36,13 +39,13 @@ class User extends Model {
       const saltRounds = 12;
       const hashedPassword = await bcrypt.hash(password, saltRounds);
       
-      // Store hashed password
+      // Set the hashed password
       this.password_hash = hashedPassword;
     } catch (error) {
-      if (error.message.includes('Password must be')) {
-        throw error;
+      if (error.message.includes('Password')) {
+        throw error; // Re-throw validation errors
       }
-      throw new Error(`Password hashing failed: ${error.message}`);
+      throw new Error(`Failed to hash password: ${error.message}`);
     }
   }
 
@@ -50,12 +53,16 @@ class User extends Model {
    * Check if provided password matches stored hash
    * @param {string} password - Plain text password to verify
    * @returns {Promise<boolean>} True if password matches, false otherwise
-   * @throws {Error} When password comparison fails
+   * @throws {Error} When password is invalid or comparison fails
    */
   async checkPassword(password) {
     try {
-      // Validate input
+      // Input validation
       if (!password || typeof password !== 'string') {
+        return false;
+      }
+
+      if (password.trim().length === 0) {
         return false;
       }
 
@@ -63,31 +70,44 @@ class User extends Model {
         throw new Error('No password hash found for user');
       }
 
-      // Compare password with stored hash
+      // Compare password with hash
       const isMatch = await bcrypt.compare(password, this.password_hash);
       return isMatch;
     } catch (error) {
       if (error.message.includes('No password hash')) {
         throw error;
       }
-      throw new Error(`Password verification failed: ${error.message}`);
+      throw new Error(`Failed to verify password: ${error.message}`);
     }
   }
 
   /**
-   * Convert user instance to plain object (excluding sensitive data)
-   * @returns {Object} User object without password_hash
+   * Convert user instance to dictionary/object representation
+   * Excludes sensitive information like password_hash
+   * @returns {Object} Serialized user object
    */
   toDict() {
     try {
-      const userObject = this.toJSON();
-      
-      // Remove sensitive information
-      delete userObject.password_hash;
-      
+      const userObject = {
+        id: this.id,
+        email: this.email,
+        name: this.name,
+        is_active: this.is_active,
+        last_login: this.last_login,
+        created_at: this.created_at || this.createdAt,
+        updated_at: this.updated_at || this.updatedAt
+      };
+
+      // Remove any undefined values
+      Object.keys(userObject).forEach(key => {
+        if (userObject[key] === undefined) {
+          delete userObject[key];
+        }
+      });
+
       return userObject;
     } catch (error) {
-      throw new Error(`Failed to convert user to dictionary: ${error.message}`);
+      throw new Error(`Failed to serialize user: ${error.message}`);
     }
   }
 
@@ -103,37 +123,28 @@ class User extends Model {
       throw new Error(`Failed to update last login: ${error.message}`);
     }
   }
-
-  /**
-   * Define model associations
-   * @param {Object} models - All models object
-   */
-  static associate(models) {
-    // User has many Tasks
-    User.hasMany(models.Task, {
-      foreignKey: 'user_id',
-      as: 'tasks',
-      onDelete: 'CASCADE',
-      onUpdate: 'CASCADE'
-    });
-  }
 }
 
-// Initialize User model
+/**
+ * Initialize User Model
+ */
 User.init(
   {
-    // Primary key with UUID
+    // Primary key - UUID
     id: {
       type: DataTypes.UUID,
-      defaultValue: () => uuidv4(),
+      defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
       allowNull: false,
       validate: {
-        isUUID: 4
+        isUUID: {
+          args: 4,
+          msg: 'ID must be a valid UUID v4'
+        }
       }
     },
 
-    // Email field with validation
+    // Email field with validation and unique constraint
     email: {
       type: DataTypes.STRING(255),
       allowNull: false,
@@ -155,10 +166,18 @@ User.init(
           args: [1, 255],
           msg: 'Email must be between 1 and 255 characters'
         }
+      },
+      set(value) {
+        // Normalize email to lowercase
+        if (value && typeof value === 'string') {
+          this.setDataValue('email', value.toLowerCase().trim());
+        } else {
+          this.setDataValue('email', value);
+        }
       }
     },
 
-    // Password hash field
+    // Password hash - never exposed in API responses
     password_hash: {
       type: DataTypes.STRING(255),
       allowNull: false,
@@ -168,11 +187,15 @@ User.init(
         },
         notEmpty: {
           msg: 'Password hash cannot be empty'
+        },
+        len: {
+          args: [1, 255],
+          msg: 'Password hash must be between 1 and 255 characters'
         }
       }
     },
 
-    // User name field
+    // User's display name
     name: {
       type: DataTypes.STRING(100),
       allowNull: false,
@@ -186,6 +209,14 @@ User.init(
         len: {
           args: [1, 100],
           msg: 'Name must be between 1 and 100 characters'
+        }
+      },
+      set(value) {
+        // Trim whitespace from name
+        if (value && typeof value === 'string') {
+          this.setDataValue('name', value.trim());
+        } else {
+          this.setDataValue('name', value);
         }
       }
     },
@@ -215,54 +246,31 @@ User.init(
     }
   },
   {
-    // Model configuration
+    // Model options
     sequelize,
     modelName: 'User',
     tableName: 'users',
-    
-    // Enable automatic timestamps
-    timestamps: true,
+    timestamps: true, // Enables createdAt and updatedAt
     createdAt: 'created_at',
     updatedAt: 'updated_at',
-
-    // Indexes
+    underscored: true, // Use snake_case for automatically added attributes
+    
+    // Indexes for performance
     indexes: [
       {
         unique: true,
         fields: ['email'],
-        name: 'users_email_index'
+        name: 'users_email_unique_idx'
       },
       {
         fields: ['is_active'],
-        name: 'users_is_active_index'
+        name: 'users_is_active_idx'
       },
       {
         fields: ['created_at'],
-        name: 'users_created_at_index'
+        name: 'users_created_at_idx'
       }
     ],
-
-    // Hooks for additional validation and processing
-    hooks: {
-      beforeValidate: (user, options) => {
-        // Normalize email to lowercase
-        if (user.email) {
-          user.email = user.email.toLowerCase().trim();
-        }
-
-        // Trim name
-        if (user.name) {
-          user.name = user.name.trim();
-        }
-      },
-
-      beforeCreate: (user, options) => {
-        // Ensure UUID is set
-        if (!user.id) {
-          user.id = uuidv4();
-        }
-      }
-    },
 
     // Default scope excludes password_hash
     defaultScope: {
@@ -271,23 +279,58 @@ User.init(
       }
     },
 
-    // Scopes for different query needs
+    // Named scopes
     scopes: {
+      // Include password hash for authentication
       withPassword: {
         attributes: {}
       },
+      // Only active users
       active: {
         where: {
           is_active: true
         }
       },
-      inactive: {
+      // Recently created users (last 30 days)
+      recent: {
         where: {
-          is_active: false
+          created_at: {
+            [sequelize.Sequelize.Op.gte]: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+          }
+        }
+      }
+    },
+
+    // Hooks
+    hooks: {
+      // Before validation hook
+      beforeValidate: (user, options) => {
+        // Ensure email is lowercase if provided
+        if (user.email && typeof user.email === 'string') {
+          user.email = user.email.toLowerCase().trim();
+        }
+        
+        // Ensure name is trimmed if provided
+        if (user.name && typeof user.name === 'string') {
+          user.name = user.name.trim();
         }
       }
     }
   }
 );
 
-module.exports = User;
+/**
+ * Define associations
+ * This should be called after all models are defined
+ */
+User.associate = (models) => {
+  // One-to-many relationship with Tasks
+  User.hasMany(models.Task, {
+    foreignKey: 'user_id',
+    as: 'tasks',
+    onDelete: 'CASCADE',
+    onUpdate: 'CASCADE'
+  });
+};
+
+export default User;

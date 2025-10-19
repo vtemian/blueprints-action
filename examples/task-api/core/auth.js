@@ -1,319 +1,489 @@
 /**
- * Core Authentication Module
- * Provides JWT token management and password security utilities
+ * Core Authentication and Authorization Module
+ * Provides JWT token management, password security, and Express middleware
+ * for user authentication and authorization.
+ * 
  * @module core.auth
+ * @requires jsonwebtoken
+ * @requires bcrypt
+ * @requires @models/user
  */
 
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import dotenv from 'dotenv';
+import { User } from '@models/user.js';
 
-// Load environment variables
-dotenv.config();
+// Constants
+const TOKEN_EXPIRATION = '24h';
+const JWT_ALGORITHM = 'HS256';
+const BCRYPT_SALT_ROUNDS = 12;
+const BEARER_PREFIX = 'Bearer ';
 
-// Configuration constants
-const AUTH_CONFIG = {
-  JWT_SECRET: process.env.JWT_SECRET,
-  JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '24h',
-  BCRYPT_SALT_ROUNDS: 12,
-  JWT_ALGORITHM: 'HS256'
-};
-
-// Validate required environment variables
-if (!AUTH_CONFIG.JWT_SECRET) {
+// Environment variables with validation
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
   throw new Error('JWT_SECRET environment variable is required');
 }
 
 /**
- * Custom Authentication Error Classes
+ * Custom error classes for authentication
  */
-class AuthenticationError extends Error {
-  constructor(message, code = 'AUTH_ERROR') {
+export class AuthenticationError extends Error {
+  constructor(message = 'Authentication failed') {
     super(message);
     this.name = 'AuthenticationError';
-    this.code = code;
+    this.statusCode = 401;
   }
 }
 
-class TokenError extends AuthenticationError {
-  constructor(message, code = 'TOKEN_ERROR') {
-    super(message, code);
+export class AuthorizationError extends Error {
+  constructor(message = 'Authorization failed') {
+    super(message);
+    this.name = 'AuthorizationError';
+    this.statusCode = 403;
+  }
+}
+
+export class TokenError extends Error {
+  constructor(message = 'Token error') {
+    super(message);
     this.name = 'TokenError';
-  }
-}
-
-class PasswordError extends AuthenticationError {
-  constructor(message, code = 'PASSWORD_ERROR') {
-    super(message, code);
-    this.name = 'PasswordError';
+    this.statusCode = 401;
   }
 }
 
 /**
- * Input validation helper
- * @private
- * @param {*} value - Value to validate
- * @param {string} paramName - Parameter name for error messages
- * @param {string} expectedType - Expected type
- * @throws {AuthenticationError} When validation fails
- */
-function validateInput(value, paramName, expectedType = 'string') {
-  if (value === null || value === undefined) {
-    throw new AuthenticationError(`${paramName} is required`);
-  }
-  
-  if (expectedType === 'string' && (typeof value !== 'string' || value.trim() === '')) {
-    throw new AuthenticationError(`${paramName} must be a non-empty string`);
-  }
-  
-  if (expectedType === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
-    throw new AuthenticationError(`${paramName} must be an object`);
-  }
-}
-
-/**
- * Creates a JWT access token with user data
+ * Generates a JWT access token with user data payload
+ * 
  * @param {Object} data - User data to include in token payload
- * @param {string|number} data.userId - User ID
+ * @param {string|number} data.id - User ID
  * @param {string} data.email - User email
  * @param {string} [data.role] - User role
- * @param {Object} [options] - Additional token options
+ * @param {Object} [options] - Additional JWT options
  * @param {string} [options.expiresIn] - Token expiration time
  * @returns {Promise<string>} JWT access token
- * @throws {AuthenticationError} When data is invalid
- * @throws {TokenError} When token creation fails
+ * @throws {Error} When token generation fails or data is invalid
+ * 
+ * @example
+ * const token = await createAccessToken({ 
+ *   id: 123, 
+ *   email: 'user@example.com',
+ *   role: 'user' 
+ * });
  */
 export async function createAccessToken(data, options = {}) {
   try {
-    validateInput(data, 'data', 'object');
-    validateInput(data.userId, 'data.userId');
-    validateInput(data.email, 'data.email');
+    // Input validation
+    if (!data || typeof data !== 'object') {
+      throw new Error('Token data must be a valid object');
+    }
 
+    if (!data.id || !data.email) {
+      throw new Error('Token data must include id and email');
+    }
+
+    // Sanitize payload - only include necessary user data
     const payload = {
-      userId: data.userId,
+      id: data.id,
       email: data.email,
       role: data.role || 'user',
-      iat: Math.floor(Date.now() / 1000),
-      type: 'access'
+      iat: Math.floor(Date.now() / 1000)
     };
 
     const tokenOptions = {
-      algorithm: AUTH_CONFIG.JWT_ALGORITHM,
-      expiresIn: options.expiresIn || AUTH_CONFIG.JWT_EXPIRES_IN,
-      issuer: 'core.auth',
-      audience: 'api'
+      algorithm: JWT_ALGORITHM,
+      expiresIn: options.expiresIn || TOKEN_EXPIRATION,
+      issuer: process.env.JWT_ISSUER || 'auth-service',
+      audience: process.env.JWT_AUDIENCE || 'api-users'
     };
 
-    return new Promise((resolve, reject) => {
-      jwt.sign(payload, AUTH_CONFIG.JWT_SECRET, tokenOptions, (err, token) => {
-        if (err) {
-          reject(new TokenError('Failed to create access token', 'TOKEN_CREATION_FAILED'));
-        } else {
-          resolve(token);
-        }
-      });
-    });
+    return jwt.sign(payload, JWT_SECRET, tokenOptions);
   } catch (error) {
-    if (error instanceof AuthenticationError) {
-      throw error;
-    }
-    throw new TokenError('Unexpected error during token creation', 'TOKEN_CREATION_ERROR');
+    throw new TokenError(`Failed to create access token: ${error.message}`);
   }
 }
 
 /**
  * Verifies and decodes a JWT token
+ * 
  * @param {string} token - JWT token to verify
  * @returns {Promise<Object>} Decoded token payload
  * @throws {TokenError} When token is invalid, expired, or malformed
+ * 
+ * @example
+ * try {
+ *   const payload = await verifyToken(token);
+ *   console.log('User ID:', payload.id);
+ * } catch (error) {
+ *   console.error('Token verification failed:', error.message);
+ * }
  */
 export async function verifyToken(token) {
   try {
-    validateInput(token, 'token');
+    if (!token || typeof token !== 'string') {
+      throw new TokenError('Token must be a valid string');
+    }
 
-    const verifyOptions = {
-      algorithms: [AUTH_CONFIG.JWT_ALGORITHM],
-      issuer: 'core.auth',
-      audience: 'api'
+    const options = {
+      algorithms: [JWT_ALGORITHM],
+      issuer: process.env.JWT_ISSUER || 'auth-service',
+      audience: process.env.JWT_AUDIENCE || 'api-users'
     };
 
-    return new Promise((resolve, reject) => {
-      jwt.verify(token, AUTH_CONFIG.JWT_SECRET, verifyOptions, (err, decoded) => {
-        if (err) {
-          if (err.name === 'TokenExpiredError') {
-            reject(new TokenError('Token has expired', 'TOKEN_EXPIRED'));
-          } else if (err.name === 'JsonWebTokenError') {
-            reject(new TokenError('Invalid token format', 'TOKEN_INVALID'));
-          } else if (err.name === 'NotBeforeError') {
-            reject(new TokenError('Token not active yet', 'TOKEN_NOT_ACTIVE'));
-          } else {
-            reject(new TokenError('Token verification failed', 'TOKEN_VERIFICATION_FAILED'));
-          }
-        } else {
-          // Validate token type
-          if (decoded.type !== 'access') {
-            reject(new TokenError('Invalid token type', 'TOKEN_TYPE_INVALID'));
-          } else {
-            resolve(decoded);
-          }
-        }
-      });
-    });
+    return jwt.verify(token, JWT_SECRET, options);
   } catch (error) {
-    if (error instanceof AuthenticationError) {
-      throw error;
+    if (error instanceof jwt.TokenExpiredError) {
+      throw new TokenError('Token has expired');
+    } else if (error instanceof jwt.JsonWebTokenError) {
+      throw new TokenError('Invalid token format');
+    } else if (error instanceof jwt.NotBeforeError) {
+      throw new TokenError('Token not active yet');
+    } else {
+      throw new TokenError(`Token verification failed: ${error.message}`);
     }
-    throw new TokenError('Unexpected error during token verification', 'TOKEN_VERIFICATION_ERROR');
   }
 }
 
 /**
- * Hashes a password using bcrypt
+ * Hashes a password using bcrypt with secure salt rounds
+ * 
  * @param {string} password - Plain text password to hash
  * @returns {Promise<string>} Hashed password
- * @throws {PasswordError} When password is invalid or hashing fails
+ * @throws {Error} When password hashing fails or password is invalid
+ * 
+ * @example
+ * const hashedPassword = await getPasswordHash('userPassword123');
+ * // Store hashedPassword in database
  */
 export async function getPasswordHash(password) {
   try {
-    validateInput(password, 'password');
+    if (!password || typeof password !== 'string') {
+      throw new Error('Password must be a valid string');
+    }
 
-    if (password.length < 1) {
-      throw new PasswordError('Password cannot be empty', 'PASSWORD_EMPTY');
+    if (password.length < 8) {
+      throw new Error('Password must be at least 8 characters long');
     }
 
     if (password.length > 128) {
-      throw new PasswordError('Password too long (max 128 characters)', 'PASSWORD_TOO_LONG');
+      throw new Error('Password must be less than 128 characters');
     }
 
-    const hash = await bcrypt.hash(password, AUTH_CONFIG.BCRYPT_SALT_ROUNDS);
-    return hash;
+    return await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
   } catch (error) {
-    if (error instanceof AuthenticationError) {
+    if (error.message.includes('Password must be')) {
       throw error;
     }
-    throw new PasswordError('Failed to hash password', 'PASSWORD_HASH_FAILED');
+    throw new Error(`Password hashing failed: ${error.message}`);
   }
 }
 
 /**
  * Verifies a plain password against a hashed password
+ * Uses timing-safe comparison to prevent timing attacks
+ * 
  * @param {string} plainPassword - Plain text password to verify
  * @param {string} hashedPassword - Hashed password to compare against
  * @returns {Promise<boolean>} True if passwords match, false otherwise
- * @throws {PasswordError} When parameters are invalid or verification fails
+ * @throws {Error} When password verification fails
+ * 
+ * @example
+ * const isValid = await verifyPassword('userInput', storedHashedPassword);
+ * if (isValid) {
+ *   // Password is correct
+ * }
  */
 export async function verifyPassword(plainPassword, hashedPassword) {
   try {
-    validateInput(plainPassword, 'plainPassword');
-    validateInput(hashedPassword, 'hashedPassword');
-
-    if (plainPassword.length < 1) {
-      throw new PasswordError('Password cannot be empty', 'PASSWORD_EMPTY');
+    if (!plainPassword || typeof plainPassword !== 'string') {
+      throw new Error('Plain password must be a valid string');
     }
 
-    if (plainPassword.length > 128) {
-      throw new PasswordError('Password too long (max 128 characters)', 'PASSWORD_TOO_LONG');
+    if (!hashedPassword || typeof hashedPassword !== 'string') {
+      throw new Error('Hashed password must be a valid string');
     }
 
-    // Validate hash format (bcrypt hashes start with $2a$, $2b$, or $2y$)
-    if (!hashedPassword.match(/^\$2[aby]\$\d{2}\$.{53}$/)) {
-      throw new PasswordError('Invalid hash format', 'INVALID_HASH_FORMAT');
-    }
-
-    const isValid = await bcrypt.compare(plainPassword, hashedPassword);
-    return isValid;
+    // Use bcrypt.compare for timing-safe comparison
+    return await bcrypt.compare(plainPassword, hashedPassword);
   } catch (error) {
-    if (error instanceof AuthenticationError) {
-      throw error;
-    }
-    throw new PasswordError('Failed to verify password', 'PASSWORD_VERIFICATION_FAILED');
+    // Always return false for verification errors to prevent information leakage
+    // Log the actual error for debugging purposes
+    console.error('Password verification error:', error.message);
+    return false;
   }
 }
 
 /**
- * Extracts and returns current user data from a valid JWT token
+ * Extracts and validates user from JWT token
+ * 
  * @param {string} token - JWT token containing user data
- * @returns {Promise<Object>} User data object
- * @throws {TokenError} When token is invalid or user data extraction fails
+ * @returns {Promise<Object>} User object from database
+ * @throws {AuthenticationError} When token is invalid or user not found
+ * @throws {TokenError} When token verification fails
+ * 
+ * @example
+ * try {
+ *   const user = await getCurrentUser(token);
+ *   console.log('Current user:', user.email);
+ * } catch (error) {
+ *   console.error('User retrieval failed:', error.message);
+ * }
  */
 export async function getCurrentUser(token) {
   try {
-    const decoded = await verifyToken(token);
-    
-    // Extract user data from token payload
-    const userData = {
-      userId: decoded.userId,
-      email: decoded.email,
-      role: decoded.role,
-      iat: decoded.iat,
-      exp: decoded.exp
-    };
+    // Verify and decode the token
+    const payload = await verifyToken(token);
 
-    // Validate required user data
-    if (!userData.userId || !userData.email) {
-      throw new TokenError('Invalid user data in token', 'INVALID_USER_DATA');
+    // Fetch user from database
+    const user = await User.findById(payload.id);
+    
+    if (!user) {
+      throw new AuthenticationError('User not found');
     }
 
-    return userData;
+    // Remove sensitive data before returning
+    const { password, ...userWithoutPassword } = user.toObject ? user.toObject() : user;
+    
+    return userWithoutPassword;
   } catch (error) {
-    if (error instanceof AuthenticationError) {
+    if (error instanceof TokenError) {
       throw error;
     }
-    throw new TokenError('Failed to extract user data from token', 'USER_EXTRACTION_FAILED');
+    throw new AuthenticationError(`Failed to get current user: ${error.message}`);
   }
 }
 
 /**
- * Utility function to check if a token is expired without throwing
- * @param {string} token - JWT token to check
- * @returns {Promise<boolean>} True if token is expired, false if valid
+ * Extracts Bearer token from Authorization header
+ * 
+ * @param {string} authHeader - Authorization header value
+ * @returns {string|null} Extracted token or null if not found
+ * 
+ * @example
+ * const token = extractTokenFromHeader(req.headers.authorization);
  */
-export async function isTokenExpired(token) {
-  try {
-    await verifyToken(token);
-    return false;
-  } catch (error) {
-    if (error instanceof TokenError && error.code === 'TOKEN_EXPIRED') {
-      return true;
-    }
-    // For other errors, consider token as invalid/expired
-    return true;
-  }
-}
-
-/**
- * Utility function to decode token without verification (for debugging)
- * @param {string} token - JWT token to decode
- * @returns {Object|null} Decoded token payload or null if invalid
- */
-export function decodeTokenUnsafe(token) {
-  try {
-    validateInput(token, 'token');
-    return jwt.decode(token);
-  } catch (error) {
+function extractTokenFromHeader(authHeader) {
+  if (!authHeader || typeof authHeader !== 'string') {
     return null;
   }
+
+  if (!authHeader.startsWith(BEARER_PREFIX)) {
+    return null;
+  }
+
+  const token = authHeader.slice(BEARER_PREFIX.length).trim();
+  return token || null;
 }
 
-// Export error classes for external use
-export {
-  AuthenticationError,
-  TokenError,
-  PasswordError,
-  AUTH_CONFIG
-};
+/**
+ * Express middleware for extracting and validating JWT tokens
+ * Equivalent to OAuth2PasswordBearer - extracts token but doesn't require it
+ * 
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ * 
+ * @example
+ * app.get('/optional-auth', tokenExtractor, (req, res) => {
+ *   if (req.user) {
+ *     // User is authenticated
+ *   } else {
+ *     // Anonymous access
+ *   }
+ * });
+ */
+export function tokenExtractor(req, res, next) {
+  try {
+    const token = extractTokenFromHeader(req.headers.authorization);
+    
+    if (token) {
+      req.token = token;
+    }
+    
+    next();
+  } catch (error) {
+    // Don't fail the request, just log the error
+    console.error('Token extraction error:', error.message);
+    next();
+  }
+}
 
-// Default export with all functions
-export default {
+/**
+ * Express middleware that requires valid authentication
+ * Extracts user from JWT token and adds to request object
+ * 
+ * Rate limiting consideration: Implement rate limiting before this middleware
+ * to prevent brute force attacks on token validation
+ * 
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ * 
+ * @example
+ * app.get('/protected', requireAuth, (req, res) => {
+ *   res.json({ user: req.user });
+ * });
+ */
+export async function requireAuth(req, res, next) {
+  try {
+    const token = extractTokenFromHeader(req.headers.authorization);
+    
+    if (!token) {
+      return res.status(401).json({
+        error: 'Authentication required',
+        message: 'No token provided'
+      });
+    }
+
+    const user = await getCurrentUser(token);
+    req.user = user;
+    req.token = token;
+    
+    next();
+  } catch (error) {
+    const statusCode = error.statusCode || 401;
+    return res.status(statusCode).json({
+      error: error.name || 'AuthenticationError',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Express middleware that requires active user authentication
+ * Similar to requireAuth but also checks if user account is active
+ * 
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ * 
+ * @example
+ * app.get('/admin', requireActiveUser, (req, res) => {
+ *   res.json({ message: 'Admin access granted' });
+ * });
+ */
+export async function requireActiveUser(req, res, next) {
+  try {
+    // First run the standard auth check
+    await new Promise((resolve, reject) => {
+      requireAuth(req, res, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    // Check if user is active
+    if (!req.user.isActive && req.user.isActive !== undefined) {
+      return res.status(403).json({
+        error: 'AuthorizationError',
+        message: 'Account is not active'
+      });
+    }
+
+    // Check if user account is not suspended
+    if (req.user.isSuspended) {
+      return res.status(403).json({
+        error: 'AuthorizationError',
+        message: 'Account is suspended'
+      });
+    }
+
+    next();
+  } catch (error) {
+    const statusCode = error.statusCode || 401;
+    return res.status(statusCode).json({
+      error: error.name || 'AuthenticationError',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Express middleware for role-based authorization
+ * 
+ * @param {string|string[]} allowedRoles - Role or array of roles allowed
+ * @returns {Function} Express middleware function
+ * 
+ * @example
+ * app.delete('/users/:id', requireAuth, requireRole(['admin', 'moderator']), (req, res) => {
+ *   // Only admin or moderator can access
+ * });
+ */
+export function requireRole(allowedRoles) {
+  const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+  
+  return (req, res, next) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({
+          error: 'AuthenticationError',
+          message: 'Authentication required'
+        });
+      }
+
+      if (!req.user.role || !roles.includes(req.user.role)) {
+        return res.status(403).json({
+          error: 'AuthorizationError',
+          message: 'Insufficient permissions'
+        });
+      }
+
+      next();
+    } catch (error) {
+      return res.status(500).json({
+        error: 'InternalServerError',
+        message: 'Authorization check failed'
+      });
+    }
+  };
+}
+
+/**
+ * Utility function to refresh a token (generate new token with updated data)
+ * 
+ * @param {string} oldToken - Current valid token
+ * @param {Object} [additionalData] - Additional data to include in new token
+ * @returns {Promise<string>} New JWT token
+ * 
+ * @example
+ * const newToken = await refreshToken(currentToken, { lastLogin: new Date() });
+ */
+export async function refreshToken(oldToken, additionalData = {}) {
+  try {
+    const payload = await verifyToken(oldToken);
+    const user = await getCurrentUser(oldToken);
+    
+    const newTokenData = {
+      ...user,
+      ...additionalData
+    };
+    
+    return await createAccessToken(newTokenData);
+  } catch (error) {
+    throw new TokenError(`Token refresh failed: ${error.message}`);
+  }
+}
+
+// Export all functions and middleware
+export {
+  // Core functions
   createAccessToken,
   verifyToken,
   getPasswordHash,
   verifyPassword,
   getCurrentUser,
-  isTokenExpired,
-  decodeTokenUnsafe,
+  
+  // Middleware
+  tokenExtractor,
+  requireAuth,
+  requireActiveUser,
+  requireRole,
+  
+  // Utilities
+  refreshToken,
+  
+  // Error classes
   AuthenticationError,
-  TokenError,
-  PasswordError,
-  AUTH_CONFIG
+  AuthorizationError,
+  TokenError
 };

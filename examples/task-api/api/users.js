@@ -1,27 +1,26 @@
-I'll generate a complete, production-ready user management and authentication API module. Here's the implementation:
+/**
+ * User Management and Authentication API Module
+ * Complete production-ready implementation with Express.js
+ * 
+ * @module api.users
+ * @requires express
+ * @requires bcrypt
+ * @requires jsonwebtoken
+ * @requires express-validator
+ * @requires mongoose
+ */
 
-## Project Structure
-```
-src/
-├── routes/
-│   └── users.js
-├── middleware/
-│   ├── auth.js
-│   └── validation.js
-├── models/
-│   └── User.js
-├── utils/
-│   ├── jwt.js
-│   └── password.js
-└── config/
-    └── database.js
-```
-
-## 1. User Model (models/User.js)
-
-```javascript
-const mongoose = require('mongoose');
+const express = require('express');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const { body, validationResult } = require('express-validator');
+const mongoose = require('mongoose');
+const rateLimit = require('express-rate-limit');
+
+// Environment configuration
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const BCRYPT_SALT_ROUNDS = 12;
 
 /**
  * User Schema Definition
@@ -29,184 +28,213 @@ const bcrypt = require('bcrypt');
 const userSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: [true, 'Name is required'],
+    required: true,
     trim: true,
-    maxlength: [100, 'Name cannot exceed 100 characters']
+    minlength: 2,
+    maxlength: 100
   },
   email: {
     type: String,
-    required: [true, 'Email is required'],
+    required: true,
     unique: true,
     lowercase: true,
     trim: true,
-    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
+    index: true
   },
   password: {
     type: String,
-    required: [true, 'Password is required'],
-    minlength: [8, 'Password must be at least 8 characters long']
+    required: true,
+    minlength: 8
   },
   lastLogin: {
     type: Date,
     default: null
   },
-  isActive: {
-    type: Boolean,
-    default: true
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
   }
-}, {
-  timestamps: true,
-  toJSON: {
-    transform: function(doc, ret) {
-      delete ret.password;
-      delete ret.__v;
-      return ret;
+});
+
+// Pre-save middleware to update updatedAt
+userSchema.pre('save', function(next) {
+  this.updatedAt = new Date();
+  next();
+});
+
+const User = mongoose.model('User', userSchema);
+
+// Create Express router
+const router = express.Router();
+
+/**
+ * Rate limiting configuration
+ */
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // limit each IP to 5 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many authentication attempts, please try again later'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many requests, please try again later'
+  }
+});
+
+/**
+ * Validation schemas
+ */
+const registerValidation = [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email address'),
+  body('password')
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters long')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+    .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
+  body('name')
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage('Name must be between 2 and 100 characters')
+    .matches(/^[a-zA-Z\s]+$/)
+    .withMessage('Name can only contain letters and spaces')
+];
+
+const loginValidation = [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email address'),
+  body('password')
+    .notEmpty()
+    .withMessage('Password is required')
+];
+
+const updateProfileValidation = [
+  body('name')
+    .optional()
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage('Name must be between 2 and 100 characters')
+    .matches(/^[a-zA-Z\s]+$/)
+    .withMessage('Name can only contain letters and spaces'),
+  body('email')
+    .optional()
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email address'),
+  body('password')
+    .if(body('email').exists())
+    .notEmpty()
+    .withMessage('Password confirmation is required when changing email')
+];
+
+const changePasswordValidation = [
+  body('current_password')
+    .notEmpty()
+    .withMessage('Current password is required'),
+  body('new_password')
+    .isLength({ min: 8 })
+    .withMessage('New password must be at least 8 characters long')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+    .withMessage('New password must contain at least one uppercase letter, one lowercase letter, and one number')
+];
+
+/**
+ * Utility Functions
+ */
+
+/**
+ * Generate JWT token for user
+ * @param {Object} user - User object
+ * @returns {string} JWT token
+ */
+const generateToken = (user) => {
+  return jwt.sign(
+    { 
+      userId: user._id, 
+      email: user.email 
+    },
+    JWT_SECRET,
+    { 
+      expiresIn: JWT_EXPIRES_IN,
+      issuer: 'user-api',
+      audience: 'user-client'
     }
-  }
-});
-
-// Index for email uniqueness and performance
-userSchema.index({ email: 1 }, { unique: true });
-
-/**
- * Hash password before saving
- */
-userSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) return next();
-  
-  try {
-    const salt = await bcrypt.genSalt(12);
-    this.password = await bcrypt.hash(this.password, salt);
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * Compare password method
- * @param {string} candidatePassword - Password to compare
- * @returns {Promise<boolean>} - True if password matches
- */
-userSchema.methods.comparePassword = async function(candidatePassword) {
-  return bcrypt.compare(candidatePassword, this.password);
+  );
 };
 
 /**
- * Update last login timestamp
- */
-userSchema.methods.updateLastLogin = async function() {
-  this.lastLogin = new Date();
-  return this.save();
-};
-
-module.exports = mongoose.model('User', userSchema);
-```
-
-## 2. JWT Utilities (utils/jwt.js)
-
-```javascript
-const jwt = require('jsonwebtoken');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-
-/**
- * Generate JWT token
- * @param {Object} payload - Token payload
- * @returns {string} - JWT token
- */
-const generateToken = (payload) => {
-  return jwt.sign(payload, JWT_SECRET, {
-    expiresIn: JWT_EXPIRES_IN,
-    issuer: 'user-api',
-    audience: 'user-client'
-  });
-};
-
-/**
- * Verify JWT token
- * @param {string} token - JWT token to verify
- * @returns {Object} - Decoded token payload
- */
-const verifyToken = (token) => {
-  return jwt.verify(token, JWT_SECRET, {
-    issuer: 'user-api',
-    audience: 'user-client'
-  });
-};
-
-module.exports = {
-  generateToken,
-  verifyToken
-};
-```
-
-## 3. Password Utilities (utils/password.js)
-
-```javascript
-const bcrypt = require('bcrypt');
-
-/**
- * Hash password with bcrypt
+ * Hash password using bcrypt
  * @param {string} password - Plain text password
- * @returns {Promise<string>} - Hashed password
+ * @returns {Promise<string>} Hashed password
  */
 const hashPassword = async (password) => {
-  const saltRounds = 12;
-  return bcrypt.hash(password, saltRounds);
+  return await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 };
 
 /**
  * Compare password with hash
  * @param {string} password - Plain text password
  * @param {string} hash - Hashed password
- * @returns {Promise<boolean>} - True if password matches
+ * @returns {Promise<boolean>} Comparison result
  */
 const comparePassword = async (password, hash) => {
-  return bcrypt.compare(password, hash);
+  return await bcrypt.compare(password, hash);
 };
 
 /**
- * Validate password complexity
- * @param {string} password - Password to validate
- * @returns {Object} - Validation result
+ * Format user object for response (exclude sensitive data)
+ * @param {Object} user - User document
+ * @returns {Object} Sanitized user object
  */
-const validatePasswordComplexity = (password) => {
-  const minLength = 8;
-  const hasUpperCase = /[A-Z]/.test(password);
-  const hasLowerCase = /[a-z]/.test(password);
-  const hasNumbers = /\d/.test(password);
-  const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
-
-  const isValid = password.length >= minLength && hasUpperCase && hasLowerCase && hasNumbers;
-  
-  return {
-    isValid,
-    errors: [
-      ...(password.length < minLength ? [`Password must be at least ${minLength} characters long`] : []),
-      ...(!hasUpperCase ? ['Password must contain at least one uppercase letter'] : []),
-      ...(!hasLowerCase ? ['Password must contain at least one lowercase letter'] : []),
-      ...(!hasNumbers ? ['Password must contain at least one number'] : [])
-    ]
-  };
+const formatUserResponse = (user) => {
+  const { password, __v, ...userResponse } = user.toObject();
+  return userResponse;
 };
-
-module.exports = {
-  hashPassword,
-  comparePassword,
-  validatePasswordComplexity
-};
-```
-
-## 4. Authentication Middleware (middleware/auth.js)
-
-```javascript
-const { verifyToken } = require('../utils/jwt');
-const User = require('../models/User');
 
 /**
- * JWT Authentication Middleware
+ * Handle validation errors
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @returns {boolean} True if errors exist
+ */
+const handleValidationErrors = (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: errors.array().map(error => ({
+        field: error.path,
+        message: error.msg
+      }))
+    });
+  }
+  return false;
+};
+
+/**
+ * Authentication Middleware
+ */
+
+/**
+ * JWT Authentication middleware
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  * @param {Function} next - Express next function
@@ -223,13 +251,16 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    const decoded = verifyToken(token);
-    const user = await User.findById(decoded.userId).select('-password');
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      issuer: 'user-api',
+      audience: 'user-client'
+    });
 
-    if (!user || !user.isActive) {
+    const user = await User.findById(decoded.userId).select('-password');
+    if (!user) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid or expired token'
+        message: 'Invalid token - user not found'
       });
     }
 
@@ -242,263 +273,76 @@ const authenticateToken = async (req, res, next) => {
         message: 'Invalid token'
       });
     }
-    
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
         success: false,
-        message: 'Token expired'
+        message: 'Token has expired'
+      });
+    }
+    
+    console.error('Authentication error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Authentication failed'
+    });
+  }
+};
+
+/**
+ * Route Handlers
+ */
+
+/**
+ * POST /api/users/register
+ * Register a new user
+ */
+router.post('/register', authLimiter, registerValidation, async (req, res) => {
+  try {
+    // Handle validation errors
+    if (handleValidationErrors(req, res)) return;
+
+    const { email, password, name } = req.body;
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).json({
+        success: false,
+        message: 'An account with this email already exists'
       });
     }
 
-    return res.status(500).json({
-      success: false,
-      message: 'Authentication error'
-    });
-  }
-};
-
-module.exports = {
-  authenticateToken
-};
-```
-
-## 5. Validation Middleware (middleware/validation.js)
-
-```javascript
-const { body, validationResult } = require('express-validator');
-const User = require('../models/User');
-const { validatePasswordComplexity } = require('../utils/password');
-
-/**
- * Handle validation errors
- */
-const handleValidationErrors = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      success: false,
-      message: 'Validation failed',
-      errors: errors.array().map(error => ({
-        field: error.path,
-        message: error.msg,
-        value: error.value
-      }))
-    });
-  }
-  next();
-};
-
-/**
- * Registration validation rules
- */
-const validateRegistration = [
-  body('name')
-    .trim()
-    .isLength({ min: 2, max: 100 })
-    .withMessage('Name must be between 2 and 100 characters')
-    .matches(/^[a-zA-Z\s]+$/)
-    .withMessage('Name can only contain letters and spaces'),
-
-  body('email')
-    .trim()
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address')
-    .custom(async (email) => {
-      const existingUser = await User.findOne({ email });
-      if (existingUser) {
-        throw new Error('Email address is already registered');
-      }
-      return true;
-    }),
-
-  body('password')
-    .isLength({ min: 8 })
-    .withMessage('Password must be at least 8 characters long')
-    .custom((password) => {
-      const validation = validatePasswordComplexity(password);
-      if (!validation.isValid) {
-        throw new Error(validation.errors.join(', '));
-      }
-      return true;
-    }),
-
-  handleValidationErrors
-];
-
-/**
- * Login validation rules
- */
-const validateLogin = [
-  body('email')
-    .trim()
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address'),
-
-  body('password')
-    .notEmpty()
-    .withMessage('Password is required'),
-
-  handleValidationErrors
-];
-
-/**
- * Profile update validation rules
- */
-const validateProfileUpdate = [
-  body('name')
-    .optional()
-    .trim()
-    .isLength({ min: 2, max: 100 })
-    .withMessage('Name must be between 2 and 100 characters')
-    .matches(/^[a-zA-Z\s]+$/)
-    .withMessage('Name can only contain letters and spaces'),
-
-  body('email')
-    .optional()
-    .trim()
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address')
-    .custom(async (email, { req }) => {
-      if (email && email !== req.user.email) {
-        const existingUser = await User.findOne({ email });
-        if (existingUser) {
-          throw new Error('Email address is already in use');
-        }
-      }
-      return true;
-    }),
-
-  body('current_password')
-    .if(body('email').exists())
-    .notEmpty()
-    .withMessage('Current password is required when changing email'),
-
-  handleValidationErrors
-];
-
-/**
- * Password change validation rules
- */
-const validatePasswordChange = [
-  body('current_password')
-    .notEmpty()
-    .withMessage('Current password is required'),
-
-  body('new_password')
-    .isLength({ min: 8 })
-    .withMessage('New password must be at least 8 characters long')
-    .custom((password) => {
-      const validation = validatePasswordComplexity(password);
-      if (!validation.isValid) {
-        throw new Error(validation.errors.join(', '));
-      }
-      return true;
-    })
-    .custom((newPassword, { req }) => {
-      if (newPassword === req.body.current_password) {
-        throw new Error('New password must be different from current password');
-      }
-      return true;
-    }),
-
-  handleValidationErrors
-];
-
-module.exports = {
-  validateRegistration,
-  validateLogin,
-  validateProfileUpdate,
-  validatePasswordChange
-};
-```
-
-## 6. Main Users Router (routes/users.js)
-
-```javascript
-const express = require('express');
-const rateLimit = require('express-rate-limit');
-const User = require('../models/User');
-const { authenticateToken } = require('../middleware/auth');
-const {
-  validateRegistration,
-  validateLogin,
-  validateProfileUpdate,
-  validatePasswordChange
-} = require('../middleware/validation');
-const { generateToken } = require('../utils/jwt');
-const { hashPassword } = require('../utils/password');
-
-const router = express.Router();
-
-// Rate limiting
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // limit each IP to 5 requests per windowMs
-  message: {
-    success: false,
-    message: 'Too many authentication attempts, please try again later'
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-// Apply general rate limiting to all routes
-router.use(generalLimiter);
-
-/**
- * @route   POST /api/users/register
- * @desc    Register a new user
- * @access  Public
- */
-router.post('/register', authLimiter, validateRegistration, async (req, res) => {
-  try {
-    const { name, email, password } = req.body;
+    // Hash password
+    const hashedPassword = await hashPassword(password);
 
     // Create new user
     const user = new User({
-      name: name.trim(),
-      email: email.toLowerCase().trim(),
-      password
+      name,
+      email,
+      password: hashedPassword
     });
 
     await user.save();
 
-    // Generate JWT token
-    const token = generateToken({
-      userId: user._id,
-      email: user.email
-    });
+    // Generate token
+    const token = generateToken(user);
 
-    // Update last login
-    await user.updateLastLogin();
-
+    // Return success response
     res.status(201).json({
       success: true,
       message: 'User registered successfully',
-      data: {
-        user: user.toJSON(),
-        token
-      }
+      data: formatUserResponse(user),
+      token
     });
 
   } catch (error) {
     console.error('Registration error:', error);
-
-    // Handle duplicate email error
+    
+    // Handle duplicate key error (additional safety net)
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
-        message: 'Email address is already registered'
+        message: 'An account with this email already exists'
       });
     }
 
@@ -510,55 +354,188 @@ router.post('/register', authLimiter, validateRegistration, async (req, res) => 
 });
 
 /**
- * @route   POST /api/users/login
- * @desc    Authenticate user and get token
- * @access  Public
+ * POST /api/users/login
+ * Authenticate user and return token
  */
-router.post('/login', authLimiter, validateLogin, async (req, res) => {
+router.post('/login', authLimiter, loginValidation, async (req, res) => {
   try {
+    // Handle validation errors
+    if (handleValidationErrors(req, res)) return;
+
     const { email, password } = req.body;
 
     // Find user by email
-    const user = await User.findOne({ 
-      email: email.toLowerCase().trim(),
-      isActive: true 
-    });
+    const user = await User.findOne({ email });
+    
+    // Use consistent timing to prevent timing attacks
+    const isValidPassword = user ? 
+      await comparePassword(password, user.password) : 
+      await bcrypt.compare(password, '$2b$12$dummy.hash.to.prevent.timing.attacks');
 
-    if (!user) {
+    if (!user || !isValidPassword) {
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
       });
     }
-
-    // Check password
-    const isPasswordValid = await user.comparePassword(password);
-    if (!isPasswordValid) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
-      });
-    }
-
-    // Generate JWT token
-    const token = generateToken({
-      userId: user._id,
-      email: user.email
-    });
 
     // Update last login
-    await user.updateLastLogin();
+    user.lastLogin = new Date();
+    await user.save();
 
+    // Generate token
+    const token = generateToken(user);
+
+    // Return success response
     res.json({
       success: true,
       message: 'Login successful',
-      data: {
-        user: user.toJSON(),
-        token
-      }
+      data: formatUserResponse(user),
+      token
     });
 
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({
-      success
+      success: false,
+      message: 'Login failed. Please try again.'
+    });
+  }
+});
+
+/**
+ * GET /api/users/me
+ * Get current user profile
+ */
+router.get('/me', generalLimiter, authenticateToken, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: formatUserResponse(req.user)
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve user profile'
+    });
+  }
+});
+
+/**
+ * PUT /api/users/me
+ * Update current user profile
+ */
+router.put('/me', generalLimiter, authenticateToken, updateProfileValidation, async (req, res) => {
+  try {
+    // Handle validation errors
+    if (handleValidationErrors(req, res)) return;
+
+    const { name, email, password } = req.body;
+    const user = req.user;
+
+    // If email is being changed, verify password
+    if (email && email !== user.email) {
+      if (!password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Password confirmation is required when changing email'
+        });
+      }
+
+      const currentUser = await User.findById(user._id);
+      const isValidPassword = await comparePassword(password, currentUser.password);
+      
+      if (!isValidPassword) {
+        return res.status(401).json({
+          success: false,
+          message: 'Current password is incorrect'
+        });
+      }
+
+      // Check if new email is already taken
+      const existingUser = await User.findOne({ email, _id: { $ne: user._id } });
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'This email is already associated with another account'
+        });
+      }
+    }
+
+    // Update user fields
+    const updateFields = {};
+    if (name) updateFields.name = name;
+    if (email) updateFields.email = email;
+
+    const updatedUser = await User.findByIdAndUpdate(
+      user._id,
+      updateFields,
+      { new: true, runValidators: true }
+    );
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: formatUserResponse(updatedUser)
+    });
+
+  } catch (error) {
+    console.error('Update profile error:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: 'This email is already associated with another account'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update profile. Please try again.'
+    });
+  }
+});
+
+/**
+ * POST /api/users/change-password
+ * Change user password
+ */
+router.post('/change-password', generalLimiter, authenticateToken, changePasswordValidation, async (req, res) => {
+  try {
+    // Handle validation errors
+    if (handleValidationErrors(req, res)) return;
+
+    const { current_password, new_password } = req.body;
+    const userId = req.user._id;
+
+    // Get user with password
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Verify current password
+    const isValidPassword = await comparePassword(current_password, user.password);
+    if (!isValidPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Check if new password is different from current
+    const isSamePassword = await comparePassword(new_password, user.password);
+    if (isSamePassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from current password'
+      });
+    }
+
+    // Hash new password and update
+    const hashedNewPassword = await hashPassword(new_
