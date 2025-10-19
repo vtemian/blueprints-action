@@ -11,123 +11,123 @@ import (
 	"syscall"
 	"time"
 
-	"your-module/app" // Replace with your actual module path
+	"./app" // Import the app package containing routes and handlers
 )
 
-// Config holds the server configuration
-type Config struct {
-	Host         string
-	Port         int
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
-	Environment  string
-}
-
-// loadConfig loads configuration from environment variables with sensible defaults
-func loadConfig() *Config {
-	config := &Config{
-		Host:         getEnv("HOST", "0.0.0.0"),
-		Port:         getEnvAsInt("PORT", 8000),
-		ReadTimeout:  getEnvAsDuration("READ_TIMEOUT", 10*time.Second),
-		WriteTimeout: getEnvAsDuration("WRITE_TIMEOUT", 10*time.Second),
-		IdleTimeout:  getEnvAsDuration("IDLE_TIMEOUT", 60*time.Second),
-		Environment:  getEnv("ENVIRONMENT", "development"),
-	}
-	return config
-}
-
-// getEnv gets an environment variable with a fallback default
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-// getEnvAsInt gets an environment variable as integer with a fallback default
-func getEnvAsInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
-		log.Printf("Warning: Invalid integer value for %s, using default %d", key, defaultValue)
-	}
-	return defaultValue
-}
-
-// getEnvAsDuration gets an environment variable as duration with a fallback default
-func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if duration, err := time.ParseDuration(value); err == nil {
-			return duration
-		}
-		log.Printf("Warning: Invalid duration value for %s, using default %v", key, defaultValue)
-	}
-	return defaultValue
-}
-
-// setupLogger configures logging based on environment
-func setupLogger(env string) {
-	if env == "production" {
-		// In production, you might want to use structured logging
-		log.SetFlags(log.LstdFlags | log.LUTC)
-	} else {
-		// Development logging with more verbose output
-		log.SetFlags(log.LstdFlags | log.Lshortfile)
-	}
-}
+const (
+	// Default configuration values
+	defaultPort         = 8000
+	defaultHost         = "0.0.0.0"
+	shutdownTimeout     = 30 * time.Second
+	readTimeout         = 15 * time.Second
+	writeTimeout        = 15 * time.Second
+	idleTimeout         = 60 * time.Second
+	readHeaderTimeout   = 5 * time.Second
+)
 
 func main() {
-	// Load configuration
-	config := loadConfig()
+	// Configure logging
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	
-	// Setup logging
-	setupLogger(config.Environment)
-	
-	// Initialize the application handler
-	// Assuming the app package exports a Handler or Router function
-	handler, err := app.NewHandler(config.Environment)
-	if err != nil {
-		log.Fatalf("Failed to initialize application handler: %v", err)
-	}
-	
-	// Create HTTP server with timeouts
+	// Get port from environment variable or use default
+	port := getPortFromEnv()
+	host := defaultHost
+	addr := fmt.Sprintf("%s:%d", host, port)
+
+	// Create HTTP server with production-ready configuration
 	server := &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", config.Host, config.Port),
-		Handler:      handler,
-		ReadTimeout:  config.ReadTimeout,
-		WriteTimeout: config.WriteTimeout,
-		IdleTimeout:  config.IdleTimeout,
-		ErrorLog:     log.Default(),
+		Addr:              addr,
+		Handler:           app.NewRouter(), // Get router/handler from app package
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	
+
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Channel to listen for interrupt signals
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	// Start server in a goroutine
 	go func() {
-		log.Printf("Starting HTTP server on %s (environment: %s)", server.Addr, config.Environment)
+		log.Printf("🚀 Starting server on http://%s", addr)
+		log.Printf("📝 Server configuration:")
+		log.Printf("   - Host: %s", host)
+		log.Printf("   - Port: %d", port)
+		log.Printf("   - Read Timeout: %v", readTimeout)
+		log.Printf("   - Write Timeout: %v", writeTimeout)
+		log.Printf("   - Idle Timeout: %v", idleTimeout)
+		
+		// Development note: For hot-reload functionality similar to uvicorn's auto-reload,
+		// use 'air' tool (github.com/cosmtrek/air) during development:
+		// 1. Install: go install github.com/cosmtrek/air@latest
+		// 2. Run: air
+		// This provides automatic restart on file changes during development
 		
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
+			log.Printf("❌ Server startup failed: %v", err)
+			cancel() // Cancel context to trigger shutdown
+			os.Exit(1)
 		}
 	}()
-	
-	// Wait for interrupt signal
-	<-quit
-	log.Println("Shutting down server...")
-	
-	// Create a context with timeout for graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	
-	// Attempt graceful shutdown
-	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
-		return
+
+	// Wait for interrupt signal or context cancellation
+	select {
+	case sig := <-sigChan:
+		log.Printf("🛑 Received signal: %v", sig)
+	case <-ctx.Done():
+		log.Printf("🛑 Context cancelled")
 	}
-	
-	log.Println("Server gracefully stopped")
+
+	// Perform graceful shutdown
+	gracefulShutdown(server)
+}
+
+// getPortFromEnv retrieves port from environment variable or returns default
+func getPortFromEnv() int {
+	portStr := os.Getenv("PORT")
+	if portStr == "" {
+		return defaultPort
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Printf("⚠️  Invalid PORT environment variable '%s', using default %d", portStr, defaultPort)
+		return defaultPort
+	}
+
+	if port < 1 || port > 65535 {
+		log.Printf("⚠️  PORT %d is out of valid range (1-65535), using default %d", port, defaultPort)
+		return defaultPort
+	}
+
+	return port
+}
+
+// gracefulShutdown handles the graceful shutdown of the HTTP server
+func gracefulShutdown(server *http.Server) {
+	log.Printf("🔄 Initiating graceful shutdown...")
+
+	// Create a context with timeout for shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+
+	// Attempt graceful shutdown
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("❌ Graceful shutdown failed: %v", err)
+		log.Printf("🔨 Forcing server shutdown...")
+		
+		// Force close if graceful shutdown fails
+		if closeErr := server.Close(); closeErr != nil {
+			log.Printf("❌ Force shutdown failed: %v", closeErr)
+			os.Exit(1)
+		}
+		os.Exit(1)
+	}
+
+	log.Printf("✅ Server shutdown completed successfully")
 }
