@@ -1,12 +1,12 @@
 /**
- * Comprehensive utility module for argument parsing and display formatting
+ * Utility module for command-line todo application
+ * Provides argument parsing, display formatting, and color support
  * @module utils
- * @version 1.0.0
  */
 
-/**
- * ANSI color codes for terminal output
- */
+import path from 'path';
+
+// ANSI color codes
 const COLORS = {
   reset: '\x1b[0m',
   red: '\x1b[31m',
@@ -16,422 +16,421 @@ const COLORS = {
   magenta: '\x1b[35m',
   cyan: '\x1b[36m',
   white: '\x1b[37m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m'
+  gray: '\x1b[90m'
 };
 
-/**
- * Check if terminal supports colors
- * @returns {boolean} True if colors are supported
- */
-const supportsColor = () => {
-  if (typeof process === 'undefined') return false;
-  
-  const { env, stdout } = process;
-  
-  if (env.FORCE_COLOR) return true;
-  if (env.NO_COLOR || env.NODE_DISABLE_COLORS) return false;
-  
-  return stdout && stdout.isTTY && (
-    env.TERM !== 'dumb' &&
-    (env.COLORTERM || env.TERM?.includes('color') || env.TERM?.includes('256'))
-  );
-};
-
-const COLOR_SUPPORT = supportsColor();
+// Check if terminal supports colors
+const supportsColor = process.stdout.isTTY && process.env.NODE_ENV !== 'test';
 
 /**
- * Apply color to text if terminal supports it
- * @param {string} text - Text to colorize
- * @param {string} color - Color name from COLORS object
- * @returns {string} Colorized text or plain text
- * @example
- * colorize('Success!', 'green') // Returns colored text if supported
+ * Parse command line arguments into structured object
+ * @param {string[]} args - Array of command line arguments
+ * @returns {{command: string, text: string, flags: object}} Parsed arguments
  */
-export const colorize = (text, color) => {
-  if (typeof text !== 'string') {
-    throw new TypeError('Text must be a string');
-  }
-  
-  if (!COLOR_SUPPORT || !COLORS[color]) {
-    return text;
-  }
-  
-  return `${COLORS[color]}${text}${COLORS.reset}`;
-};
-
-/**
- * Get green colored text (for success/completed items)
- * @param {string} text - Text to colorize
- * @returns {string} Green colored text or plain text
- */
-export const green = (text) => colorize(text, 'green');
-
-/**
- * Get red colored text (for errors/high priority items)
- * @param {string} text - Text to colorize
- * @returns {string} Red colored text or plain text
- */
-export const red = (text) => colorize(text, 'red');
-
-/**
- * Get yellow colored text (for warnings)
- * @param {string} text - Text to colorize
- * @returns {string} Yellow colored text or plain text
- */
-export const yellow = (text) => colorize(text, 'yellow');
-
-/**
- * Get bold text
- * @param {string} text - Text to make bold
- * @returns {string} Bold text or plain text
- */
-export const bold = (text) => colorize(text, 'bold');
-
-// ============================================================================
-// ARGUMENT PARSING FUNCTIONS
-// ============================================================================
-
-/**
- * Parse array of command-line style arguments
- * @param {string[]} args - Array of command-line arguments
- * @returns {{command: string|null, text: string, flags: string[]}} Parsed arguments object
- * @throws {TypeError} When args is not an array
- * @example
- * parseArgs(['add', 'Buy milk', '--priority', 'high', '-f'])
- * // Returns: { command: 'add', text: 'Buy milk', flags: ['--priority', 'high', '-f'] }
- */
-export const parseArgs = (args) => {
+export function parseArgs(args) {
   if (!Array.isArray(args)) {
-    throw new TypeError('Arguments must be an array');
-  }
-
-  if (args.length === 0) {
-    return { command: null, text: '', flags: [] };
+    return { command: '', text: '', flags: {} };
   }
 
   const result = {
-    command: null,
+    command: '',
     text: '',
-    flags: []
+    flags: {}
   };
 
-  let textParts = [];
-  let i = 0;
+  const cleanArgs = args.slice(); // Create copy to avoid mutation
+  const flags = {};
+  const textParts = [];
+  let command = '';
 
-  // First non-flag argument is the command
-  if (args[i] && !args[i].startsWith('-')) {
-    result.command = args[i];
-    i++;
-  }
-
-  // Process remaining arguments
-  while (i < args.length) {
-    const arg = args[i];
+  for (let i = 0; i < cleanArgs.length; i++) {
+    const arg = cleanArgs[i];
     
-    if (arg.startsWith('-')) {
-      // This is a flag
-      result.flags.push(arg);
+    if (arg.startsWith('--')) {
+      // Long flag format
+      const flagName = arg.slice(2);
+      const nextArg = cleanArgs[i + 1];
       
-      // Check if next argument is a flag value (doesn't start with -)
-      if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
-        result.flags.push(args[i + 1]);
-        i += 2;
+      if (nextArg && !nextArg.startsWith('-')) {
+        flags[flagName] = nextArg;
+        i++; // Skip next argument as it's the flag value
       } else {
-        i++;
+        flags[flagName] = true;
       }
+    } else if (arg.startsWith('-') && arg.length > 1) {
+      // Short flag format
+      const flagName = arg.slice(1);
+      const nextArg = cleanArgs[i + 1];
+      
+      if (nextArg && !nextArg.startsWith('-')) {
+        flags[flagName] = nextArg;
+        i++; // Skip next argument as it's the flag value
+      } else {
+        flags[flagName] = true;
+      }
+    } else if (!command) {
+      // First non-flag argument is the command
+      command = arg;
     } else {
-      // This is text content
+      // Remaining arguments are text
       textParts.push(arg);
-      i++;
     }
   }
 
+  result.command = command;
   result.text = textParts.join(' ');
+  result.flags = flags;
+
   return result;
-};
+}
 
 /**
- * Check if a flag exists in arguments array
- * @param {string[]} args - Array of arguments
- * @param {string} flag - Flag to search for (without dashes)
+ * Check if a flag exists in arguments
+ * @param {string[]} args - Array of command line arguments
+ * @param {string} flag - Flag name to check for
  * @returns {boolean} True if flag exists
- * @throws {TypeError} When args is not an array or flag is not a string
- * @example
- * getFlag(['--verbose', '-f', 'value'], 'verbose') // Returns: true
- * getFlag(['--verbose', '-f', 'value'], 'f') // Returns: true
  */
-export const getFlag = (args, flag) => {
-  if (!Array.isArray(args)) {
-    throw new TypeError('Arguments must be an array');
-  }
-  
-  if (typeof flag !== 'string') {
-    throw new TypeError('Flag must be a string');
+export function getFlag(args, flag) {
+  if (!Array.isArray(args) || typeof flag !== 'string') {
+    return false;
   }
 
-  const shortFlag = `-${flag}`;
-  const longFlag = `--${flag}`;
-  
-  return args.includes(shortFlag) || args.includes(longFlag);
-};
+  return args.includes(`--${flag}`) || args.includes(`-${flag}`);
+}
 
 /**
- * Get the value following a flag in arguments array
- * @param {string[]} args - Array of arguments
- * @param {string} flag - Flag to search for (without dashes)
- * @returns {string|null} Value following the flag, or null if not found
- * @throws {TypeError} When args is not an array or flag is not a string
- * @example
- * getFlagValue(['--priority', 'high', '-f'], 'priority') // Returns: 'high'
- * getFlagValue(['--priority', 'high', '-f'], 'missing') // Returns: null
+ * Get the value associated with a flag
+ * @param {string[]} args - Array of command line arguments
+ * @param {string} flag - Flag name to get value for
+ * @returns {string|null} Flag value or null if not found
  */
-export const getFlagValue = (args, flag) => {
-  if (!Array.isArray(args)) {
-    throw new TypeError('Arguments must be an array');
-  }
-  
-  if (typeof flag !== 'string') {
-    throw new TypeError('Flag must be a string');
+export function getFlagValue(args, flag) {
+  if (!Array.isArray(args) || typeof flag !== 'string') {
+    return null;
   }
 
-  const shortFlag = `-${flag}`;
-  const longFlag = `--${flag}`;
-  
-  for (let i = 0; i < args.length - 1; i++) {
-    if (args[i] === shortFlag || args[i] === longFlag) {
-      const nextArg = args[i + 1];
-      // Return the next argument if it's not another flag
-      return nextArg && !nextArg.startsWith('-') ? nextArg : null;
+  // Check long format first
+  const longFlagIndex = args.indexOf(`--${flag}`);
+  if (longFlagIndex !== -1 && longFlagIndex + 1 < args.length) {
+    const value = args[longFlagIndex + 1];
+    if (!value.startsWith('-')) {
+      return value;
     }
   }
-  
+
+  // Check short format
+  const shortFlagIndex = args.indexOf(`-${flag}`);
+  if (shortFlagIndex !== -1 && shortFlagIndex + 1 < args.length) {
+    const value = args[shortFlagIndex + 1];
+    if (!value.startsWith('-')) {
+      return value;
+    }
+  }
+
   return null;
-};
+}
 
 /**
- * Extract and validate numeric IDs from arguments
- * @param {string[]} args - Array of arguments
+ * Extract numeric IDs from arguments
+ * @param {string[]} args - Array of command line arguments
  * @returns {number[]} Array of valid numeric IDs
- * @throws {TypeError} When args is not an array
- * @example
- * parseIds(['1', '2', 'invalid', '3.5', '4']) // Returns: [1, 2, 4]
  */
-export const parseIds = (args) => {
+export function parseIds(args) {
   if (!Array.isArray(args)) {
-    throw new TypeError('Arguments must be an array');
+    return [];
   }
 
   return args
     .map(arg => {
       const num = parseInt(arg, 10);
-      return Number.isInteger(num) && num > 0 ? num : null;
+      return isNaN(num) ? null : num;
     })
-    .filter(id => id !== null);
-};
-
-// ============================================================================
-// DISPLAY FORMATTING FUNCTIONS
-// ============================================================================
+    .filter(id => id !== null && id > 0);
+}
 
 /**
- * Generate ASCII table with proper column alignment and borders
- * @param {string[]} headers - Array of column headers
- * @param {string[][]} rows - Array of row data arrays
+ * Create ASCII table with proper alignment
+ * @param {string[]} headers - Table headers
+ * @param {string[][]} rows - Table rows
  * @returns {string} Formatted ASCII table
- * @throws {TypeError} When headers is not an array or rows is not an array of arrays
- * @example
- * formatTable(['ID', 'Name'], [['1', 'John'], ['2', 'Jane']])
- * // Returns formatted ASCII table with borders
  */
-export const formatTable = (headers, rows) => {
-  if (!Array.isArray(headers)) {
-    throw new TypeError('Headers must be an array');
-  }
-  
-  if (!Array.isArray(rows)) {
-    throw new TypeError('Rows must be an array');
+export function formatTable(headers, rows) {
+  if (!Array.isArray(headers) || !Array.isArray(rows)) {
+    return '';
   }
 
   if (headers.length === 0) {
     return '';
   }
 
-  // Validate that all rows are arrays
-  for (const row of rows) {
-    if (!Array.isArray(row)) {
-      throw new TypeError('Each row must be an array');
-    }
-  }
-
   // Calculate column widths
   const colWidths = headers.map((header, index) => {
     const headerWidth = String(header).length;
     const maxRowWidth = rows.reduce((max, row) => {
-      const cellContent = row[index] != null ? String(row[index]) : '';
-      return Math.max(max, cellContent.length);
+      const cellValue = row[index] ? String(row[index]) : '';
+      return Math.max(max, cellValue.length);
     }, 0);
     return Math.max(headerWidth, maxRowWidth);
   });
 
-  // Helper function to create separator line
-  const createSeparator = () => {
-    return '+' + colWidths.map(width => '-'.repeat(width + 2)).join('+') + '+';
-  };
+  // Format header row
+  const headerRow = '| ' + headers.map((header, index) => 
+    String(header).padEnd(colWidths[index])
+  ).join(' | ') + ' |';
 
-  // Helper function to format a row
-  const formatRow = (rowData) => {
-    const cells = rowData.map((cell, index) => {
-      const content = cell != null ? String(cell) : '';
-      return ` ${content.padEnd(colWidths[index])} `;
-    });
-    return '|' + cells.join('|') + '|';
-  };
+  // Format separator row
+  const separatorRow = '|' + colWidths.map(width => 
+    '-'.repeat(width + 2)
+  ).join('|') + '|';
 
-  // Build the table
-  const lines = [];
-  
-  // Top border
-  lines.push(createSeparator());
-  
-  // Header row
-  lines.push(formatRow(headers));
-  
-  // Header separator
-  lines.push(createSeparator());
-  
-  // Data rows
-  for (const row of rows) {
-    lines.push(formatRow(row));
-  }
-  
-  // Bottom border
-  lines.push(createSeparator());
+  // Format data rows
+  const dataRows = rows.map(row => 
+    '| ' + headers.map((_, index) => {
+      const cellValue = row[index] ? String(row[index]) : '';
+      return cellValue.padEnd(colWidths[index]);
+    }).join(' | ') + ' |'
+  );
 
-  return lines.join('\n');
-};
+  return [headerRow, separatorRow, ...dataRows].join('\n');
+}
 
 /**
- * Format todo object for display
- * @param {Object} todo - Todo object
- * @param {number} todo.id - Todo ID
- * @param {string} todo.status - Todo status ('completed' or other)
- * @param {string} todo.priority - Todo priority level
- * @param {string} todo.text - Todo text content
- * @param {Date|string} todo.date - Todo creation date
+ * Format a single todo item for display
+ * @param {object} todo - Todo object with id, status, priority, text properties
  * @returns {string} Formatted todo string
- * @throws {TypeError} When todo is not an object or missing required fields
- * @example
- * formatTodo({id: 1, status: 'completed', priority: 'high', text: 'Buy milk', date: new Date()})
- * // Returns: "✓ [1] Buy milk (high priority) - 5 minutes ago"
  */
-export const formatTodo = (todo) => {
+export function formatTodo(todo) {
   if (!todo || typeof todo !== 'object') {
-    throw new TypeError('Todo must be an object');
-  }
-
-  const { id, status, priority, text, date } = todo;
-
-  if (typeof id !== 'number') {
-    throw new TypeError('Todo ID must be a number');
-  }
-
-  if (typeof text !== 'string') {
-    throw new TypeError('Todo text must be a string');
-  }
-
-  // Status indicator
-  const statusIcon = status === 'completed' ? green('✓') : '○';
-  
-  // Priority indicator
-  const priorityText = priority === 'high' ? red(`(${priority} priority)`) : 
-                      priority ? `(${priority} priority)` : '';
-  
-  // Date formatting
-  const dateText = date ? formatDate(date) : '';
-  
-  // Combine parts
-  const parts = [
-    statusIcon,
-    `[${id}]`,
-    text,
-    priorityText,
-    dateText ? `- ${dateText}` : ''
-  ].filter(part => part);
-
-  return parts.join(' ');
-};
-
-/**
- * Truncate text with ellipsis, handling edge cases
- * @param {string} text - Text to truncate
- * @param {number} maxLen - Maximum length including ellipsis
- * @returns {string} Truncated text with ellipsis if needed
- * @throws {TypeError} When text is not a string or maxLen is not a number
- * @example
- * truncate('This is a long text', 10) // Returns: 'This is...'
- * truncate('Short', 10) // Returns: 'Short'
- */
-export const truncate = (text, maxLen) => {
-  if (typeof text !== 'string') {
-    throw new TypeError('Text must be a string');
-  }
-  
-  if (typeof maxLen !== 'number' || !Number.isInteger(maxLen) || maxLen < 0) {
-    throw new TypeError('Maximum length must be a non-negative integer');
-  }
-
-  if (maxLen === 0) {
     return '';
   }
 
-  if (maxLen <= 3) {
-    return text.slice(0, maxLen);
+  const {
+    id = '',
+    status = 'pending',
+    priority = 'medium',
+    text = '',
+    created,
+    completed
+  } = todo;
+
+  const statusIcon = status === 'completed' ? '✓' : '○';
+  const priorityIndicator = priority === 'high' ? '!' : priority === 'low' ? '-' : '';
+  
+  let formattedText = `[${id}] ${statusIcon} ${text}`;
+  
+  if (priorityIndicator) {
+    formattedText += ` ${priorityIndicator}`;
+  }
+
+  // Add date information if available
+  if (completed && status === 'completed') {
+    formattedText += ` (completed ${formatDate(completed)})`;
+  } else if (created) {
+    formattedText += ` (created ${formatDate(created)})`;
+  }
+
+  // Apply colors if supported
+  if (supportsColor) {
+    if (status === 'completed') {
+      formattedText = colorize(formattedText, 'green');
+    } else if (priority === 'high') {
+      formattedText = colorize(formattedText, 'red');
+    }
+  }
+
+  return formattedText;
+}
+
+/**
+ * Truncate text with ellipsis if longer than maxLen
+ * @param {string} text - Text to truncate
+ * @param {number} maxLen - Maximum length
+ * @returns {string} Truncated text
+ */
+export function truncate(text, maxLen) {
+  if (typeof text !== 'string' || typeof maxLen !== 'number') {
+    return String(text || '');
+  }
+
+  if (maxLen <= 0) {
+    return '';
   }
 
   if (text.length <= maxLen) {
     return text;
   }
 
+  if (maxLen <= 3) {
+    return '...'.slice(0, maxLen);
+  }
+
   return text.slice(0, maxLen - 3) + '...';
-};
+}
 
 /**
- * Convert Date object to relative time string
- * @param {Date|string|number} date - Date to format
- * @returns {string} Formatted relative time string
- * @throws {TypeError} When date cannot be converted to a valid Date
- * @example
- * formatDate(new Date(Date.now() - 30 * 60 * 1000)) // Returns: '30 minutes ago'
- * formatDate(new Date(Date.now() - 2 * 60 * 60 * 1000)) // Returns: '2 hours ago'
+ * Format date as relative time or absolute date
+ * @param {Date|string} date - Date to format
+ * @returns {string} Formatted date string
  */
-export const formatDate = (date) => {
+export function formatDate(date) {
+  if (!date) {
+    return 'unknown';
+  }
+
   let dateObj;
   
   if (date instanceof Date) {
     dateObj = date;
-  } else if (typeof date === 'string' || typeof date === 'number') {
+  } else if (typeof date === 'string') {
     dateObj = new Date(date);
   } else {
-    throw new TypeError('Date must be a Date object, string, or number');
+    return 'invalid date';
   }
 
   if (isNaN(dateObj.getTime())) {
-    throw new TypeError('Invalid date provided');
+    return 'invalid date';
   }
 
   const now = new Date();
   const diffMs = now.getTime() - dateObj.getTime();
-  
-  // Handle future dates
-  if (diffMs < 0) {
-    return dateObj.toISOString().split('T')[0]; // YYYY-MM-DD format
-  }
-
   const diffMinutes = Math.floor(diffMs / (1000 * 60));
   const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
-  // Less than 1 hour: "X minutes ago"
   if (diffMinutes < 60) {
-    const minutes = Math.max(0, diffMinutes);
+    return diffMinutes <= 0 ? 'just now' : `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'} ago`;
+  } else if (diffHours < 24) {
+    return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
+  } else if (diffDays < 7) {
+    return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
+  } else {
+    // Format as YYYY-MM-DD
+    const year = dateObj.getFullYear();
+    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const day = String(dateObj.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+}
+
+/**
+ * Apply ANSI color codes to text
+ * @param {string} text - Text to colorize
+ * @param {string} color - Color name
+ * @returns {string} Colorized text or plain text if colors not supported
+ */
+export function colorize(text, color) {
+  if (!supportsColor || typeof text !== 'string' || typeof color !== 'string') {
+    return String(text || '');
+  }
+
+  const colorCode = COLORS[color.toLowerCase()];
+  if (!colorCode) {
+    return text;
+  }
+
+  return `${colorCode}${text}${COLORS.reset}`;
+}
+
+/**
+ * Check if terminal supports colors
+ * @returns {boolean} True if colors are supported
+ */
+export function hasColorSupport() {
+  return supportsColor;
+}
+
+/**
+ * Pad string to specified width
+ * @param {string} str - String to pad
+ * @param {number} width - Target width
+ * @param {string} align - Alignment: 'left', 'right', 'center'
+ * @returns {string} Padded string
+ */
+export function padString(str, width, align = 'left') {
+  const text = String(str || '');
+  
+  if (typeof width !== 'number' || width <= 0) {
+    return text;
+  }
+
+  if (text.length >= width) {
+    return text;
+  }
+
+  const padding = width - text.length;
+
+  switch (align) {
+    case 'right':
+      return ' '.repeat(padding) + text;
+    case 'center':
+      const leftPad = Math.floor(padding / 2);
+      const rightPad = padding - leftPad;
+      return ' '.repeat(leftPad) + text + ' '.repeat(rightPad);
+    case 'left':
+    default:
+      return text + ' '.repeat(padding);
+  }
+}
+
+/**
+ * Validate and sanitize user input
+ * @param {string} input - User input to validate
+ * @param {object} options - Validation options
+ * @returns {string} Sanitized input
+ */
+export function sanitizeInput(input, options = {}) {
+  if (typeof input !== 'string') {
+    return '';
+  }
+
+  const {
+    maxLength = 1000,
+    allowEmpty = false,
+    trim = true
+  } = options;
+
+  let sanitized = input;
+
+  if (trim) {
+    sanitized = sanitized.trim();
+  }
+
+  if (!allowEmpty && sanitized.length === 0) {
+    return '';
+  }
+
+  if (sanitized.length > maxLength) {
+    sanitized = sanitized.slice(0, maxLength);
+  }
+
+  // Remove potentially dangerous characters
+  sanitized = sanitized.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  return sanitized;
+}
+
+/**
+ * Create a simple progress bar
+ * @param {number} current - Current progress value
+ * @param {number} total - Total progress value
+ * @param {number} width - Width of progress bar
+ * @returns {string} Progress bar string
+ */
+export function createProgressBar(current, total, width = 20) {
+  if (typeof current !== 'number' || typeof total !== 'number' || typeof width !== 'number') {
+    return '';
+  }
+
+  if (total <= 0 || width <= 0) {
+    return '';
+  }
+
+  const percentage = Math.min(Math.max(current / total, 0), 1);
+  const filled = Math.floor(percentage * width);
+  const empty = width - filled;
+
+  const bar = '█'.repeat(filled) + '░'.repeat(empty);
+  const percent = Math.round(percentage * 100);
+
+  return `[${bar}] ${percent}%`;
+}
