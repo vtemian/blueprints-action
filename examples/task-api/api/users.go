@@ -1,347 +1,71 @@
-I'll create a complete, production-ready Go user management and authentication API. Here's the implementation:
+I'll create a production-ready Go user management and authentication API module using the Gin framework. Here's the complete implementation:
 
 ## Project Structure
 ```
-user-auth-api/
-├── main.go
-├── config/
-│   └── config.go
-├── models/
-│   └── user.go
-├── handlers/
-│   └── users.go
-├── middleware/
-│   └── auth.go
-├── utils/
+api/
+├── users/
+│   ├── handlers.go
+│   ├── models.go
+│   ├── middleware.go
+│   ├── routes.go
 │   └── errors.go
-└── go.mod
+├── database/
+│   └── connection.go
+└── main.go
 ```
 
-## go.mod
+## 1. models.go
 ```go
-module user-auth-api
-
-go 1.21
-
-require (
-    github.com/gin-gonic/gin v1.9.1
-    github.com/golang-jwt/jwt/v5 v5.0.0
-    github.com/go-playground/validator/v10 v10.15.5
-    golang.org/x/crypto v0.14.0
-    gorm.io/gorm v1.25.5
-    gorm.io/driver/postgres v1.5.4
-    github.com/joho/godotenv v1.4.0
-    github.com/sirupsen/logrus v1.9.3
-)
-```
-
-## main.go
-```go
-/*
-SETUP INSTRUCTIONS:
-1. Install dependencies: go mod tidy
-2. Set environment variables:
-   - JWT_SECRET=your-secret-key
-   - DB_HOST=localhost
-   - DB_PORT=5432
-   - DB_USER=your-db-user
-   - DB_PASSWORD=your-db-password
-   - DB_NAME=your-db-name
-   - PORT=8080
-3. Create PostgreSQL database
-4. Run: go run main.go
-5. API will be available at http://localhost:8080
-
-Example requests:
-- Register: POST /api/users/register {"email":"user@example.com","password":"password123","name":"John Doe"}
-- Login: POST /api/users/login {"email":"user@example.com","password":"password123"}
-- Profile: GET /api/users/me (with Authorization: Bearer <token>)
-*/
-
-package main
+package users
 
 import (
-	"context"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
-	"user-auth-api/config"
-	"user-auth-api/handlers"
-	"user-auth-api/middleware"
-	"user-auth-api/models"
-
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-	"github.com/sirupsen/logrus"
-)
-
-func main() {
-	// Load environment variables
-	if err := godotenv.Load(); err != nil {
-		logrus.Warn("No .env file found, using system environment variables")
-	}
-
-	// Initialize configuration
-	cfg := config.Load()
-
-	// Setup logger
-	setupLogger()
-
-	// Initialize database
-	db, err := config.InitDB(cfg)
-	if err != nil {
-		logrus.Fatal("Failed to connect to database: ", err)
-	}
-
-	// Auto-migrate database schema
-	if err := db.AutoMigrate(&models.User{}); err != nil {
-		logrus.Fatal("Failed to migrate database: ", err)
-	}
-
-	// Initialize handlers with dependencies
-	userHandler := handlers.NewUserHandler(db, cfg)
-
-	// Setup router
-	router := setupRouter(userHandler, cfg)
-
-	// Setup server
-	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	// Start server in goroutine
-	go func() {
-		logrus.Infof("Server starting on port %s", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logrus.Fatal("Failed to start server: ", err)
-		}
-	}()
-
-	// Wait for interrupt signal to gracefully shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	logrus.Info("Shutting down server...")
-
-	// Graceful shutdown with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		logrus.Fatal("Server forced to shutdown: ", err)
-	}
-
-	logrus.Info("Server exited")
-}
-
-// setupLogger configures the application logger
-func setupLogger() {
-	logrus.SetFormatter(&logrus.JSONFormatter{})
-	logrus.SetLevel(logrus.InfoLevel)
-	
-	if gin.Mode() == gin.DebugMode {
-		logrus.SetLevel(logrus.DebugLevel)
-	}
-}
-
-// setupRouter configures all routes and middleware
-func setupRouter(userHandler *handlers.UserHandler, cfg *config.Config) *gin.Engine {
-	if gin.Mode() == gin.ReleaseMode {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
-	router := gin.New()
-
-	// Global middleware
-	router.Use(middleware.Logger())
-	router.Use(middleware.Recovery())
-	router.Use(middleware.CORS())
-	router.Use(middleware.SecurityHeaders())
-
-	// Health check endpoint
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
-	})
-
-	// API routes
-	api := router.Group("/api")
-	{
-		users := api.Group("/users")
-		{
-			// Public routes
-			users.POST("/register", userHandler.Register)
-			users.POST("/login", userHandler.Login)
-
-			// Protected routes
-			protected := users.Group("")
-			protected.Use(middleware.AuthMiddleware(cfg.JWTSecret))
-			{
-				protected.GET("/me", userHandler.GetProfile)
-				protected.PUT("/me", userHandler.UpdateProfile)
-				protected.POST("/change-password", userHandler.ChangePassword)
-			}
-		}
-	}
-
-	return router
-}
-```
-
-## config/config.go
-```go
-package config
-
-import (
-	"fmt"
-	"os"
-	"time"
-
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-)
-
-// Config holds all application configuration
-type Config struct {
-	JWTSecret string
-	DBConfig  DatabaseConfig
-	Port      string
-}
-
-// DatabaseConfig holds database configuration
-type DatabaseConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	DBName   string
-	SSLMode  string
-}
-
-// Load reads configuration from environment variables
-func Load() *Config {
-	return &Config{
-		JWTSecret: getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
-		Port:      getEnv("PORT", "8080"),
-		DBConfig: DatabaseConfig{
-			Host:     getEnv("DB_HOST", "localhost"),
-			Port:     getEnv("DB_PORT", "5432"),
-			User:     getEnv("DB_USER", "postgres"),
-			Password: getEnv("DB_PASSWORD", "password"),
-			DBName:   getEnv("DB_NAME", "userauth"),
-			SSLMode:  getEnv("DB_SSLMODE", "disable"),
-		},
-	}
-}
-
-// InitDB initializes database connection with proper configuration
-func InitDB(cfg *Config) (*gorm.DB, error) {
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
-		cfg.DBConfig.Host,
-		cfg.DBConfig.User,
-		cfg.DBConfig.Password,
-		cfg.DBConfig.DBName,
-		cfg.DBConfig.Port,
-		cfg.DBConfig.SSLMode,
-	)
-
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
-		NowFunc: func() time.Time {
-			return time.Now().UTC()
-		},
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
-	}
-
-	// Configure connection pool
-	sqlDB, err := db.DB()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get database instance: %w", err)
-	}
-
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(100)
-	sqlDB.SetConnMaxLifetime(time.Hour)
-
-	return db, nil
-}
-
-// getEnv gets environment variable with fallback
-func getEnv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-```
-
-## models/user.go
-```go
-package models
-
-import (
-	"errors"
-	"regexp"
 	"time"
 	"unicode"
 
+	"github.com/go-playground/validator/v10"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
-// User represents a user in the system
+// User represents the user model in the database
 type User struct {
-	ID        uint      `json:"id" gorm:"primaryKey"`
-	Email     string    `json:"email" gorm:"uniqueIndex;not null"`
-	Password  string    `json:"-" gorm:"not null"` // Never include in JSON responses
-	Name      string    `json:"name" gorm:"not null"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	Email     string         `json:"email" gorm:"uniqueIndex;not null" validate:"required,email"`
+	Password  string         `json:"-" gorm:"not null"` // Never include in JSON responses
+	Name      string         `json:"name" gorm:"not null" validate:"required,min=2,max=100"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
-// RegisterRequest represents user registration request
-type RegisterRequest struct {
-	Email    string `json:"email" binding:"required,email" validate:"required,email"`
-	Password string `json:"password" binding:"required,min=8" validate:"required,min=8"`
-	Name     string `json:"name" binding:"required,min=2" validate:"required,min=2"`
+// UserRegisterRequest represents the registration request payload
+type UserRegisterRequest struct {
+	Email           string `json:"email" validate:"required,email"`
+	Password        string `json:"password" validate:"required,min=8,password_complexity"`
+	ConfirmPassword string `json:"confirm_password" validate:"required,eqfield=Password"`
+	Name            string `json:"name" validate:"required,min=2,max=100"`
 }
 
-// LoginRequest represents user login request
-type LoginRequest struct {
-	Email    string `json:"email" binding:"required,email" validate:"required,email"`
-	Password string `json:"password" binding:"required" validate:"required"`
+// UserLoginRequest represents the login request payload
+type UserLoginRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
 }
 
-// UpdateProfileRequest represents profile update request
-type UpdateProfileRequest struct {
-	Email string `json:"email" binding:"omitempty,email" validate:"omitempty,email"`
-	Name  string `json:"name" binding:"omitempty,min=2" validate:"omitempty,min=2"`
+// UserUpdateRequest represents the profile update request payload
+type UserUpdateRequest struct {
+	Name  string `json:"name" validate:"omitempty,min=2,max=100"`
+	Email string `json:"email" validate:"omitempty,email"`
 }
 
-// ChangePasswordRequest represents password change request
+// ChangePasswordRequest represents the password change request payload
 type ChangePasswordRequest struct {
-	CurrentPassword string `json:"current_password" binding:"required" validate:"required"`
-	NewPassword     string `json:"new_password" binding:"required,min=8" validate:"required,min=8"`
+	CurrentPassword string `json:"current_password" validate:"required"`
+	NewPassword     string `json:"new_password" validate:"required,min=8,password_complexity"`
+	ConfirmPassword string `json:"confirm_password" validate:"required,eqfield=NewPassword"`
 }
 
-// AuthResponse represents authentication response
-type AuthResponse struct {
-	Token string `json:"token"`
-	User  User   `json:"user"`
-}
-
-// UserResponse represents user data response
+// UserResponse represents the user data returned in API responses
 type UserResponse struct {
 	ID        uint      `json:"id"`
 	Email     string    `json:"email"`
@@ -350,7 +74,38 @@ type UserResponse struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// ToResponse converts User to UserResponse
+// LoginResponse represents the login response with JWT token
+type LoginResponse struct {
+	User  UserResponse `json:"user"`
+	Token string       `json:"token"`
+}
+
+// APIResponse represents a standard API response structure
+type APIResponse struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
+
+// HashPassword hashes the user's password using bcrypt
+func (u *User) HashPassword() error {
+	// Use cost 12 for production-level security
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(u.Password), 12)
+	if err != nil {
+		return err
+	}
+	u.Password = string(hashedPassword)
+	return nil
+}
+
+// CheckPassword verifies if the provided password matches the hashed password
+func (u *User) CheckPassword(password string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password))
+	return err == nil
+}
+
+// ToResponse converts User model to UserResponse (excludes sensitive data)
 func (u *User) ToResponse() UserResponse {
 	return UserResponse{
 		ID:        u.ID,
@@ -361,103 +116,12 @@ func (u *User) ToResponse() UserResponse {
 	}
 }
 
-// HashPassword hashes the user's password using bcrypt
-func (u *User) HashPassword() error {
-	if err := ValidatePassword(u.Password); err != nil {
-		return err
-	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-
-	u.Password = string(hashedPassword)
-	return nil
-}
-
-// CheckPassword verifies if the provided password matches the user's password
-func (u *User) CheckPassword(password string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password))
-	return err == nil
-}
-
-// BeforeCreate is a GORM hook that runs before creating a user
-func (u *User) BeforeCreate(tx *gorm.DB) error {
-	if err := u.Validate(); err != nil {
-		return err
-	}
-	return u.HashPassword()
-}
-
-// BeforeUpdate is a GORM hook that runs before updating a user
-func (u *User) BeforeUpdate(tx *gorm.DB) error {
-	return u.ValidateUpdate()
-}
-
-// Validate validates user data for creation
-func (u *User) Validate() error {
-	if err := ValidateEmail(u.Email); err != nil {
-		return err
-	}
-
-	if err := ValidatePassword(u.Password); err != nil {
-		return err
-	}
-
-	if err := ValidateName(u.Name); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// ValidateUpdate validates user data for updates
-func (u *User) ValidateUpdate() error {
-	if u.Email != "" {
-		if err := ValidateEmail(u.Email); err != nil {
-			return err
-		}
-	}
-
-	if u.Name != "" {
-		if err := ValidateName(u.Name); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// ValidateEmail validates email format and requirements
-func ValidateEmail(email string) error {
-	if email == "" {
-		return errors.New("email is required")
-	}
-
-	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-	if !emailRegex.MatchString(email) {
-		return errors.New("invalid email format")
-	}
-
-	if len(email) > 254 {
-		return errors.New("email too long")
-	}
-
-	return nil
-}
-
-// ValidatePassword validates password strength requirements
-func ValidatePassword(password string) error {
-	if len(password) < 8 {
-		return errors.New("password must be at least 8 characters long")
-	}
-
-	if len(password) > 128 {
-		return errors.New("password too long")
-	}
-
+// Custom validator for password complexity
+func passwordComplexity(fl validator.FieldLevel) bool {
+	password := fl.Field().String()
+	
 	var (
+		hasMinLen  = len(password) >= 8
 		hasUpper   = false
 		hasLower   = false
 		hasNumber  = false
@@ -477,31 +141,317 @@ func ValidatePassword(password string) error {
 		}
 	}
 
-	if !hasUpper {
-		return errors.New("password must contain at least one uppercase letter")
-	}
-	if !hasLower {
-		return errors.New("password must contain at least one lowercase letter")
-	}
-	if !hasNumber {
-		return errors.New("password must contain at least one number")
-	}
-	if !hasSpecial {
-		return errors.New("password must contain at least one special character")
-	}
-
-	return nil
+	return hasMinLen && hasUpper && hasLower && hasNumber && hasSpecial
 }
 
-// ValidateName validates name requirements
-func ValidateName(name string) error {
-	if name == "" {
-		return errors.New("name is required")
+// RegisterCustomValidators registers custom validation rules
+func RegisterCustomValidators(v *validator.Validate) {
+	v.RegisterValidation("password_complexity", passwordComplexity)
+}
+```
+
+## 2. errors.go
+```go
+package users
+
+import (
+	"errors"
+	"net/http"
+)
+
+// Custom error types for better error handling
+var (
+	ErrUserNotFound       = errors.New("user not found")
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrEmailAlreadyExists = errors.New("email already exists")
+	ErrInvalidToken       = errors.New("invalid or expired token")
+	ErrUnauthorized       = errors.New("unauthorized access")
+	ErrInvalidInput       = errors.New("invalid input data")
+	ErrInternalServer     = errors.New("internal server error")
+	ErrInvalidPassword    = errors.New("current password is incorrect")
+)
+
+// APIError represents an API error with HTTP status code
+type APIError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Details string `json:"details,omitempty"`
+}
+
+func (e APIError) Error() string {
+	return e.Message
+}
+
+// NewAPIError creates a new API error
+func NewAPIError(code int, message, details string) APIError {
+	return APIError{
+		Code:    code,
+		Message: message,
+		Details: details,
+	}
+}
+
+// Common API errors
+var (
+	ErrBadRequest          = NewAPIError(http.StatusBadRequest, "Bad Request", "")
+	ErrUnauthorizedAccess  = NewAPIError(http.StatusUnauthorized, "Unauthorized", "")
+	ErrForbiddenAccess     = NewAPIError(http.StatusForbidden, "Forbidden", "")
+	ErrNotFound            = NewAPIError(http.StatusNotFound, "Not Found", "")
+	ErrConflict            = NewAPIError(http.StatusConflict, "Conflict", "")
+	ErrInternalServerError = NewAPIError(http.StatusInternalServerError, "Internal Server Error", "")
+)
+```
+
+## 3. middleware.go
+```go
+package users
+
+import (
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"gorm.io/gorm"
+)
+
+// JWTClaims represents the JWT token claims
+type JWTClaims struct {
+	UserID uint   `json:"user_id"`
+	Email  string `json:"email"`
+	jwt.RegisteredClaims
+}
+
+// AuthMiddleware provides JWT authentication middleware
+type AuthMiddleware struct {
+	db        *gorm.DB
+	jwtSecret []byte
+}
+
+// NewAuthMiddleware creates a new authentication middleware instance
+func NewAuthMiddleware(db *gorm.DB, jwtSecret string) *AuthMiddleware {
+	return &AuthMiddleware{
+		db:        db,
+		jwtSecret: []byte(jwtSecret),
+	}
+}
+
+// RequireAuth middleware validates JWT token and sets user context
+func (am *AuthMiddleware) RequireAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Extract token from Authorization header
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, APIResponse{
+				Success: false,
+				Message: "Authorization header required",
+				Error:   "missing_auth_header",
+			})
+			c.Abort()
+			return
+		}
+
+		// Check if header starts with "Bearer "
+		tokenParts := strings.Split(authHeader, " ")
+		if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+			c.JSON(http.StatusUnauthorized, APIResponse{
+				Success: false,
+				Message: "Invalid authorization header format",
+				Error:   "invalid_auth_format",
+			})
+			c.Abort()
+			return
+		}
+
+		tokenString := tokenParts[1]
+
+		// Parse and validate JWT token
+		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+			// Validate signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, ErrInvalidToken
+			}
+			return am.jwtSecret, nil
+		})
+
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, APIResponse{
+				Success: false,
+				Message: "Invalid or expired token",
+				Error:   "invalid_token",
+			})
+			c.Abort()
+			return
+		}
+
+		// Extract claims
+		claims, ok := token.Claims.(*JWTClaims)
+		if !ok || !token.Valid {
+			c.JSON(http.StatusUnauthorized, APIResponse{
+				Success: false,
+				Message: "Invalid token claims",
+				Error:   "invalid_claims",
+			})
+			c.Abort()
+			return
+		}
+
+		// Verify user still exists in database
+		var user User
+		if err := am.db.First(&user, claims.UserID).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				c.JSON(http.StatusUnauthorized, APIResponse{
+					Success: false,
+					Message: "User not found",
+					Error:   "user_not_found",
+				})
+			} else {
+				c.JSON(http.StatusInternalServerError, APIResponse{
+					Success: false,
+					Message: "Database error",
+					Error:   "db_error",
+				})
+			}
+			c.Abort()
+			return
+		}
+
+		// Set user in context for use in handlers
+		c.Set("user", &user)
+		c.Set("user_id", claims.UserID)
+		c.Next()
+	}
+}
+
+// GenerateJWT generates a JWT token for the given user
+func (am *AuthMiddleware) GenerateJWT(user *User) (string, error) {
+	// Set token expiration to 24 hours
+	expirationTime := time.Now().Add(24 * time.Hour)
+
+	claims := &JWTClaims{
+		UserID: user.ID,
+		Email:  user.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
+			Issuer:    "user-api",
+			Subject:   "user-auth",
+		},
 	}
 
-	if len(name) < 2 {
-		return errors.New("name must be at least 2 characters long")
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(am.jwtSecret)
+	if err != nil {
+		return "", err
 	}
 
-	if len(name) > 100 {
+	return tokenString, nil
+}
+
+// RateLimitMiddleware provides basic rate limiting
+// Note: For production, consider using Redis-based rate limiting
+func RateLimitMiddleware() gin.HandlerFunc {
+	// This is a placeholder for rate limiting implementation
+	// In production, implement proper rate limiting using:
+	// - Redis with sliding window
+	// - Token bucket algorithm
+	// - Per-IP and per-user limits
+	return func(c *gin.Context) {
+		// TODO: Implement rate limiting logic
+		// Example: limit to 100 requests per minute per IP
+		c.Next()
+	}
+}
+
+// CORSMiddleware handles Cross-Origin Resource Sharing
+func CORSMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Credentials", "true")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Header("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// SecurityHeadersMiddleware adds security headers
+func SecurityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-XSS-Protection", "1; mode=block")
+		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		c.Next()
+	}
+}
+```
+
+## 4. handlers.go
+```go
+package users
+
+import (
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
+	"gorm.io/gorm"
+)
+
+// UserHandler handles user-related HTTP requests
+type UserHandler struct {
+	db         *gorm.DB
+	validator  *validator.Validate
+	authMiddleware *AuthMiddleware
+}
+
+// NewUserHandler creates a new user handler instance
+func NewUserHandler(db *gorm.DB, authMiddleware *AuthMiddleware) *UserHandler {
+	validator := validator.New()
+	RegisterCustomValidators(validator)
+	
+	return &UserHandler{
+		db:         db,
+		validator:  validator,
+		authMiddleware: authMiddleware,
+	}
+}
+
+// Register handles user registration
+func (h *UserHandler) Register(c *gin.Context) {
+	var req UserRegisterRequest
+	
+	// Bind JSON request body
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("Registration bind error: %v", err)
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Message: "Invalid request format",
+			Error:   "bind_error",
+		})
 		return
+	}
+
+	// Validate request
+	if err := h.validator.Struct(&req); err != nil {
+		var validationErrors []string
+		for _, err := range err.(validator.ValidationErrors) {
+			switch err.Tag() {
+			case "required":
+				validationErrors = append(validationErrors, err.Field()+" is required")
+			case "email":
+				validationErrors = append(validationErrors, "Invalid email format")
+			case "min":
+				validationErrors = append(validationErrors, err.Field()+" is too short")
+			case "max":
+				validationErrors = append(vali

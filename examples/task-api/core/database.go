@@ -1,95 +1,140 @@
-// Package database provides database connection and session management functionality
-// with support for SQLite, connection pooling, and dependency injection patterns.
+I'll create a production-ready Go database connection and session management module based on your requirements. Here's the complete implementation:
+
+## File Structure
+```
+core/
+└── database/
+    ├── database.go
+    ├── models.go
+    ├── errors.go
+    └── config.go
+```
+
+## core/database/errors.go
+```go
 package database
 
 import (
-	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
 )
 
-// Common database errors
+// Custom database error types
 var (
-	ErrConnectionFailed    = errors.New("database connection failed")
-	ErrInvalidURL         = errors.New("invalid database URL")
-	ErrMigrationFailed    = errors.New("database migration failed")
-	ErrConnectionTimeout  = errors.New("database connection timeout")
-	ErrDatabaseLocked     = errors.New("database is locked")
-	ErrConstraintViolation = errors.New("database constraint violation")
+	ErrConnectionFailed   = errors.New("database connection failed")
+	ErrInitializationFailed = errors.New("database initialization failed")
+	ErrConnectionClosed   = errors.New("database connection is closed")
+	ErrInvalidConfig      = errors.New("invalid database configuration")
 )
 
-// DatabaseError represents a custom database error with additional context
+// DatabaseError wraps database-specific errors with additional context
 type DatabaseError struct {
-	Op      string // Operation that failed
-	Err     error  // Underlying error
-	Code    string // Error code for categorization
-	Message string // Human-readable message
+	Op  string // Operation that failed
+	Err error  // Underlying error
 }
 
 func (e *DatabaseError) Error() string {
-	if e.Message != "" {
-		return fmt.Sprintf("database error in %s: %s (%s)", e.Op, e.Message, e.Code)
-	}
-	return fmt.Sprintf("database error in %s: %v", e.Op, e.Err)
+	return fmt.Sprintf("database operation %s failed: %v", e.Op, e.Err)
 }
 
 func (e *DatabaseError) Unwrap() error {
 	return e.Err
 }
 
-// Config holds database configuration settings
+// NewDatabaseError creates a new DatabaseError
+func NewDatabaseError(op string, err error) *DatabaseError {
+	return &DatabaseError{
+		Op:  op,
+		Err: err,
+	}
+}
+```
+
+## core/database/config.go
+```go
+package database
+
+import (
+	"os"
+	"strconv"
+	"time"
+)
+
+// Config holds database configuration
 type Config struct {
-	DatabaseURL      string        `json:"database_url"`
-	MaxOpenConns     int           `json:"max_open_conns"`
-	MaxIdleConns     int           `json:"max_idle_conns"`
-	ConnMaxLifetime  time.Duration `json:"conn_max_lifetime"`
-	ConnMaxIdleTime  time.Duration `json:"conn_max_idle_time"`
-	ConnTimeout      time.Duration `json:"conn_timeout"`
-	RetryAttempts    int           `json:"retry_attempts"`
-	RetryBaseDelay   time.Duration `json:"retry_base_delay"`
-	EnableWALMode    bool          `json:"enable_wal_mode"`
-	EnableForeignKeys bool         `json:"enable_foreign_keys"`
+	DatabaseURL      string
+	MaxOpenConns     int
+	MaxIdleConns     int
+	ConnMaxLifetime  time.Duration
+	ConnMaxIdleTime  time.Duration
+	RetryAttempts    int
+	RetryDelay       time.Duration
+	PingTimeout      time.Duration
 }
 
-// DefaultConfig returns a configuration with sensible defaults
+// DefaultConfig returns default database configuration
 func DefaultConfig() *Config {
 	return &Config{
-		DatabaseURL:       getEnvOrDefault("DATABASE_URL", "./tasks.db"),
-		MaxOpenConns:      25,
-		MaxIdleConns:      5,
-		ConnMaxLifetime:   5 * time.Minute,
-		ConnMaxIdleTime:   1 * time.Minute,
-		ConnTimeout:       10 * time.Second,
-		RetryAttempts:     3,
-		RetryBaseDelay:    100 * time.Millisecond,
-		EnableWALMode:     true,
-		EnableForeignKeys: true,
+		DatabaseURL:      getEnv("DATABASE_URL", "./tasks.db"),
+		MaxOpenConns:     getEnvInt("DB_MAX_OPEN_CONNS", 25),
+		MaxIdleConns:     getEnvInt("DB_MAX_IDLE_CONNS", 5),
+		ConnMaxLifetime:  getEnvDuration("DB_CONN_MAX_LIFETIME", 5*time.Minute),
+		ConnMaxIdleTime:  getEnvDuration("DB_CONN_MAX_IDLE_TIME", 5*time.Minute),
+		RetryAttempts:    getEnvInt("DB_RETRY_ATTEMPTS", 3),
+		RetryDelay:       getEnvDuration("DB_RETRY_DELAY", 1*time.Second),
+		PingTimeout:      getEnvDuration("DB_PING_TIMEOUT", 5*time.Second),
 	}
 }
 
+// Helper functions for environment variable parsing
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
+	}
+	return defaultValue
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			return duration
+		}
+	}
+	return defaultValue
+}
+```
+
+## core/database/models.go
+```go
+package database
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
 // BaseModel provides common fields for all database models
 type BaseModel struct {
-	ID        uuid.UUID  `json:"id" db:"id"`
-	CreatedAt time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
-	DeletedAt *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	ID        string    `json:"id" db:"id"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // NewBaseModel creates a new BaseModel with generated UUID and timestamps
 func NewBaseModel() BaseModel {
 	now := time.Now().UTC()
 	return BaseModel{
-		ID:        uuid.New(),
+		ID:        uuid.New().String(),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -100,388 +145,375 @@ func (bm *BaseModel) Touch() {
 	bm.UpdatedAt = time.Now().UTC()
 }
 
-// SoftDelete sets the DeletedAt timestamp for soft deletion
-func (bm *BaseModel) SoftDelete() {
-	now := time.Now().UTC()
-	bm.DeletedAt = &now
-	bm.UpdatedAt = now
+// IsZero returns true if the model appears to be uninitialized
+func (bm *BaseModel) IsZero() bool {
+	return bm.ID == "" || bm.CreatedAt.IsZero()
 }
+```
 
-// IsDeleted returns true if the model has been soft deleted
-func (bm *BaseModel) IsDeleted() bool {
-	return bm.DeletedAt != nil
-}
+## core/database/database.go
+```go
+package database
 
-// DatabaseInterface defines the interface for database operations
-type DatabaseInterface interface {
-	DB() *sql.DB
-	Close() error
-	Ping(ctx context.Context) error
-	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
-	Migrate(ctx context.Context) error
-	HealthCheck(ctx context.Context) error
-}
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"sync"
+	"time"
 
-// Manager handles database connections and provides session management
-type Manager struct {
-	db     *sql.DB
+	"github.com/google/uuid"
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
+)
+
+// DB wraps sql.DB with additional functionality
+type DB struct {
+	*sql.DB
 	config *Config
 	mu     sync.RWMutex
 	closed bool
 }
 
-// Global database manager instance
 var (
-	globalManager *Manager
-	managerOnce   sync.Once
+	instance *DB
+	once     sync.Once
+	initErr  error
 )
 
-// Initialize initializes the global database manager with the provided configuration
-func Initialize(config *Config) error {
-	var initErr error
-	managerOnce.Do(func() {
-		globalManager, initErr = NewManager(config)
-	})
-	return initErr
+// NewDB creates a new database connection with the given configuration
+func NewDB(databaseURL string) (*DB, error) {
+	config := DefaultConfig()
+	config.DatabaseURL = databaseURL
+	return NewDBWithConfig(config)
 }
 
-// GetManager returns the global database manager instance
-func GetManager() *Manager {
-	if globalManager == nil {
-		panic("database manager not initialized - call Initialize() first")
-	}
-	return globalManager
-}
-
-// NewManager creates a new database manager with the given configuration
-func NewManager(config *Config) (*Manager, error) {
+// NewDBWithConfig creates a new database connection with custom configuration
+func NewDBWithConfig(config *Config) (*DB, error) {
 	if config == nil {
-		config = DefaultConfig()
+		return nil, NewDatabaseError("new_db", ErrInvalidConfig)
 	}
 
-	if err := validateConfig(config); err != nil {
-		return nil, &DatabaseError{
-			Op:      "NewManager",
-			Err:     err,
-			Code:    "INVALID_CONFIG",
-			Message: "invalid database configuration",
-		}
-	}
-
-	manager := &Manager{
-		config: config,
-	}
-
-	if err := manager.connect(); err != nil {
-		return nil, err
-	}
-
-	return manager, nil
-}
-
-// connect establishes the database connection with retry logic
-func (m *Manager) connect() error {
-	var db *sql.DB
-	var err error
-
-	// Retry connection with exponential backoff
-	for attempt := 0; attempt < m.config.RetryAttempts; attempt++ {
-		db, err = m.attemptConnection()
-		if err == nil {
-			break
-		}
-
-		if attempt < m.config.RetryAttempts-1 {
-			delay := m.config.RetryBaseDelay * time.Duration(1<<attempt)
-			log.Printf("Database connection attempt %d failed, retrying in %v: %v", 
-				attempt+1, delay, err)
-			time.Sleep(delay)
-		}
-	}
-
+	// Open database connection
+	sqlDB, err := sql.Open("sqlite3", config.DatabaseURL+"?_journal_mode=WAL&_foreign_keys=on")
 	if err != nil {
-		return &DatabaseError{
-			Op:      "connect",
-			Err:     err,
-			Code:    "CONNECTION_FAILED",
-			Message: "failed to establish database connection after retries",
-		}
-	}
-
-	m.mu.Lock()
-	m.db = db
-	m.mu.Unlock()
-
-	return nil
-}
-
-// attemptConnection attempts to establish a single database connection
-func (m *Manager) attemptConnection() (*sql.DB, error) {
-	// Ensure directory exists for file-based databases
-	if err := m.ensureDirectoryExists(); err != nil {
-		return nil, err
-	}
-
-	// Build connection string with SQLite-specific options
-	connStr := m.buildConnectionString()
-
-	ctx, cancel := context.WithTimeout(context.Background(), m.config.ConnTimeout)
-	defer cancel()
-
-	db, err := sql.Open("sqlite3", connStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, NewDatabaseError("open", fmt.Errorf("%w: %v", ErrConnectionFailed, err))
 	}
 
 	// Configure connection pool
-	db.SetMaxOpenConns(m.config.MaxOpenConns)
-	db.SetMaxIdleConns(m.config.MaxIdleConns)
-	db.SetConnMaxLifetime(m.config.ConnMaxLifetime)
-	db.SetConnMaxIdleTime(m.config.ConnMaxIdleTime)
+	sqlDB.SetMaxOpenConns(config.MaxOpenConns)
+	sqlDB.SetMaxIdleConns(config.MaxIdleConns)
+	sqlDB.SetConnMaxLifetime(config.ConnMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(config.ConnMaxIdleTime)
 
-	// Test the connection
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+	db := &DB{
+		DB:     sqlDB,
+		config: config,
 	}
 
-	// Configure SQLite-specific settings
-	if err := m.configureSQLite(ctx, db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to configure SQLite: %w", err)
+	// Test connection with retry logic
+	if err := db.pingWithRetry(context.Background()); err != nil {
+		sqlDB.Close()
+		return nil, NewDatabaseError("ping", fmt.Errorf("%w: %v", ErrConnectionFailed, err))
 	}
 
 	return db, nil
 }
 
-// ensureDirectoryExists creates the directory for the database file if it doesn't exist
-func (m *Manager) ensureDirectoryExists() error {
-	if m.config.DatabaseURL == ":memory:" {
-		return nil
-	}
-
-	dir := filepath.Dir(m.config.DatabaseURL)
-	if dir == "." {
-		return nil
-	}
-
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create database directory: %w", err)
-	}
-
-	return nil
-}
-
-// buildConnectionString constructs the SQLite connection string with options
-func (m *Manager) buildConnectionString() string {
-	connStr := m.config.DatabaseURL
-
-	// Add SQLite-specific parameters
-	params := []string{}
-
-	if m.config.EnableForeignKeys {
-		params = append(params, "_foreign_keys=on")
-	}
-
-	if m.config.EnableWALMode {
-		params = append(params, "_journal_mode=WAL")
-	}
-
-	// Add busy timeout to handle locking
-	params = append(params, "_busy_timeout=5000")
-
-	// Add synchronous mode for better performance with WAL
-	if m.config.EnableWALMode {
-		params = append(params, "_synchronous=NORMAL")
-	}
-
-	if len(params) > 0 {
-		if strings.Contains(connStr, "?") {
-			connStr += "&" + strings.Join(params, "&")
-		} else {
-			connStr += "?" + strings.Join(params, "&")
+// GetDB returns the singleton database instance
+func GetDB() *DB {
+	once.Do(func() {
+		instance, initErr = NewDB(DefaultConfig().DatabaseURL)
+		if initErr == nil {
+			initErr = instance.InitDB()
 		}
-	}
-
-	return connStr
-}
-
-// configureSQLite applies SQLite-specific configuration
-func (m *Manager) configureSQLite(ctx context.Context, db *sql.DB) error {
-	pragmas := []string{}
-
-	if m.config.EnableForeignKeys {
-		pragmas = append(pragmas, "PRAGMA foreign_keys = ON")
-	}
-
-	if m.config.EnableWALMode {
-		pragmas = append(pragmas, "PRAGMA journal_mode = WAL")
-		pragmas = append(pragmas, "PRAGMA synchronous = NORMAL")
-	}
-
-	pragmas = append(pragmas, "PRAGMA busy_timeout = 5000")
-	pragmas = append(pragmas, "PRAGMA temp_store = memory")
-	pragmas = append(pragmas, "PRAGMA mmap_size = 268435456") // 256MB
-
-	for _, pragma := range pragmas {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			return fmt.Errorf("failed to execute pragma %s: %w", pragma, err)
-		}
-	}
-
-	return nil
-}
-
-// DB returns the underlying sql.DB instance
-func (m *Manager) DB() *sql.DB {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.db
-}
-
-// Close closes the database connection
-func (m *Manager) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed || m.db == nil {
+	})
+	
+	if initErr != nil {
+		log.Printf("Database initialization error: %v", initErr)
 		return nil
 	}
+	
+	return instance
+}
 
-	err := m.db.Close()
-	m.closed = true
-	m.db = nil
+// InitDB creates the database schema and tables
+func (db *DB) InitDB() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
+	// Create base tables schema
+	schema := `
+	CREATE TABLE IF NOT EXISTS schema_migrations (
+		id TEXT PRIMARY KEY,
+		version INTEGER NOT NULL,
+		applied_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Example table demonstrating BaseModel usage
+	CREATE TABLE IF NOT EXISTS tasks (
+		id TEXT PRIMARY KEY,
+		title TEXT NOT NULL,
+		description TEXT,
+		completed BOOLEAN DEFAULT FALSE,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Triggers for automatic timestamp updates
+	CREATE TRIGGER IF NOT EXISTS update_tasks_updated_at 
+		AFTER UPDATE ON tasks
+		FOR EACH ROW
+		BEGIN
+			UPDATE tasks SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+		END;
+
+	CREATE TRIGGER IF NOT EXISTS update_schema_migrations_updated_at 
+		AFTER UPDATE ON schema_migrations
+		FOR EACH ROW
+		BEGIN
+			UPDATE schema_migrations SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+		END;
+	`
+
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		return NewDatabaseError("init_schema", err)
+	}
+
+	// Record schema migration
+	migrationID := uuid.New().String()
+	_, err := db.ExecContext(ctx, 
+		"INSERT OR IGNORE INTO schema_migrations (id, version) VALUES (?, ?)",
+		migrationID, 1)
 	if err != nil {
-		return &DatabaseError{
-			Op:      "Close",
-			Err:     err,
-			Code:    "CLOSE_FAILED",
-			Message: "failed to close database connection",
-		}
+		return NewDatabaseError("init_migration", err)
 	}
 
 	return nil
 }
 
 // Ping checks if the database connection is alive
-func (m *Manager) Ping(ctx context.Context) error {
-	m.mu.RLock()
-	db := m.db
-	closed := m.closed
-	m.mu.RUnlock()
+func (db *DB) Ping(ctx context.Context) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 
-	if closed || db == nil {
-		return &DatabaseError{
-			Op:      "Ping",
-			Err:     errors.New("database connection is closed"),
-			Code:    "CONNECTION_CLOSED",
-			Message: "database connection is not available",
-		}
+	if db.closed {
+		return ErrConnectionClosed
 	}
 
-	if err := db.PingContext(ctx); err != nil {
-		return &DatabaseError{
-			Op:      "Ping",
-			Err:     err,
-			Code:    "PING_FAILED",
-			Message: "database ping failed",
-		}
+	pingCtx, cancel := context.WithTimeout(ctx, db.config.PingTimeout)
+	defer cancel()
+
+	if err := db.DB.PingContext(pingCtx); err != nil {
+		return NewDatabaseError("ping", err)
 	}
 
 	return nil
 }
 
-// BeginTx starts a new database transaction
-func (m *Manager) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	m.mu.RLock()
-	db := m.db
-	closed := m.closed
-	m.mu.RUnlock()
+// pingWithRetry pings the database with exponential backoff retry logic
+func (db *DB) pingWithRetry(ctx context.Context) error {
+	var lastErr error
+	delay := db.config.RetryDelay
 
-	if closed || db == nil {
-		return nil, &DatabaseError{
-			Op:      "BeginTx",
-			Err:     errors.New("database connection is closed"),
-			Code:    "CONNECTION_CLOSED",
-			Message: "cannot start transaction on closed connection",
+	for attempt := 0; attempt < db.config.RetryAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+				delay *= 2 // Exponential backoff
+			}
+		}
+
+		if err := db.Ping(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
 		}
 	}
 
-	tx, err := db.BeginTx(ctx, opts)
+	return fmt.Errorf("failed after %d attempts: %w", db.config.RetryAttempts, lastErr)
+}
+
+// Close closes the database connection
+func (db *DB) Close() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return nil
+	}
+
+	db.closed = true
+	if err := db.DB.Close(); err != nil {
+		return NewDatabaseError("close", err)
+	}
+
+	return nil
+}
+
+// IsClosed returns true if the database connection is closed
+func (db *DB) IsClosed() bool {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.closed
+}
+
+// Stats returns database connection statistics
+func (db *DB) Stats() sql.DBStats {
+	return db.DB.Stats()
+}
+
+// BeginTx starts a transaction with the given options
+func (db *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return nil, ErrConnectionClosed
+	}
+
+	tx, err := db.DB.BeginTx(ctx, opts)
 	if err != nil {
-		return nil, &DatabaseError{
-			Op:      "BeginTx",
-			Err:     err,
-			Code:    "TRANSACTION_FAILED",
-			Message: "failed to start database transaction",
-		}
+		return nil, NewDatabaseError("begin_tx", err)
 	}
 
 	return tx, nil
 }
 
-// HealthCheck performs a comprehensive health check of the database
-func (m *Manager) HealthCheck(ctx context.Context) error {
-	// Check if connection is available
-	if err := m.Ping(ctx); err != nil {
-		return err
+// HealthCheck performs a comprehensive health check
+func (db *DB) HealthCheck(ctx context.Context) error {
+	// Check connection
+	if err := db.Ping(ctx); err != nil {
+		return fmt.Errorf("ping failed: %w", err)
 	}
 
-	// Perform a simple query to verify database functionality
-	m.mu.RLock()
-	db := m.db
-	m.mu.RUnlock()
-
-	var result int
-	err := db.QueryRowContext(ctx, "SELECT 1").Scan(&result)
+	// Check if we can perform a simple query
+	var count int
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&count)
 	if err != nil {
-		return &DatabaseError{
-			Op:      "HealthCheck",
-			Err:     err,
-			Code:    "HEALTH_CHECK_FAILED",
-			Message: "database health check query failed",
-		}
+		return NewDatabaseError("health_check_query", err)
 	}
 
-	if result != 1 {
-		return &DatabaseError{
-			Op:      "HealthCheck",
-			Err:     fmt.Errorf("unexpected result: %d", result),
-			Code:    "HEALTH_CHECK_FAILED",
-			Message: "database health check returned unexpected result",
-		}
+	// Check connection pool stats
+	stats := db.Stats()
+	if stats.OpenConnections == 0 {
+		return fmt.Errorf("no open connections available")
 	}
 
 	return nil
 }
 
-// Migrate runs database migrations to create necessary tables
-func (m *Manager) Migrate(ctx context.Context) error {
-	m.mu.RLock()
-	db := m.db
-	closed := m.closed
-	m.mu.RUnlock()
+// Shutdown gracefully shuts down the database connection
+func (db *DB) Shutdown(ctx context.Context) error {
+	log.Println("Shutting down database connection...")
 
-	if closed || db == nil {
-		return &DatabaseError{
-			Op:      "Migrate",
-			Err:     errors.New("database connection is closed"),
-			Code:    "CONNECTION_CLOSED",
-			Message: "cannot run migrations on closed connection",
+	// Wait for active connections to finish or context to timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- db.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("Error during database shutdown: %v", err)
+			return err
 		}
+		log.Println("Database connection closed successfully")
+		return nil
+	case <-ctx.Done():
+		log.Println("Database shutdown timed out")
+		return ctx.Err()
 	}
+}
+```
 
-	// Create migrations table if it doesn't exist
-	if err := m.createMigrationsTable(ctx, db); err != nil {
-		return err
+## Example Usage
+
+Here's how to use the database package in your application:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"your-project/core/database"
+)
+
+// Example service demonstrating dependency injection
+type TaskService struct {
+	db *database.DB
+}
+
+func NewTaskService(db *database.DB) *TaskService {
+	return &TaskService{db: db}
+}
+
+func (s *TaskService) CreateTask(ctx context.Context, title, description string) error {
+	model := database.NewBaseModel()
+	
+	query := `
+		INSERT INTO tasks (id, title, description, created_at, updated_at) 
+		VALUES (?, ?, ?, ?, ?)
+	`
+	
+	_, err := s.db.ExecContext(ctx, query, 
+		model.ID, title, description, model.CreatedAt, model.UpdatedAt)
+	if err != nil {
+		return database.NewDatabaseError("create_task", err)
 	}
+	
+	return nil
+}
 
-	// Run migrations
-	migrations := m.getMigrations()
-	for _, migration := range migrations {
-		if err := m.runMigration(ctx, db, migration); err != nil {
-			return &DatabaseError{
-				Op:      "Migrate",
-				Err:     err,
-				Code:    "MIGRATION_FAILED
+func (s *TaskService) GetTask(ctx context.Context, id string) (*Task, error) {
+	var task Task
+	query := `SELECT id, title, description, completed, created_at, updated_at FROM tasks WHERE id = ?`
+	
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
+		&task.ID, &task.Title, &task.Description, &task.Completed,
+		&task.CreatedAt, &task.UpdatedAt)
+	if err != nil {
+		return nil, database.NewDatabaseError("get_task", err)
+	}
+	
+	return &task, nil
+}
+
+type Task struct {
+	database.BaseModel
+	Title       string `json:"title" db:"title"`
+	Description string `json:"description" db:"description"`
+	Completed   bool   `json:"completed" db:"completed"`
+}
+
+// HTTP handler demonstrating dependency injection pattern
+func (s *TaskService) CreateTaskHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	
+	// Parse request...
+	title := r.FormValue("title")
+	description := r.FormValue("description")
+	
+	if err := s.CreateTask(ctx, title, description); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
+	w.WriteHeader(http.StatusCreated)
+}
+
+func main() {
+	// Initialize database
+	db := database.GetDB()

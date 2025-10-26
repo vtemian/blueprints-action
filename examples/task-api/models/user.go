@@ -1,18 +1,9 @@
-I'll create a complete Go package for the User model with all the specified requirements. Here's the implementation:
-
-## File: `models/user/user.go`
-
-```go
-// Package user provides the User model and related functionality for user management
-// with database persistence using GORM.
-package user
+package models
 
 import (
-	"context"
-	"fmt"
-	"log"
+	"encoding/json"
+	"errors"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,49 +11,53 @@ import (
 	"gorm.io/gorm"
 )
 
+// Constants for password hashing
 const (
-	// BcryptCost defines the cost factor for bcrypt hashing
-	BcryptCost = 12
-	// MinPasswordLength defines minimum password length
+	DefaultBcryptCost = 12
 	MinPasswordLength = 8
-	// MaxEmailLength defines maximum email length
-	MaxEmailLength = 255
-	// MaxPasswordHashLength defines maximum password hash length
-	MaxPasswordHashLength = 255
-	// MaxNameLength defines maximum name length
-	MaxNameLength = 100
 )
 
-// User represents a user in the system with authentication and profile information
+// Email validation regex
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+
+// Custom errors
+var (
+	ErrInvalidEmail    = errors.New("invalid email format")
+	ErrPasswordTooShort = errors.New("password must be at least 8 characters long")
+	ErrEmptyName       = errors.New("name cannot be empty")
+)
+
+// User represents a user in the system
 type User struct {
 	ID           uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	Email        string     `gorm:"type:varchar(255);uniqueIndex;not null" json:"email" validate:"required,email,max=255"`
-	PasswordHash string     `gorm:"type:varchar(255);not null;column:password_hash" json:"-"`
-	Name         string     `gorm:"type:varchar(100);not null" json:"name" validate:"required,max=100"`
-	IsActive     bool       `gorm:"default:true;not null" json:"is_active"`
-	LastLogin    *time.Time `gorm:"type:timestamp" json:"last_login,omitempty"`
-	CreatedAt    time.Time  `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt    time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
+	Email        string     `gorm:"type:varchar(255);uniqueIndex:idx_users_email;not null" json:"email" validate:"required,email"`
+	PasswordHash string     `gorm:"type:varchar(255);not null" json:"-"`
+	Name         string     `gorm:"type:varchar(255);not null" json:"name" validate:"required"`
+	IsActive     bool       `gorm:"type:boolean;not null;default:true" json:"is_active"`
+	LastLogin    *time.Time `gorm:"type:timestamp" json:"last_login"`
+	CreatedAt    time.Time  `gorm:"type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"created_at"`
+	UpdatedAt    time.Time  `gorm:"type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"updated_at"`
 	
-	// Relationships
-	Tasks []Task `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;" json:"tasks,omitempty"`
+	// One-to-many relationship with Tasks
+	Tasks []Task `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE" json:"tasks,omitempty"`
 }
 
-// Task represents a task associated with a user (placeholder for relationship)
+// Task represents a task associated with a user
+// This is a placeholder - you should define this struct according to your needs
 type Task struct {
 	ID        uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
 	UserID    uuid.UUID `gorm:"type:uuid;not null;index" json:"user_id"`
 	Title     string    `gorm:"type:varchar(255);not null" json:"title"`
-	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+	CreatedAt time.Time `gorm:"type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"created_at"`
+	UpdatedAt time.Time `gorm:"type:timestamp;not null;default:CURRENT_TIMESTAMP" json:"updated_at"`
 }
 
-// TableName returns the table name for the User model
+// TableName specifies the table name for the User model
 func (User) TableName() string {
 	return "users"
 }
 
-// TableName returns the table name for the Task model
+// TableName specifies the table name for the Task model
 func (Task) TableName() string {
 	return "tasks"
 }
@@ -80,42 +75,49 @@ func (u *User) BeforeUpdate(tx *gorm.DB) error {
 	return u.Validate()
 }
 
-// SetPassword hashes the provided password and stores it in PasswordHash field
-func (u *User) SetPassword(password string) error {
-	if err := ValidatePassword(password); err != nil {
-		log.Printf("Password validation failed for user %s: %v", u.Email, err)
-		return fmt.Errorf("password validation failed: %w", err)
+// Validate performs validation on the User struct
+func (u *User) Validate() error {
+	if u.Email == "" {
+		return ErrInvalidEmail
 	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
-	if err != nil {
-		log.Printf("Failed to hash password for user %s: %v", u.Email, err)
-		return fmt.Errorf("failed to hash password: %w", err)
+	
+	if !emailRegex.MatchString(u.Email) {
+		return ErrInvalidEmail
 	}
-
-	u.PasswordHash = string(hashedPassword)
-	log.Printf("Password successfully set for user %s", u.Email)
+	
+	if u.Name == "" {
+		return ErrEmptyName
+	}
+	
 	return nil
 }
 
-// CheckPassword verifies if the provided password matches the stored hash
-func (u *User) CheckPassword(password string) bool {
-	if u.PasswordHash == "" {
-		log.Printf("No password hash found for user %s", u.Email)
-		return false
+// SetPassword hashes a plain text password and stores it in PasswordHash
+func (u *User) SetPassword(plainPassword string) error {
+	if len(plainPassword) < MinPasswordLength {
+		return ErrPasswordTooShort
 	}
-
-	err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
+	
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(plainPassword), DefaultBcryptCost)
 	if err != nil {
-		log.Printf("Password check failed for user %s: %v", u.Email, err)
-		return false
+		return err
 	}
-
-	log.Printf("Password check successful for user %s", u.Email)
-	return true
+	
+	u.PasswordHash = string(hashedPassword)
+	return nil
 }
 
-// ToDict converts the User model to a map representation, excluding sensitive fields
+// CheckPassword compares a plain text password against the stored hash
+func (u *User) CheckPassword(plainPassword string) error {
+	return bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(plainPassword))
+}
+
+// IsPasswordValid checks if the provided password is valid for this user
+func (u *User) IsPasswordValid(plainPassword string) bool {
+	return u.CheckPassword(plainPassword) == nil
+}
+
+// ToDict converts the User struct to a map[string]interface{} excluding sensitive fields
 func (u *User) ToDict() map[string]interface{} {
 	result := map[string]interface{}{
 		"id":         u.ID,
@@ -125,15 +127,15 @@ func (u *User) ToDict() map[string]interface{} {
 		"created_at": u.CreatedAt,
 		"updated_at": u.UpdatedAt,
 	}
-
-	// Handle nullable LastLogin field
+	
+	// Include last_login only if it's not nil
 	if u.LastLogin != nil {
 		result["last_login"] = *u.LastLogin
 	} else {
 		result["last_login"] = nil
 	}
-
-	// Include tasks if loaded
+	
+	// Include tasks if they are loaded
 	if len(u.Tasks) > 0 {
 		tasks := make([]map[string]interface{}, len(u.Tasks))
 		for i, task := range u.Tasks {
@@ -147,285 +149,99 @@ func (u *User) ToDict() map[string]interface{} {
 		}
 		result["tasks"] = tasks
 	}
-
+	
 	return result
 }
 
-// Validate performs comprehensive validation on the User model
-func (u *User) Validate() error {
-	var errors []string
-
-	// Validate email
-	if u.Email == "" {
-		errors = append(errors, "email is required")
-	} else {
-		if len(u.Email) > MaxEmailLength {
-			errors = append(errors, fmt.Sprintf("email must not exceed %d characters", MaxEmailLength))
-		}
-		if !IsValidEmail(u.Email) {
-			errors = append(errors, "email format is invalid")
-		}
-	}
-
-	// Validate name
-	if u.Name == "" {
-		errors = append(errors, "name is required")
-	} else if len(u.Name) > MaxNameLength {
-		errors = append(errors, fmt.Sprintf("name must not exceed %d characters", MaxNameLength))
-	}
-
-	// Validate password hash (should be set)
-	if u.PasswordHash == "" {
-		errors = append(errors, "password hash is required")
-	} else if len(u.PasswordHash) > MaxPasswordHashLength {
-		errors = append(errors, fmt.Sprintf("password hash must not exceed %d characters", MaxPasswordHashLength))
-	}
-
-	if len(errors) > 0 {
-		return &ValidationError{
-			Field:   "user",
-			Message: strings.Join(errors, "; "),
-			Errors:  errors,
-		}
-	}
-
-	return nil
+// ToJSON converts the User struct to JSON bytes excluding sensitive fields
+func (u *User) ToJSON() ([]byte, error) {
+	return json.Marshal(u.ToDict())
 }
 
 // UpdateLastLogin updates the LastLogin field to the current time
 func (u *User) UpdateLastLogin() {
 	now := time.Now()
 	u.LastLogin = &now
-	log.Printf("Updated last login for user %s to %v", u.Email, now)
 }
 
-// IsValidEmail validates email format using regex
-func IsValidEmail(email string) bool {
-	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-	return emailRegex.MatchString(email)
-}
-
-// ValidatePassword validates password strength requirements
-func ValidatePassword(password string) error {
-	if len(password) < MinPasswordLength {
-		return &ValidationError{
-			Field:   "password",
-			Message: fmt.Sprintf("password must be at least %d characters long", MinPasswordLength),
-		}
-	}
-
-	var hasUpper, hasLower, hasDigit, hasSpecial bool
+// IsEmailTaken checks if the email is already taken by another user
+func IsEmailTaken(db *gorm.DB, email string, excludeUserID ...uuid.UUID) (bool, error) {
+	var count int64
+	query := db.Model(&User{}).Where("email = ?", email)
 	
-	for _, char := range password {
-		switch {
-		case 'A' <= char && char <= 'Z':
-			hasUpper = true
-		case 'a' <= char && char <= 'z':
-			hasLower = true
-		case '0' <= char && char <= '9':
-			hasDigit = true
-		case strings.ContainsRune("!@#$%^&*()_+-=[]{}|;:,.<>?", char):
-			hasSpecial = true
-		}
+	// Exclude current user if updating
+	if len(excludeUserID) > 0 && excludeUserID[0] != uuid.Nil {
+		query = query.Where("id != ?", excludeUserID[0])
 	}
-
-	var errors []string
-	if !hasUpper {
-		errors = append(errors, "password must contain at least one uppercase letter")
+	
+	err := query.Count(&count).Error
+	if err != nil {
+		return false, err
 	}
-	if !hasLower {
-		errors = append(errors, "password must contain at least one lowercase letter")
-	}
-	if !hasDigit {
-		errors = append(errors, "password must contain at least one digit")
-	}
-	if !hasSpecial {
-		errors = append(errors, "password must contain at least one special character")
-	}
-
-	if len(errors) > 0 {
-		return &ValidationError{
-			Field:   "password",
-			Message: strings.Join(errors, "; "),
-			Errors:  errors,
-		}
-	}
-
-	return nil
-}
-```
-
-## File: `models/user/errors.go`
-
-```go
-package user
-
-import (
-	"errors"
-	"fmt"
-	"strings"
-)
-
-// Common error variables
-var (
-	ErrUserNotFound     = errors.New("user not found")
-	ErrDuplicateEmail   = errors.New("email already exists")
-	ErrInvalidPassword  = errors.New("invalid password")
-	ErrInvalidEmail     = errors.New("invalid email format")
-	ErrUserInactive     = errors.New("user account is inactive")
-	ErrDatabaseError    = errors.New("database operation failed")
-)
-
-// ValidationError represents validation errors with detailed information
-type ValidationError struct {
-	Field   string   `json:"field"`
-	Message string   `json:"message"`
-	Errors  []string `json:"errors,omitempty"`
+	
+	return count > 0, nil
 }
 
-// Error implements the error interface
-func (e *ValidationError) Error() string {
-	if len(e.Errors) > 0 {
-		return fmt.Sprintf("validation failed for %s: %s", e.Field, strings.Join(e.Errors, ", "))
-	}
-	return fmt.Sprintf("validation failed for %s: %s", e.Field, e.Message)
-}
-
-// DatabaseError represents database-related errors
-type DatabaseError struct {
-	Operation string `json:"operation"`
-	Message   string `json:"message"`
-	Err       error  `json:"-"`
-}
-
-// Error implements the error interface
-func (e *DatabaseError) Error() string {
-	if e.Err != nil {
-		return fmt.Sprintf("database error during %s: %s (%v)", e.Operation, e.Message, e.Err)
-	}
-	return fmt.Sprintf("database error during %s: %s", e.Operation, e.Message)
-}
-
-// Unwrap returns the wrapped error
-func (e *DatabaseError) Unwrap() error {
-	return e.Err
-}
-
-// AuthenticationError represents authentication-related errors
-type AuthenticationError struct {
-	Message string `json:"message"`
-	Err     error  `json:"-"`
-}
-
-// Error implements the error interface
-func (e *AuthenticationError) Error() string {
-	if e.Err != nil {
-		return fmt.Sprintf("authentication error: %s (%v)", e.Message, e.Err)
-	}
-	return fmt.Sprintf("authentication error: %s", e.Message)
-}
-
-// Unwrap returns the wrapped error
-func (e *AuthenticationError) Unwrap() error {
-	return e.Err
-}
-```
-
-## File: `models/user/repository.go`
-
-```go
-package user
-
-import (
-	"context"
-	"errors"
-	"fmt"
-	"log"
-	"strings"
-
-	"github.com/google/uuid"
-	"gorm.io/gorm"
-)
-
-// Repository defines the interface for user data operations
-type Repository interface {
-	Create(ctx context.Context, user *User) error
-	GetByID(ctx context.Context, id uuid.UUID) (*User, error)
-	GetByEmail(ctx context.Context, email string) (*User, error)
-	Update(ctx context.Context, user *User) error
-	Delete(ctx context.Context, id uuid.UUID) error
-	List(ctx context.Context, limit, offset int) ([]*User, error)
-	Count(ctx context.Context) (int64, error)
-	GetWithTasks(ctx context.Context, id uuid.UUID) (*User, error)
-}
-
-// GormRepository implements Repository interface using GORM
-type GormRepository struct {
-	db *gorm.DB
-}
-
-// NewGormRepository creates a new GORM-based repository
-func NewGormRepository(db *gorm.DB) Repository {
-	return &GormRepository{db: db}
-}
-
-// Create creates a new user in the database
-func (r *GormRepository) Create(ctx context.Context, user *User) error {
-	if user == nil {
-		return &ValidationError{Field: "user", Message: "user cannot be nil"}
-	}
-
-	result := r.db.WithContext(ctx).Create(user)
-	if result.Error != nil {
-		if strings.Contains(result.Error.Error(), "duplicate key") || 
-		   strings.Contains(result.Error.Error(), "UNIQUE constraint") {
-			log.Printf("Duplicate email attempt: %s", user.Email)
-			return &DatabaseError{
-				Operation: "create",
-				Message:   "email already exists",
-				Err:       ErrDuplicateEmail,
-			}
-		}
-		log.Printf("Failed to create user %s: %v", user.Email, result.Error)
-		return &DatabaseError{
-			Operation: "create",
-			Message:   "failed to create user",
-			Err:       result.Error,
-		}
-	}
-
-	log.Printf("Successfully created user %s with ID %s", user.Email, user.ID)
-	return nil
-}
-
-// GetByID retrieves a user by their ID
-func (r *GormRepository) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
-	if id == uuid.Nil {
-		return nil, &ValidationError{Field: "id", Message: "id cannot be nil"}
-	}
-
+// GetUserByEmail retrieves a user by email address
+func GetUserByEmail(db *gorm.DB, email string) (*User, error) {
 	var user User
-	result := r.db.WithContext(ctx).First(&user, "id = ?", id)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			log.Printf("User not found with ID: %s", id)
-			return nil, ErrUserNotFound
-		}
-		log.Printf("Failed to get user by ID %s: %v", id, result.Error)
-		return nil, &DatabaseError{
-			Operation: "get_by_id",
-			Message:   "failed to retrieve user",
-			Err:       result.Error,
-		}
+	err := db.Where("email = ?", email).First(&user).Error
+	if err != nil {
+		return nil, err
 	}
-
 	return &user, nil
 }
 
-// GetByEmail retrieves a user by their email address
-func (r *GormRepository) GetByEmail(ctx context.Context, email string) (*User, error) {
-	if email == "" {
-		return nil, &ValidationError{Field: "email", Message: "email cannot be empty"}
+// GetUserByID retrieves a user by ID
+func GetUserByID(db *gorm.DB, id uuid.UUID) (*User, error) {
+	var user User
+	err := db.Where("id = ?", id).First(&user).Error
+	if err != nil {
+		return nil, err
 	}
+	return &user, nil
+}
 
-	var
+// GetUserWithTasks retrieves a user with their associated tasks
+func GetUserWithTasks(db *gorm.DB, id uuid.UUID) (*User, error) {
+	var user User
+	err := db.Preload("Tasks").Where("id = ?", id).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// CreateUser creates a new user with the provided details
+func CreateUser(db *gorm.DB, email, password, name string) (*User, error) {
+	user := &User{
+		Email:    email,
+		Name:     name,
+		IsActive: true,
+	}
+	
+	if err := user.SetPassword(password); err != nil {
+		return nil, err
+	}
+	
+	if err := db.Create(user).Error; err != nil {
+		return nil, err
+	}
+	
+	return user, nil
+}
+
+// Activate sets the user as active
+func (u *User) Activate() {
+	u.IsActive = true
+}
+
+// Deactivate sets the user as inactive
+func (u *User) Deactivate() {
+	u.IsActive = false
+}
+
+// String returns a string representation of the user
+func (u *User) String() string {
+	return u.Name + " <" + u.Email + ">"
+}

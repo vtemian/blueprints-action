@@ -1,11 +1,15 @@
 package models
 
 import (
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // TaskStatus represents the status of a task
@@ -22,7 +26,7 @@ func (ts TaskStatus) String() string {
 	return string(ts)
 }
 
-// IsValid validates if the TaskStatus is valid
+// IsValid checks if the TaskStatus is valid
 func (ts TaskStatus) IsValid() bool {
 	switch ts {
 	case TaskStatusPending, TaskStatusInProgress, TaskStatusCompleted:
@@ -30,6 +34,36 @@ func (ts TaskStatus) IsValid() bool {
 	default:
 		return false
 	}
+}
+
+// Value implements the driver.Valuer interface for database storage
+func (ts TaskStatus) Value() (driver.Value, error) {
+	if !ts.IsValid() {
+		return nil, fmt.Errorf("invalid task status: %s", ts)
+	}
+	return string(ts), nil
+}
+
+// Scan implements the sql.Scanner interface for database retrieval
+func (ts *TaskStatus) Scan(value interface{}) error {
+	if value == nil {
+		*ts = TaskStatusPending
+		return nil
+	}
+
+	switch v := value.(type) {
+	case string:
+		*ts = TaskStatus(v)
+	case []byte:
+		*ts = TaskStatus(v)
+	default:
+		return fmt.Errorf("cannot scan %T into TaskStatus", value)
+	}
+
+	if !ts.IsValid() {
+		return fmt.Errorf("invalid task status: %s", *ts)
+	}
+	return nil
 }
 
 // TaskPriority represents the priority level of a task
@@ -46,7 +80,7 @@ func (tp TaskPriority) String() string {
 	return string(tp)
 }
 
-// IsValid validates if the TaskPriority is valid
+// IsValid checks if the TaskPriority is valid
 func (tp TaskPriority) IsValid() bool {
 	switch tp {
 	case TaskPriorityLow, TaskPriorityMedium, TaskPriorityHigh:
@@ -56,169 +90,173 @@ func (tp TaskPriority) IsValid() bool {
 	}
 }
 
-// Task represents a task in the system
-type Task struct {
-	ID          uuid.UUID     `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	Title       string        `json:"title" gorm:"type:varchar(200);not null;index"`
-	Description *string       `json:"description,omitempty" gorm:"type:text"`
-	Status      TaskStatus    `json:"status" gorm:"type:varchar(20);not null;index;default:'pending'"`
-	Priority    TaskPriority  `json:"priority" gorm:"type:varchar(10);not null;index;default:'medium'"`
-	UserID      uuid.UUID     `json:"user_id" gorm:"type:uuid;not null;index;constraint:OnDelete:CASCADE"`
-	DueDate     *time.Time    `json:"due_date,omitempty" gorm:"index"`
-	CompletedAt *time.Time    `json:"completed_at,omitempty"`
-	CreatedAt   time.Time     `json:"created_at" gorm:"autoCreateTime"`
-	UpdatedAt   time.Time     `json:"updated_at" gorm:"autoUpdateTime"`
+// Value implements the driver.Valuer interface for database storage
+func (tp TaskPriority) Value() (driver.Value, error) {
+	if !tp.IsValid() {
+		return nil, fmt.Errorf("invalid task priority: %s", tp)
+	}
+	return string(tp), nil
 }
 
-// TableName returns the table name for GORM
-func (Task) TableName() string {
-	return "tasks"
-}
-
-// TaskCreateParams holds parameters for creating a new task
-type TaskCreateParams struct {
-	Title       string
-	Description *string
-	Status      TaskStatus
-	Priority    TaskPriority
-	UserID      uuid.UUID
-	DueDate     *time.Time
-}
-
-// NewTask creates a new Task instance with validation
-func NewTask(params TaskCreateParams) (*Task, error) {
-	// Validate title
-	if err := validateTitle(params.Title); err != nil {
-		return nil, err
+// Scan implements the sql.Scanner interface for database retrieval
+func (tp *TaskPriority) Scan(value interface{}) error {
+	if value == nil {
+		*tp = TaskPriorityMedium
+		return nil
 	}
 
-	// Validate status
-	if !params.Status.IsValid() {
-		return nil, errors.New("invalid task status")
+	switch v := value.(type) {
+	case string:
+		*tp = TaskPriority(v)
+	case []byte:
+		*tp = TaskPriority(v)
+	default:
+		return fmt.Errorf("cannot scan %T into TaskPriority", value)
 	}
 
-	// Validate priority
-	if !params.Priority.IsValid() {
-		return nil, errors.New("invalid task priority")
-	}
-
-	// Validate user ID
-	if params.UserID == uuid.Nil {
-		return nil, errors.New("user_id is required")
-	}
-
-	now := time.Now()
-	task := &Task{
-		ID:          uuid.New(),
-		Title:       strings.TrimSpace(params.Title),
-		Description: params.Description,
-		Status:      params.Status,
-		Priority:    params.Priority,
-		UserID:      params.UserID,
-		DueDate:     params.DueDate,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-
-	return task, nil
-}
-
-// validateTitle validates the task title
-func validateTitle(title string) error {
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return errors.New("title is required")
-	}
-	if len(title) > 200 {
-		return errors.New("title must not exceed 200 characters")
+	if !tp.IsValid() {
+		return fmt.Errorf("invalid task priority: %s", *tp)
 	}
 	return nil
 }
 
-// MarkComplete marks the task as completed and sets the completed_at timestamp
-func (t *Task) MarkComplete() {
-	t.Status = TaskStatusCompleted
-	now := time.Now()
-	t.CompletedAt = &now
-	t.UpdatedAt = now
+// Task represents a task in the system
+type Task struct {
+	ID          uuid.UUID     `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	Title       string        `gorm:"type:varchar(200);not null;index" json:"title" validate:"required,max=200"`
+	Description *string       `gorm:"type:text" json:"description,omitempty"`
+	Status      TaskStatus    `gorm:"type:varchar(20);not null;default:'pending';index" json:"status" validate:"required"`
+	Priority    TaskPriority  `gorm:"type:varchar(10);not null;default:'medium';index" json:"priority" validate:"required"`
+	DueDate     *time.Time    `gorm:"type:timestamp" json:"due_date,omitempty"`
+	CompletedAt *time.Time    `gorm:"type:timestamp" json:"completed_at,omitempty"`
+	UserID      uuid.UUID     `gorm:"type:uuid;not null;index" json:"user_id" validate:"required"`
+	User        *User         `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE" json:"user,omitempty"`
+	CreatedAt   time.Time     `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt   time.Time     `gorm:"autoUpdateTime" json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
-// IsOverdue returns true if the task is past its due date
+// TableName specifies the table name for the Task model
+func (Task) TableName() string {
+	return "tasks"
+}
+
+// NewTask creates a new Task instance with default values
+func NewTask(title string, userID uuid.UUID) *Task {
+	return &Task{
+		ID:       uuid.New(),
+		Title:    title,
+		Status:   TaskStatusPending,
+		Priority: TaskPriorityMedium,
+		UserID:   userID,
+	}
+}
+
+// BeforeCreate is a GORM hook that runs before creating a task
+func (t *Task) BeforeCreate(tx *gorm.DB) error {
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	
+	// Validate the task
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	
+	return nil
+}
+
+// BeforeUpdate is a GORM hook that runs before updating a task
+func (t *Task) BeforeUpdate(tx *gorm.DB) error {
+	return t.Validate()
+}
+
+// Validate validates the task fields
+func (t *Task) Validate() error {
+	validate := validator.New()
+	
+	// Register custom validators for enums
+	validate.RegisterValidation("task_status", validateTaskStatus)
+	validate.RegisterValidation("task_priority", validateTaskPriority)
+	
+	if err := validate.Struct(t); err != nil {
+		return fmt.Errorf("task validation failed: %w", err)
+	}
+	
+	// Additional custom validations
+	if !t.Status.IsValid() {
+		return fmt.Errorf("invalid task status: %s", t.Status)
+	}
+	
+	if !t.Priority.IsValid() {
+		return fmt.Errorf("invalid task priority: %s", t.Priority)
+	}
+	
+	if t.UserID == uuid.Nil {
+		return errors.New("user_id is required")
+	}
+	
+	if strings.TrimSpace(t.Title) == "" {
+		return errors.New("title is required")
+	}
+	
+	return nil
+}
+
+// MarkComplete marks the task as completed and sets the completion timestamp
+func (t *Task) MarkComplete() error {
+	if t.Status == TaskStatusCompleted {
+		return errors.New("task is already completed")
+	}
+	
+	now := time.Now()
+	t.Status = TaskStatusCompleted
+	t.CompletedAt = &now
+	
+	return nil
+}
+
+// IsOverdue checks if the task is overdue based on its due date
 func (t *Task) IsOverdue() bool {
 	// If no due date is set, task cannot be overdue
 	if t.DueDate == nil {
 		return false
 	}
-
-	// If task is already completed, it's not considered overdue
+	
+	// If task is completed, it's not considered overdue
 	if t.Status == TaskStatusCompleted {
 		return false
 	}
-
-	// Check if current time is after due date
+	
+	// Check if current time is past the due date
 	return time.Now().After(*t.DueDate)
 }
 
-// SetTitle updates the task title with validation
-func (t *Task) SetTitle(title string) error {
-	if err := validateTitle(title); err != nil {
-		return err
-	}
-	t.Title = strings.TrimSpace(title)
-	t.UpdatedAt = time.Now()
-	return nil
-}
-
-// SetStatus updates the task status with validation
-func (t *Task) SetStatus(status TaskStatus) error {
-	if !status.IsValid() {
-		return errors.New("invalid task status")
-	}
-	
-	// If setting to completed, use MarkComplete method instead
-	if status == TaskStatusCompleted {
-		t.MarkComplete()
-		return nil
-	}
-	
-	// If changing from completed to another status, clear completed_at
-	if t.Status == TaskStatusCompleted && status != TaskStatusCompleted {
-		t.CompletedAt = nil
-	}
-	
-	t.Status = status
-	t.UpdatedAt = time.Now()
-	return nil
-}
-
-// SetPriority updates the task priority with validation
-func (t *Task) SetPriority(priority TaskPriority) error {
-	if !priority.IsValid() {
-		return errors.New("invalid task priority")
-	}
-	t.Priority = priority
-	t.UpdatedAt = time.Now()
-	return nil
-}
-
-// SetDescription updates the task description
-func (t *Task) SetDescription(description *string) {
-	t.Description = description
-	t.UpdatedAt = time.Now()
-}
-
-// SetDueDate updates the task due date
-func (t *Task) SetDueDate(dueDate *time.Time) {
-	t.DueDate = dueDate
-	t.UpdatedAt = time.Now()
-}
-
-// IsCompleted returns true if the task is completed
+// IsCompleted checks if the task is completed
 func (t *Task) IsCompleted() bool {
 	return t.Status == TaskStatusCompleted
 }
 
-// GetDescription returns the description value or empty string if nil
+// SetDueDate sets the due date for the task
+func (t *Task) SetDueDate(dueDate time.Time) {
+	t.DueDate = &dueDate
+}
+
+// ClearDueDate removes the due date from the task
+func (t *Task) ClearDueDate() {
+	t.DueDate = nil
+}
+
+// SetDescription sets the description for the task
+func (t *Task) SetDescription(description string) {
+	if strings.TrimSpace(description) == "" {
+		t.Description = nil
+	} else {
+		t.Description = &description
+	}
+}
+
+// GetDescription returns the task description or empty string if nil
 func (t *Task) GetDescription() string {
 	if t.Description == nil {
 		return ""
@@ -226,52 +264,60 @@ func (t *Task) GetDescription() string {
 	return *t.Description
 }
 
-// HasDescription returns true if the task has a description
-func (t *Task) HasDescription() bool {
-	return t.Description != nil && *t.Description != ""
-}
-
-// DaysUntilDue returns the number of days until the due date
-// Returns 0 if no due date is set or if past due
-func (t *Task) DaysUntilDue() int {
-	if t.DueDate == nil {
-		return 0
+// UpdateStatus updates the task status with validation
+func (t *Task) UpdateStatus(status TaskStatus) error {
+	if !status.IsValid() {
+		return fmt.Errorf("invalid task status: %s", status)
 	}
 	
-	days := int(time.Until(*t.DueDate).Hours() / 24)
-	if days < 0 {
-		return 0
-	}
-	return days
-}
-
-// Validate performs comprehensive validation on the task
-func (t *Task) Validate() error {
-	if err := validateTitle(t.Title); err != nil {
-		return err
+	// If marking as completed, set completion timestamp
+	if status == TaskStatusCompleted && t.Status != TaskStatusCompleted {
+		now := time.Now()
+		t.CompletedAt = &now
 	}
 	
-	if !t.Status.IsValid() {
-		return errors.New("invalid task status")
+	// If changing from completed to another status, clear completion timestamp
+	if t.Status == TaskStatusCompleted && status != TaskStatusCompleted {
+		t.CompletedAt = nil
 	}
 	
-	if !t.Priority.IsValid() {
-		return errors.New("invalid task priority")
-	}
-	
-	if t.UserID == uuid.Nil {
-		return errors.New("user_id is required")
-	}
-	
-	// Validate that completed tasks have completed_at timestamp
-	if t.Status == TaskStatusCompleted && t.CompletedAt == nil {
-		return errors.New("completed tasks must have completed_at timestamp")
-	}
-	
-	// Validate that non-completed tasks don't have completed_at timestamp
-	if t.Status != TaskStatusCompleted && t.CompletedAt != nil {
-		return errors.New("non-completed tasks cannot have completed_at timestamp")
-	}
-	
+	t.Status = status
 	return nil
+}
+
+// UpdatePriority updates the task priority with validation
+func (t *Task) UpdatePriority(priority TaskPriority) error {
+	if !priority.IsValid() {
+		return fmt.Errorf("invalid task priority: %s", priority)
+	}
+	
+	t.Priority = priority
+	return nil
+}
+
+// Custom validator functions
+func validateTaskStatus(fl validator.FieldLevel) bool {
+	status := TaskStatus(fl.Field().String())
+	return status.IsValid()
+}
+
+func validateTaskPriority(fl validator.FieldLevel) bool {
+	priority := TaskPriority(fl.Field().String())
+	return priority.IsValid()
+}
+
+// User represents a minimal user model for the foreign key relationship
+// This should be defined in a separate user package in a real application
+type User struct {
+	ID        uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
+	Email     string         `gorm:"uniqueIndex" json:"email"`
+	Name      string         `json:"name"`
+	CreatedAt time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// TableName specifies the table name for the User model
+func (User) TableName() string {
+	return "users"
 }
