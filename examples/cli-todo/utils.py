@@ -1,313 +1,274 @@
 """
-Utility functions for parsing and display operations.
+Utility functions for parsing command-line arguments and formatting display output.
 
-This module provides comprehensive utilities for command-line argument parsing,
-data formatting, and display operations with ANSI color support and proper
-error handling.
+This module provides a collection of utility functions for:
+- Parsing command-line arguments and extracting flags, values, and IDs
+- Formatting data into aligned ASCII tables
+- Converting datetime objects to human-readable relative time strings
+- Text truncation and display formatting with optional ANSI color support
+
+All functions are designed to be stateless and handle edge cases gracefully.
 """
 
+import datetime
+import os
 import sys
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Dict, Any, Union
 
 
-# ANSI Color Codes
+# ANSI color codes with fallback support
 class Colors:
-    """ANSI color codes for terminal output."""
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    END = '\033[0m'
-
-
-def _supports_color() -> bool:
-    """
-    Check if the terminal supports ANSI color codes.
+    """ANSI color codes with automatic terminal support detection."""
     
-    Returns:
-        bool: True if colors are supported, False otherwise.
-    """
-    return (
-        hasattr(sys.stdout, 'isatty') and 
-        sys.stdout.isatty() and 
-        sys.platform != 'win32'
-    )
-
-
-def _colorize(text: str, color: str) -> str:
-    """
-    Apply color to text if terminal supports it.
+    def __init__(self):
+        self._colors_enabled = self._detect_color_support()
     
-    Args:
-        text: The text to colorize.
-        color: The ANSI color code.
-        
-    Returns:
-        str: Colorized text or plain text if colors not supported.
-    """
-    if _supports_color():
-        return f"{color}{text}{Colors.END}"
-    return text
+    def _detect_color_support(self) -> bool:
+        """Detect if the terminal supports ANSI colors."""
+        if os.getenv('NO_COLOR'):
+            return False
+        if os.getenv('FORCE_COLOR'):
+            return True
+        return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+    
+    @property
+    def GREEN(self) -> str:
+        return '\033[92m' if self._colors_enabled else ''
+    
+    @property
+    def RED(self) -> str:
+        return '\033[91m' if self._colors_enabled else ''
+    
+    @property
+    def RESET(self) -> str:
+        return '\033[0m' if self._colors_enabled else ''
 
 
-# Argument Parsing Functions
+# Global color instance
+_colors = Colors()
 
-def parse_args(args: List[str]) -> Dict[str, Any]:
+
+def parse_args(args: Union[List[str], None]) -> Tuple[Optional[str], Optional[str], List[str]]:
     """
     Extract command, text, and flags from argument list.
     
     Args:
-        args: List of command-line arguments.
+        args: List of command-line arguments or None
         
     Returns:
-        Dict containing 'command', 'text', and 'flags' keys.
+        Tuple of (command, text, flags) where:
+        - command: First non-flag argument or None
+        - text: Remaining non-flag arguments joined as string or None
+        - flags: List of all flag arguments (starting with -)
         
-    Raises:
-        TypeError: If args is not a list.
-        
-    Example:
+    Examples:
         >>> parse_args(['add', 'Buy milk', '--priority', 'high'])
-        {'command': 'add', 'text': 'Buy milk', 'flags': ['--priority', 'high']}
+        ('add', 'Buy milk --priority high', ['--priority', 'high'])
+        >>> parse_args(None)
+        (None, None, [])
     """
-    if not isinstance(args, list):
-        raise TypeError("Arguments must be provided as a list")
+    if not args or not isinstance(args, list):
+        return None, None, []
     
     if not args:
-        return {'command': None, 'text': '', 'flags': []}
+        return None, None, []
     
-    # First argument is typically the command
-    command = args[0] if args else None
+    command = None
+    text_parts = []
+    flags = []
     
-    # Find where flags start (arguments beginning with '-')
-    flag_start = None
-    for i, arg in enumerate(args[1:], 1):
+    for i, arg in enumerate(args):
+        if not isinstance(arg, str):
+            continue
+            
         if arg.startswith('-'):
-            flag_start = i
+            flags.extend(args[i:])
             break
+        elif command is None:
+            command = arg
+        else:
+            text_parts.append(arg)
     
-    # Extract text (everything between command and flags)
-    if flag_start is not None:
-        text_parts = args[1:flag_start]
-        flags = args[flag_start:]
+    # Reconstruct text including any flags that were part of the original text
+    if text_parts or flags:
+        remaining_args = text_parts + flags
+        text = ' '.join(remaining_args) if remaining_args else None
     else:
-        text_parts = args[1:]
-        flags = []
+        text = None
     
-    text = ' '.join(text_parts)
-    
-    return {
-        'command': command,
-        'text': text,
-        'flags': flags
-    }
+    return command, text, flags
 
 
-def get_flag(args: List[str], flag: str) -> bool:
+def get_flag(args: Union[List[str], None], flag: str) -> bool:
     """
     Check if a specific flag exists in arguments.
     
     Args:
-        args: List of arguments to search.
-        flag: Flag to search for (with or without dashes).
+        args: List of arguments to search
+        flag: Flag to search for (with or without leading dashes)
         
     Returns:
-        bool: True if flag exists, False otherwise.
+        True if flag is found, False otherwise
         
-    Raises:
-        TypeError: If args is not a list or flag is not a string.
-        
-    Example:
-        >>> get_flag(['--priority', 'high', '--done'], '--done')
+    Examples:
+        >>> get_flag(['--verbose', 'test'], '--verbose')
         True
+        >>> get_flag(['test'], '--verbose')
+        False
     """
-    if not isinstance(args, list):
-        raise TypeError("Arguments must be provided as a list")
-    if not isinstance(flag, str):
-        raise TypeError("Flag must be a string")
+    if not args or not isinstance(args, list) or not isinstance(flag, str):
+        return False
     
     # Normalize flag format
-    if not flag.startswith('-'):
-        flag = f"--{flag}"
+    normalized_flag = flag if flag.startswith('-') else f'--{flag}'
     
-    return flag in args
+    return any(isinstance(arg, str) and arg == normalized_flag for arg in args)
 
 
-def get_flag_value(args: List[str], flag: str) -> Optional[str]:
+def get_flag_value(args: Union[List[str], None], flag: str) -> Optional[str]:
     """
     Get the value that follows a specific flag.
     
     Args:
-        args: List of arguments to search.
-        flag: Flag to find the value for.
+        args: List of arguments to search
+        flag: Flag to search for (with or without leading dashes)
         
     Returns:
-        Optional[str]: The value following the flag, or None if not found.
+        Value following the flag, or None if flag not found or no value follows
         
-    Raises:
-        TypeError: If args is not a list or flag is not a string.
-        ValueError: If flag is found but has no value.
-        
-    Example:
-        >>> get_flag_value(['--priority', 'high'], '--priority')
+    Examples:
+        >>> get_flag_value(['--priority', 'high', 'test'], '--priority')
         'high'
+        >>> get_flag_value(['--verbose'], '--verbose')
+        None
     """
-    if not isinstance(args, list):
-        raise TypeError("Arguments must be provided as a list")
-    if not isinstance(flag, str):
-        raise TypeError("Flag must be a string")
+    if not args or not isinstance(args, list) or not isinstance(flag, str):
+        return None
     
     # Normalize flag format
-    if not flag.startswith('-'):
-        flag = f"--{flag}"
+    normalized_flag = flag if flag.startswith('-') else f'--{flag}'
     
-    try:
-        flag_index = args.index(flag)
-        if flag_index + 1 < len(args) and not args[flag_index + 1].startswith('-'):
-            return args[flag_index + 1]
-        else:
-            raise ValueError(f"Flag '{flag}' found but no value provided")
-    except ValueError as e:
-        if "is not in list" in str(e):
-            return None
-        raise
+    for i, arg in enumerate(args):
+        if isinstance(arg, str) and arg == normalized_flag:
+            # Check if there's a next argument and it's not a flag
+            if i + 1 < len(args) and isinstance(args[i + 1], str) and not args[i + 1].startswith('-'):
+                return args[i + 1]
+            break
+    
+    return None
 
 
-def parse_ids(args: List[str]) -> List[int]:
+def parse_ids(args: Union[List[str], None]) -> List[int]:
     """
-    Extract and validate numeric IDs from arguments.
+    Extract and return list of numeric IDs from arguments.
     
     Args:
-        args: List of arguments that may contain IDs.
+        args: List of arguments to parse
         
     Returns:
-        List[int]: List of valid integer IDs.
+        List of integer IDs found in arguments
         
-    Raises:
-        TypeError: If args is not a list.
-        ValueError: If any ID cannot be converted to integer.
-        
-    Example:
-        >>> parse_ids(['1', '2', '5'])
-        [1, 2, 5]
+    Examples:
+        >>> parse_ids(['1', '2', '3', 'not_a_number'])
+        [1, 2, 3]
+        >>> parse_ids(['delete', '5'])
+        [5]
     """
-    if not isinstance(args, list):
-        raise TypeError("Arguments must be provided as a list")
+    if not args or not isinstance(args, list):
+        return []
     
     ids = []
     for arg in args:
-        if isinstance(arg, str) and not arg.startswith('-'):
+        if isinstance(arg, str):
             try:
+                # Only accept positive integers
                 id_val = int(arg)
-                if id_val <= 0:
-                    raise ValueError(f"ID must be a positive integer, got: {id_val}")
-                ids.append(id_val)
-            except ValueError as e:
-                if "invalid literal" in str(e):
-                    continue  # Skip non-numeric arguments
-                raise
+                if id_val > 0:
+                    ids.append(id_val)
+            except ValueError:
+                continue
+        elif isinstance(arg, int) and arg > 0:
+            ids.append(arg)
     
     return ids
 
 
-# Display Formatting Functions
-
 def format_table(headers: List[str], rows: List[List[str]]) -> str:
     """
-    Create aligned ASCII table with proper spacing.
+    Create aligned ASCII table with proper padding.
     
     Args:
-        headers: List of column headers.
-        rows: List of rows, where each row is a list of strings.
+        headers: List of column headers
+        rows: List of rows, where each row is a list of cell values
         
     Returns:
-        str: Formatted ASCII table.
+        Formatted ASCII table as string
         
-    Raises:
-        TypeError: If headers or rows are not lists.
-        ValueError: If rows have inconsistent column counts.
-        
-    Example:
-        >>> headers = ['ID', 'Status', 'Todo']
-        >>> rows = [['1', '[ ]', 'Buy milk'], ['2', '[✓]', 'Walk dog']]
+    Examples:
+        >>> headers = ['ID', 'Name']
+        >>> rows = [['1', 'John'], ['2', 'Jane']]
         >>> print(format_table(headers, rows))
-        ID | Status | Todo
-        ---+--------+---------
-        1  | [ ]    | Buy milk
-        2  | [✓]    | Walk dog
+        ID | Name
+        ---+-----
+        1  | John
+        2  | Jane
     """
-    if not isinstance(headers, list):
-        raise TypeError("Headers must be provided as a list")
-    if not isinstance(rows, list):
-        raise TypeError("Rows must be provided as a list")
-    
-    if not headers:
+    if not headers or not isinstance(headers, list):
         return ""
     
-    # Validate row consistency
-    expected_cols = len(headers)
-    for i, row in enumerate(rows):
-        if not isinstance(row, list):
-            raise TypeError(f"Row {i} must be a list")
-        if len(row) != expected_cols:
-            raise ValueError(f"Row {i} has {len(row)} columns, expected {expected_cols}")
+    # Convert all headers to strings
+    str_headers = [str(h) if h is not None else "" for h in headers]
+    
+    if not rows or not isinstance(rows, list):
+        rows = []
+    
+    # Convert all row data to strings and ensure consistent column count
+    str_rows = []
+    for row in rows:
+        if isinstance(row, list):
+            str_row = [str(cell) if cell is not None else "" for cell in row]
+            # Pad or truncate row to match header count
+            while len(str_row) < len(str_headers):
+                str_row.append("")
+            str_rows.append(str_row[:len(str_headers)])
+    
+    if not str_rows:
+        return " | ".join(str_headers)
     
     # Calculate column widths
     col_widths = []
-    for i, header in enumerate(headers):
-        max_width = len(str(header))
-        for row in rows:
-            # Remove ANSI codes for width calculation
-            clean_text = _strip_ansi_codes(str(row[i]))
-            max_width = max(max_width, len(clean_text))
+    for i in range(len(str_headers)):
+        max_width = len(str_headers[i])
+        for row in str_rows:
+            if i < len(row):
+                # Remove ANSI color codes for width calculation
+                clean_text = _strip_ansi_codes(row[i])
+                max_width = max(max_width, len(clean_text))
         col_widths.append(max_width)
     
-    # Build table
-    lines = []
-    
-    # Header row
+    # Format header
     header_parts = []
     separator_parts = []
-    for i, header in enumerate(headers):
-        header_parts.append(str(header).ljust(col_widths[i]))
-        separator_parts.append('-' * col_widths[i])
+    for i, header in enumerate(str_headers):
+        header_parts.append(header.ljust(col_widths[i]))
+        separator_parts.append("-" * col_widths[i])
     
-    lines.append(' | '.join(header_parts))
-    lines.append('-+-'.join(separator_parts))
+    result = [" | ".join(header_parts)]
+    result.append("-+-".join(separator_parts))
     
-    # Data rows
-    for row in rows:
+    # Format rows
+    for row in str_rows:
         row_parts = []
-        for i, cell in enumerate(row):
-            cell_str = str(cell)
+        for i in range(len(str_headers)):
+            cell = row[i] if i < len(row) else ""
             # Calculate padding considering ANSI codes
-            clean_cell = _strip_ansi_codes(cell_str)
+            clean_cell = _strip_ansi_codes(cell)
             padding = col_widths[i] - len(clean_cell)
-            padded_cell = cell_str + ' ' * padding
+            padded_cell = cell + " " * padding
             row_parts.append(padded_cell)
-        lines.append(' | '.join(row_parts))
+        result.append(" | ".join(row_parts))
     
-    return '\n'.join(lines)
-
-
-def _strip_ansi_codes(text: str) -> str:
-    """
-    Remove ANSI escape codes from text for length calculation.
-    
-    Args:
-        text: Text that may contain ANSI codes.
-        
-    Returns:
-        str: Text with ANSI codes removed.
-    """
-    import re
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi_escape.sub('', text)
+    return "\n".join(result)
 
 
 def format_todo(todo: Dict[str, Any]) -> str:
@@ -315,169 +276,155 @@ def format_todo(todo: Dict[str, Any]) -> str:
     Format a single todo item for display.
     
     Args:
-        todo: Dictionary containing todo information with keys:
-              'id', 'text', 'completed', 'priority', 'created_at'.
+        todo: Dictionary containing todo data with keys like 'id', 'completed', 
+              'priority', 'text', 'created_at'
               
     Returns:
-        str: Formatted todo string.
+        Formatted string representation of the todo item
         
-    Raises:
-        TypeError: If todo is not a dictionary.
-        KeyError: If required keys are missing.
-        
-    Example:
-        >>> todo = {'id': 1, 'text': 'Buy milk', 'completed': False, 
-        ...          'priority': 'high', 'created_at': datetime.now()}
+    Examples:
+        >>> todo = {'id': 1, 'completed': False, 'priority': 'high', 'text': 'Buy milk'}
         >>> format_todo(todo)
-        '1 | [ ] | high | Buy milk | 5 minutes ago'
+        '1 | [ ] | high | Buy milk'
     """
     if not isinstance(todo, dict):
-        raise TypeError("Todo must be a dictionary")
+        return ""
     
-    required_keys = ['id', 'text', 'completed', 'priority', 'created_at']
-    for key in required_keys:
-        if key not in todo:
-            raise KeyError(f"Missing required key: {key}")
+    # Extract fields with defaults
+    todo_id = str(todo.get('id', ''))
+    completed = todo.get('completed', False)
+    priority = str(todo.get('priority', ''))
+    text = str(todo.get('text', ''))
     
     # Format status
-    status = '[✓]' if todo['completed'] else '[ ]'
-    if todo['completed']:
-        status = _colorize(status, Colors.GREEN)
+    status = "[✓]" if completed else "[ ]"
     
-    # Format priority
-    priority = str(todo['priority'])
-    if priority.lower() == 'high':
-        priority = _colorize(priority, Colors.RED)
-    elif priority.lower() == 'medium':
-        priority = _colorize(priority, Colors.YELLOW)
+    # Apply colors
+    if completed:
+        status = f"{_colors.GREEN}{status}{_colors.RESET}"
+        text = f"{_colors.GREEN}{text}{_colors.RESET}"
+    elif priority.lower() == 'high':
+        priority = f"{_colors.RED}{priority}{_colors.RESET}"
+        text = f"{_colors.RED}{text}{_colors.RESET}"
     
-    # Format date
-    date_str = format_date(todo['created_at'])
-    
-    # Truncate text if too long
-    text = truncate(str(todo['text']), 50)
-    
-    return f"{todo['id']} | {status} | {priority} | {text} | {date_str}"
+    return f"{todo_id} | {status} | {priority} | {text}"
 
 
-def truncate(text: str, max_len: int) -> str:
+def truncate(text: Union[str, None], max_len: int) -> str:
     """
-    Truncate text with ellipsis when needed.
+    Truncate text and add ellipsis if needed.
     
     Args:
-        text: Text to potentially truncate.
-        max_len: Maximum allowed length.
+        text: Text to truncate
+        max_len: Maximum length including ellipsis
         
     Returns:
-        str: Truncated text with ellipsis if needed.
+        Truncated text with ellipsis if needed
         
-    Raises:
-        TypeError: If text is not a string or max_len is not an integer.
-        ValueError: If max_len is less than 4.
-        
-    Example:
-        >>> truncate("This is a very long text", 10)
+    Examples:
+        >>> truncate("This is a long text", 10)
         'This is...'
+        >>> truncate("Short", 10)
+        'Short'
     """
+    if text is None:
+        return ""
+    
     if not isinstance(text, str):
-        raise TypeError("Text must be a string")
-    if not isinstance(max_len, int):
-        raise TypeError("Max length must be an integer")
-    if max_len < 4:
-        raise ValueError("Max length must be at least 4 to accommodate ellipsis")
+        text = str(text)
+    
+    if not isinstance(max_len, int) or max_len < 0:
+        return text
+    
+    if max_len == 0:
+        return ""
     
     if len(text) <= max_len:
         return text
     
-    return text[:max_len - 3] + '...'
+    if max_len <= 3:
+        return "." * max_len
+    
+    return text[:max_len - 3] + "..."
 
 
-def format_date(date: Union[datetime, str, None]) -> str:
+def format_date(date: Union[datetime.datetime, None]) -> str:
     """
-    Convert datetime to relative time format.
+    Convert datetime to relative time string.
     
     Args:
-        date: Datetime object, ISO string, or None.
+        date: Datetime object to format
         
     Returns:
-        str: Formatted relative time string.
+        Human-readable relative time string
         
-    Raises:
-        TypeError: If date is not datetime, string, or None.
-        ValueError: If string date cannot be parsed.
-        
-    Example:
+    Examples:
         >>> from datetime import datetime, timedelta
-        >>> past_date = datetime.now() - timedelta(hours=2)
-        >>> format_date(past_date)
-        '2 hours ago'
+        >>> now = datetime.now()
+        >>> format_date(now - timedelta(minutes=30))
+        '30 minutes ago'
+        >>> format_date(now - timedelta(days=10))
+        '2024-01-15'  # Actual date format
     """
-    if date is None:
-        return 'Unknown'
+    if not isinstance(date, datetime.datetime):
+        return ""
     
-    # Handle string dates
-    if isinstance(date, str):
-        try:
-            # Try parsing ISO format
-            date = datetime.fromisoformat(date.replace('Z', '+00:00'))
-        except ValueError:
-            try:
-                # Try parsing common formats
-                date = datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
-            except ValueError:
-                raise ValueError(f"Unable to parse date string: {date}")
-    
-    if not isinstance(date, datetime):
-        raise TypeError("Date must be a datetime object, string, or None")
-    
-    now = datetime.now()
-    
-    # Handle future dates
-    if date > now:
-        return format_date_absolute(date)
-    
-    diff = now - date
-    
-    # Less than 1 hour
-    if diff < timedelta(hours=1):
-        minutes = max(1, int(diff.total_seconds() / 60))
-        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-    
-    # Less than 24 hours
-    elif diff < timedelta(days=1):
-        hours = int(diff.total_seconds() / 3600)
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
-    
-    # Less than 7 days
-    elif diff < timedelta(days=7):
-        days = diff.days
-        return f"{days} day{'s' if days != 1 else ''} ago"
-    
-    # Older than 7 days
-    else:
-        return format_date_absolute(date)
+    try:
+        now = datetime.datetime.now()
+        
+        # Handle timezone-naive datetime objects
+        if date.tzinfo is not None and now.tzinfo is None:
+            # If input has timezone but now doesn't, make now timezone-aware
+            now = now.replace(tzinfo=date.tzinfo)
+        elif date.tzinfo is None and now.tzinfo is not None:
+            # If now has timezone but input doesn't, make input timezone-aware
+            date = date.replace(tzinfo=now.tzinfo)
+        
+        # Calculate time difference
+        if date > now:
+            # Future date, just return the date
+            return date.strftime("%Y-%m-%d")
+        
+        diff = now - date
+        total_seconds = diff.total_seconds()
+        
+        # Avoid division by zero
+        if total_seconds < 0:
+            return date.strftime("%Y-%m-%d")
+        
+        # Less than 1 hour
+        if total_seconds < 3600:
+            minutes = max(1, int(total_seconds // 60))
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        
+        # Less than 24 hours
+        elif total_seconds < 86400:
+            hours = int(total_seconds // 3600)
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        
+        # Less than 7 days
+        elif diff.days < 7:
+            days = diff.days
+            return f"{days} day{'s' if days != 1 else ''} ago"
+        
+        # Older than 7 days
+        else:
+            return date.strftime("%Y-%m-%d")
+            
+    except (AttributeError, ValueError, OverflowError):
+        return ""
 
 
-def format_date_absolute(date: datetime) -> str:
+def _strip_ansi_codes(text: str) -> str:
     """
-    Format datetime in YYYY-MM-DD format.
+    Remove ANSI color codes from text for accurate length calculation.
     
     Args:
-        date: Datetime object to format.
+        text: Text potentially containing ANSI codes
         
     Returns:
-        str: Date in YYYY-MM-DD format.
-        
-    Raises:
-        TypeError: If date is not a datetime object.
+        Text with ANSI codes removed
     """
-    if not isinstance(date, datetime):
-        raise TypeError("Date must be a datetime object")
-    
-    return date.strftime('%Y-%m-%d')
-
-
-# Utility helper functions
-
-def validate_todo_dict(todo: Dict[str, Any]) -> bool:
-    """
+    import re
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
