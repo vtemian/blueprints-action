@@ -1,82 +1,28 @@
 /**
  * User Management and Authentication API Module
- * Complete production-ready implementation with Express.js
- * 
- * @module api.users
- * @requires express
- * @requires bcrypt
- * @requires jsonwebtoken
- * @requires express-validator
- * @requires mongoose
+ * Production-ready Express.js implementation with comprehensive security
  */
 
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { body, validationResult } = require('express-validator');
-const mongoose = require('mongoose');
+const validator = require('validator');
 const rateLimit = require('express-rate-limit');
 
-// Environment configuration
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-const BCRYPT_SALT_ROUNDS = 12;
+// Database model imports (replace with your actual model imports)
+const User = require('../models/User'); // Mongoose/Sequelize User model
 
-/**
- * User Schema Definition
- */
-const userSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-    trim: true,
-    minlength: 2,
-    maxlength: 100
-  },
-  email: {
-    type: String,
-    required: true,
-    unique: true,
-    lowercase: true,
-    trim: true,
-    index: true
-  },
-  password: {
-    type: String,
-    required: true,
-    minlength: 8
-  },
-  lastLogin: {
-    type: Date,
-    default: null
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now
-  }
-});
-
-// Pre-save middleware to update updatedAt
-userSchema.pre('save', function(next) {
-  this.updatedAt = new Date();
-  next();
-});
-
-const User = mongoose.model('User', userSchema);
-
-// Create Express router
 const router = express.Router();
 
-/**
- * Rate limiting configuration
- */
+// Environment variables with defaults
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const BCRYPT_SALT_ROUNDS = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12;
+
+// Rate limiting middleware
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // limit each IP to 5 requests per windowMs
+  max: 5, // Limit each IP to 5 requests per windowMs
   message: {
     success: false,
     message: 'Too many authentication attempts, please try again later'
@@ -87,157 +33,90 @@ const authLimiter = rateLimit({
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 100, // Limit each IP to 100 requests per windowMs
   message: {
     success: false,
     message: 'Too many requests, please try again later'
   }
 });
 
-/**
- * Validation schemas
- */
-const registerValidation = [
-  body('email')
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address'),
-  body('password')
-    .isLength({ min: 8 })
-    .withMessage('Password must be at least 8 characters long')
-    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-    .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
-  body('name')
-    .trim()
-    .isLength({ min: 2, max: 100 })
-    .withMessage('Name must be between 2 and 100 characters')
-    .matches(/^[a-zA-Z\s]+$/)
-    .withMessage('Name can only contain letters and spaces')
-];
+// Apply rate limiting to auth routes
+router.use('/login', authLimiter);
+router.use('/register', authLimiter);
+router.use('/change-password', authLimiter);
 
-const loginValidation = [
-  body('email')
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address'),
-  body('password')
-    .notEmpty()
-    .withMessage('Password is required')
-];
-
-const updateProfileValidation = [
-  body('name')
-    .optional()
-    .trim()
-    .isLength({ min: 2, max: 100 })
-    .withMessage('Name must be between 2 and 100 characters')
-    .matches(/^[a-zA-Z\s]+$/)
-    .withMessage('Name can only contain letters and spaces'),
-  body('email')
-    .optional()
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address'),
-  body('password')
-    .if(body('email').exists())
-    .notEmpty()
-    .withMessage('Password confirmation is required when changing email')
-];
-
-const changePasswordValidation = [
-  body('current_password')
-    .notEmpty()
-    .withMessage('Current password is required'),
-  body('new_password')
-    .isLength({ min: 8 })
-    .withMessage('New password must be at least 8 characters long')
-    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-    .withMessage('New password must contain at least one uppercase letter, one lowercase letter, and one number')
-];
+// Apply general rate limiting to all routes
+router.use(generalLimiter);
 
 /**
  * Utility Functions
  */
 
-/**
- * Generate JWT token for user
- * @param {Object} user - User object
- * @returns {string} JWT token
- */
-const generateToken = (user) => {
-  return jwt.sign(
-    { 
-      userId: user._id, 
-      email: user.email 
-    },
-    JWT_SECRET,
-    { 
-      expiresIn: JWT_EXPIRES_IN,
-      issuer: 'user-api',
-      audience: 'user-client'
-    }
-  );
+// Standardized API response format
+const sendResponse = (res, statusCode, success, message, data = null) => {
+  return res.status(statusCode).json({
+    success,
+    message,
+    data,
+    timestamp: new Date().toISOString()
+  });
 };
 
-/**
- * Hash password using bcrypt
- * @param {string} password - Plain text password
- * @returns {Promise<string>} Hashed password
- */
-const hashPassword = async (password) => {
-  return await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
-};
-
-/**
- * Compare password with hash
- * @param {string} password - Plain text password
- * @param {string} hash - Hashed password
- * @returns {Promise<boolean>} Comparison result
- */
-const comparePassword = async (password, hash) => {
-  return await bcrypt.compare(password, hash);
-};
-
-/**
- * Format user object for response (exclude sensitive data)
- * @param {Object} user - User document
- * @returns {Object} Sanitized user object
- */
-const formatUserResponse = (user) => {
-  const { password, __v, ...userResponse } = user.toObject();
-  return userResponse;
-};
-
-/**
- * Handle validation errors
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @returns {boolean} True if errors exist
- */
-const handleValidationErrors = (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      success: false,
-      message: 'Validation failed',
-      errors: errors.array().map(error => ({
-        field: error.path,
-        message: error.msg
-      }))
-    });
+// Password validation
+const validatePassword = (password) => {
+  if (!password || password.length < 8) {
+    return 'Password must be at least 8 characters long';
   }
-  return false;
+  if (!/(?=.*[a-zA-Z])(?=.*\d)/.test(password)) {
+    return 'Password must contain at least one letter and one number';
+  }
+  return null;
+};
+
+// Input sanitization
+const sanitizeInput = (input) => {
+  if (typeof input !== 'string') return input;
+  return input.trim().replace(/[<>]/g, '');
+};
+
+// Hash password
+const hashPassword = async (password) => {
+  try {
+    return await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+  } catch (error) {
+    throw new Error('Error hashing password');
+  }
+};
+
+// Compare password
+const comparePassword = async (password, hashedPassword) => {
+  try {
+    return await bcrypt.compare(password, hashedPassword);
+  } catch (error) {
+    throw new Error('Error comparing passwords');
+  }
+};
+
+// Generate JWT token
+const generateToken = (userId) => {
+  try {
+    return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+  } catch (error) {
+    throw new Error('Error generating token');
+  }
+};
+
+// Verify JWT token
+const verifyToken = (token) => {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (error) {
+    throw new Error('Invalid or expired token');
+  }
 };
 
 /**
  * Authentication Middleware
- */
-
-/**
- * JWT Authentication middleware
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next function
  */
 const authenticateToken = async (req, res, next) => {
   try {
@@ -245,111 +124,103 @@ const authenticateToken = async (req, res, next) => {
     const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
     if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: 'Access token is required'
-      });
+      return sendResponse(res, 401, false, 'Access token required');
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET, {
-      issuer: 'user-api',
-      audience: 'user-client'
-    });
-
+    const decoded = verifyToken(token);
+    
+    // Fetch user from database
     const user = await User.findById(decoded.userId).select('-password');
+    
     if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token - user not found'
-      });
+      return sendResponse(res, 401, false, 'User not found');
     }
 
     req.user = user;
     next();
   } catch (error) {
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token'
-      });
-    }
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Token has expired'
-      });
-    }
-    
     console.error('Authentication error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Authentication failed'
-    });
+    return sendResponse(res, 401, false, 'Invalid or expired token');
   }
 };
 
 /**
- * Route Handlers
+ * ENDPOINT IMPLEMENTATIONS
  */
 
 /**
  * POST /api/users/register
  * Register a new user
  */
-router.post('/register', authLimiter, registerValidation, async (req, res) => {
+router.post('/register', async (req, res) => {
   try {
-    // Handle validation errors
-    if (handleValidationErrors(req, res)) return;
+    let { email, password, name } = req.body;
 
-    const { email, password, name } = req.body;
+    // Input validation
+    if (!email || !password || !name) {
+      return sendResponse(res, 400, false, 'Email, password, and name are required');
+    }
+
+    // Sanitize inputs
+    email = sanitizeInput(email).toLowerCase();
+    name = sanitizeInput(name);
+
+    // Validate email format
+    if (!validator.isEmail(email)) {
+      return sendResponse(res, 400, false, 'Please provide a valid email address');
+    }
+
+    // Validate password
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      return sendResponse(res, 400, false, passwordError);
+    }
+
+    // Validate name
+    if (!name || name.length < 1) {
+      return sendResponse(res, 400, false, 'Name cannot be empty');
+    }
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message: 'An account with this email already exists'
-      });
+      return sendResponse(res, 409, false, 'User with this email already exists');
     }
 
     // Hash password
     const hashedPassword = await hashPassword(password);
 
-    // Create new user
+    // Create user
     const user = new User({
-      name,
       email,
-      password: hashedPassword
+      password: hashedPassword,
+      name,
+      createdAt: new Date(),
+      lastLogin: new Date()
     });
 
     await user.save();
 
     // Generate token
-    const token = generateToken(user);
+    const token = generateToken(user._id);
 
-    // Return success response
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully',
-      data: formatUserResponse(user),
+    // Return user info (excluding password)
+    const userResponse = {
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin
+    };
+
+    return sendResponse(res, 201, true, 'User registered successfully', {
+      user: userResponse,
       token
     });
 
   } catch (error) {
     console.error('Registration error:', error);
-    
-    // Handle duplicate key error (additional safety net)
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: 'An account with this email already exists'
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: 'Registration failed. Please try again.'
-    });
+    return sendResponse(res, 500, false, 'Internal server error during registration');
   }
 });
 
@@ -357,26 +228,28 @@ router.post('/register', authLimiter, registerValidation, async (req, res) => {
  * POST /api/users/login
  * Authenticate user and return token
  */
-router.post('/login', authLimiter, loginValidation, async (req, res) => {
+router.post('/login', async (req, res) => {
   try {
-    // Handle validation errors
-    if (handleValidationErrors(req, res)) return;
+    let { email, password } = req.body;
 
-    const { email, password } = req.body;
+    // Input validation
+    if (!email || !password) {
+      return sendResponse(res, 400, false, 'Email and password are required');
+    }
 
-    // Find user by email
+    // Sanitize email
+    email = sanitizeInput(email).toLowerCase();
+
+    // Find user
     const user = await User.findOne({ email });
-    
-    // Use consistent timing to prevent timing attacks
-    const isValidPassword = user ? 
-      await comparePassword(password, user.password) : 
-      await bcrypt.compare(password, '$2b$12$dummy.hash.to.prevent.timing.attacks');
+    if (!user) {
+      return sendResponse(res, 401, false, 'Invalid email or password');
+    }
 
-    if (!user || !isValidPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
-      });
+    // Verify password
+    const isPasswordValid = await comparePassword(password, user.password);
+    if (!isPasswordValid) {
+      return sendResponse(res, 401, false, 'Invalid email or password');
     }
 
     // Update last login
@@ -384,158 +257,235 @@ router.post('/login', authLimiter, loginValidation, async (req, res) => {
     await user.save();
 
     // Generate token
-    const token = generateToken(user);
+    const token = generateToken(user._id);
 
-    // Return success response
-    res.json({
-      success: true,
-      message: 'Login successful',
-      data: formatUserResponse(user),
+    // Return user info (excluding password)
+    const userResponse = {
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin
+    };
+
+    return sendResponse(res, 200, true, 'Login successful', {
+      user: userResponse,
       token
     });
 
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Login failed. Please try again.'
-    });
+    return sendResponse(res, 500, false, 'Internal server error during login');
   }
 });
 
 /**
  * GET /api/users/me
- * Get current user profile
+ * Get authenticated user's profile
  */
-router.get('/me', generalLimiter, authenticateToken, async (req, res) => {
+router.get('/me', authenticateToken, async (req, res) => {
   try {
-    res.json({
-      success: true,
-      data: formatUserResponse(req.user)
+    const userResponse = {
+      id: req.user._id,
+      email: req.user.email,
+      name: req.user.name,
+      createdAt: req.user.createdAt,
+      lastLogin: req.user.lastLogin
+    };
+
+    return sendResponse(res, 200, true, 'Profile retrieved successfully', {
+      user: userResponse
     });
+
   } catch (error) {
-    console.error('Get profile error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve user profile'
-    });
+    console.error('Profile retrieval error:', error);
+    return sendResponse(res, 500, false, 'Internal server error');
   }
 });
 
 /**
  * PUT /api/users/me
- * Update current user profile
+ * Update authenticated user's profile
  */
-router.put('/me', generalLimiter, authenticateToken, updateProfileValidation, async (req, res) => {
+router.put('/me', authenticateToken, async (req, res) => {
   try {
-    // Handle validation errors
-    if (handleValidationErrors(req, res)) return;
+    let { name, email, password } = req.body;
+    const userId = req.user._id;
 
-    const { name, email, password } = req.body;
-    const user = req.user;
-
-    // If email is being changed, verify password
-    if (email && email !== user.email) {
-      if (!password) {
-        return res.status(400).json({
-          success: false,
-          message: 'Password confirmation is required when changing email'
-        });
-      }
-
-      const currentUser = await User.findById(user._id);
-      const isValidPassword = await comparePassword(password, currentUser.password);
-      
-      if (!isValidPassword) {
-        return res.status(401).json({
-          success: false,
-          message: 'Current password is incorrect'
-        });
-      }
-
-      // Check if new email is already taken
-      const existingUser = await User.findOne({ email, _id: { $ne: user._id } });
-      if (existingUser) {
-        return res.status(409).json({
-          success: false,
-          message: 'This email is already associated with another account'
-        });
-      }
+    // At least one field must be provided
+    if (!name && !email) {
+      return sendResponse(res, 400, false, 'At least one field (name or email) must be provided');
     }
 
-    // Update user fields
     const updateFields = {};
-    if (name) updateFields.name = name;
-    if (email) updateFields.email = email;
 
+    // Validate and update name
+    if (name !== undefined) {
+      name = sanitizeInput(name);
+      if (!name || name.length < 1) {
+        return sendResponse(res, 400, false, 'Name cannot be empty');
+      }
+      updateFields.name = name;
+    }
+
+    // Validate and update email
+    if (email !== undefined) {
+      email = sanitizeInput(email).toLowerCase();
+      
+      // Validate email format
+      if (!validator.isEmail(email)) {
+        return sendResponse(res, 400, false, 'Please provide a valid email address');
+      }
+
+      // For email changes, require password confirmation
+      if (email !== req.user.email) {
+        if (!password) {
+          return sendResponse(res, 400, false, 'Password confirmation required for email changes');
+        }
+
+        // Verify current password
+        const user = await User.findById(userId);
+        const isPasswordValid = await comparePassword(password, user.password);
+        if (!isPasswordValid) {
+          return sendResponse(res, 401, false, 'Invalid password confirmation');
+        }
+
+        // Check email uniqueness
+        const existingUser = await User.findOne({ email, _id: { $ne: userId } });
+        if (existingUser) {
+          return sendResponse(res, 409, false, 'Email already in use by another account');
+        }
+      }
+
+      updateFields.email = email;
+    }
+
+    // Update user
     const updatedUser = await User.findByIdAndUpdate(
-      user._id,
+      userId,
       updateFields,
       { new: true, runValidators: true }
-    );
+    ).select('-password');
 
-    res.json({
-      success: true,
-      message: 'Profile updated successfully',
-      data: formatUserResponse(updatedUser)
+    if (!updatedUser) {
+      return sendResponse(res, 404, false, 'User not found');
+    }
+
+    const userResponse = {
+      id: updatedUser._id,
+      email: updatedUser.email,
+      name: updatedUser.name,
+      createdAt: updatedUser.createdAt,
+      lastLogin: updatedUser.lastLogin
+    };
+
+    return sendResponse(res, 200, true, 'Profile updated successfully', {
+      user: userResponse
     });
 
   } catch (error) {
-    console.error('Update profile error:', error);
-    
-    // Handle duplicate key error
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: 'This email is already associated with another account'
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update profile. Please try again.'
-    });
+    console.error('Profile update error:', error);
+    return sendResponse(res, 500, false, 'Internal server error during profile update');
   }
 });
 
 /**
  * POST /api/users/change-password
- * Change user password
+ * Change user's password
  */
-router.post('/change-password', generalLimiter, authenticateToken, changePasswordValidation, async (req, res) => {
+router.post('/change-password', authenticateToken, async (req, res) => {
   try {
-    // Handle validation errors
-    if (handleValidationErrors(req, res)) return;
-
     const { current_password, new_password } = req.body;
     const userId = req.user._id;
+
+    // Input validation
+    if (!current_password || !new_password) {
+      return sendResponse(res, 400, false, 'Current password and new password are required');
+    }
+
+    // Validate new password
+    const passwordError = validatePassword(new_password);
+    if (passwordError) {
+      return sendResponse(res, 400, false, passwordError);
+    }
+
+    // Check if new password is different from current
+    if (current_password === new_password) {
+      return sendResponse(res, 400, false, 'New password must be different from current password');
+    }
 
     // Get user with password
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      return sendResponse(res, 404, false, 'User not found');
     }
 
     // Verify current password
-    const isValidPassword = await comparePassword(current_password, user.password);
-    if (!isValidPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
+    const isCurrentPasswordValid = await comparePassword(current_password, user.password);
+    if (!isCurrentPasswordValid) {
+      return sendResponse(res, 401, false, 'Current password is incorrect');
     }
 
-    // Check if new password is different from current
-    const isSamePassword = await comparePassword(new_password, user.password);
-    if (isSamePassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'New password must be different from current password'
-      });
-    }
+    // Hash new password
+    const hashedNewPassword = await hashPassword(new_password);
 
-    // Hash new password and update
-    const hashedNewPassword = await hashPassword(new_
+    // Update password
+    await User.findByIdAndUpdate(userId, { password: hashedNewPassword });
+
+    return sendResponse(res, 200, true, 'Password changed successfully');
+
+  } catch (error) {
+    console.error('Password change error:', error);
+    return sendResponse(res, 500, false, 'Internal server error during password change');
+  }
+});
+
+/**
+ * Error handling middleware for this router
+ */
+router.use((error, req, res, next) => {
+  console.error('Unhandled error in users API:', error);
+  return sendResponse(res, 500, false, 'Internal server error');
+});
+
+module.exports = router;
+
+/**
+ * USAGE INSTRUCTIONS:
+ * 
+ * 1. Install required dependencies:
+ *    npm install express bcrypt jsonwebtoken validator express-rate-limit
+ * 
+ * 2. Set environment variables:
+ *    JWT_SECRET=your-super-secret-jwt-key-here
+ *    JWT_EXPIRES_IN=7d
+ *    BCRYPT_SALT_ROUNDS=12
+ * 
+ * 3. Import and use in your main app:
+ *    const userRoutes = require('./routes/users');
+ *    app.use('/api/users', userRoutes);
+ * 
+ * 4. Ensure your User model has the following fields:
+ *    - email (String, required, unique)
+ *    - password (String, required)
+ *    - name (String, required)
+ *    - createdAt (Date)
+ *    - lastLogin (Date)
+ * 
+ * 5. For production deployment:
+ *    - Use HTTPS only
+ *    - Set secure JWT_SECRET (32+ characters)
+ *    - Configure proper CORS settings
+ *    - Set up proper logging
+ *    - Configure database connection pooling
+ *    - Set up monitoring and health checks
+ * 
+ * SECURITY CONSIDERATIONS:
+ * - All passwords are hashed with bcrypt (salt rounds: 12)
+ * - JWT tokens are used for authentication
+ * - Input validation and sanitization implemented
+ * - Rate limiting applied to prevent abuse
+ * - Proper HTTP status codes used
+ * - No sensitive data in responses
+ * - Password confirmation required for email changes
+ */

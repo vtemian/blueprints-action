@@ -1,456 +1,494 @@
 /**
- * FastAPI Task Management API Module
- * Provides CRUD operations for user tasks with authentication and authorization
+ * Task Management API Module
+ * FastAPI-style task management endpoints using Express.js
+ * 
+ * @module api/tasks
+ * @requires express
+ * @requires express-validator
+ * @requires ../middleware/auth
+ * @requires ../models/Task
+ * @requires ../utils/database
+ * @requires ../utils/logger
  */
 
-import { FastAPI, APIRouter, HTTPException, Depends, Query, Path, Body, status } from 'fastapi-js';
-import { Task, TaskCreate, TaskUpdate, TaskStatus, TaskPriority } from '@models/task';
-import { getCurrentUser, User } from '@core/auth';
-import { DatabaseSession, getDatabase } from '@core/database';
-import { Optional, List } from 'typing';
-import { DateTime } from 'datetime';
-import { v4 as uuidv4, validate as validateUUID } from 'uuid';
-import { Logger } from '@core/logging';
+import express from 'express';
+import { body, query, param, validationResult } from 'express-validator';
+import rateLimit from 'express-rate-limit';
+import { authenticateToken } from '../middleware/auth.js';
+import Task from '../models/Task.js';
+import { DatabaseError, NotFoundError, ForbiddenError } from '../utils/errors.js';
+import logger from '../utils/logger.js';
+import { sanitizeHtml } from '../utils/sanitizer.js';
 
-const logger = new Logger('api.tasks');
-const router = new APIRouter();
+const router = express.Router();
 
-// Request/Response Models
-interface TaskListQuery {
-  status?: TaskStatus;
-  priority?: TaskPriority;
-  due_before?: string; // ISO date string
-  due_after?: string;  // ISO date string
-  page?: number;
-  limit?: number;
-}
-
-interface TaskResponse {
-  id: string;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  priority: TaskPriority;
-  due_date?: string;
-  completed_at?: string;
-  created_at: string;
-  updated_at: string;
-  user_id: string;
-}
-
-interface TaskListResponse {
-  tasks: TaskResponse[];
-  total: number;
-  page: number;
-  limit: number;
-  total_pages: number;
-}
-
-interface ErrorResponse {
-  detail: string;
-  error_code?: string;
-  field_errors?: Record<string, string[]>;
-}
-
-interface TaskCreateRequest {
-  title: string;
-  description: string;
-  priority?: TaskPriority;
-  due_date?: string; // ISO date string
-}
-
-interface TaskUpdateRequest {
-  title?: string;
-  description?: string;
-  priority?: TaskPriority;
-  due_date?: string;
-  status?: TaskStatus;
-}
-
-// Utility Functions
-function validateDateString(dateStr: string): Date {
-  try {
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) {
-      throw new Error('Invalid date format');
-    }
-    return date;
-  } catch (error) {
-    throw new HTTPException(
-      status.HTTP_422_UNPROCESSABLE_ENTITY,
-      { detail: `Invalid date format: ${dateStr}. Expected ISO 8601 format.` }
-    );
+// Rate limiting middleware
+const taskRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    error: 'Too many requests',
+    message: 'Rate limit exceeded. Please try again later.'
   }
-}
-
-function validateTaskId(taskId: string): void {
-  if (!validateUUID(taskId)) {
-    throw new HTTPException(
-      status.HTTP_422_UNPROCESSABLE_ENTITY,
-      { detail: 'Invalid task ID format. Expected UUID.' }
-    );
-  }
-}
-
-function validatePagination(page?: number, limit?: number): { page: number; limit: number } {
-  const validatedPage = Math.max(1, page || 1);
-  const validatedLimit = Math.min(100, Math.max(1, limit || 20));
-  
-  return { page: validatedPage, limit: validatedLimit };
-}
-
-async function getTaskByIdAndUser(
-  taskId: string, 
-  userId: string, 
-  db: DatabaseSession
-): Promise<Task> {
-  try {
-    const task = await db.query(
-      'SELECT * FROM tasks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
-      [taskId, userId]
-    );
-    
-    if (!task || task.length === 0) {
-      throw new HTTPException(
-        status.HTTP_404_NOT_FOUND,
-        { detail: 'Task not found or access denied' }
-      );
-    }
-    
-    return task[0];
-  } catch (error) {
-    if (error instanceof HTTPException) {
-      throw error;
-    }
-    logger.error(`Database error fetching task ${taskId}:`, error);
-    throw new HTTPException(
-      status.HTTP_500_INTERNAL_SERVER_ERROR,
-      { detail: 'Internal server error' }
-    );
-  }
-}
-
-// Endpoints
+});
 
 /**
- * GET /api/tasks - List user's tasks with filtering and pagination
- * 
- * Example request: GET /api/tasks?status=pending&priority=high&page=1&limit=10
- * Example response: {
- *   "tasks": [...],
- *   "total": 25,
- *   "page": 1,
- *   "limit": 10,
- *   "total_pages": 3
- * }
+ * Standard error response formatter
+ * @param {string} message - Error message
+ * @param {string} [type='error'] - Error type
+ * @param {Object} [details=null] - Additional error details
+ * @returns {Object} Formatted error response
  */
-router.get('/api/tasks', {
-  response_model: TaskListResponse,
-  status_code: status.HTTP_200_OK
-})
-async function listTasks(
-  status: Optional<TaskStatus> = Query(null, description="Filter by task status"),
-  priority: Optional<TaskPriority> = Query(null, description="Filter by task priority"),
-  due_before: Optional<string> = Query(null, description="Filter tasks due before this date (ISO format)"),
-  due_after: Optional<string> = Query(null, description="Filter tasks due after this date (ISO format)"),
-  page: Optional<number> = Query(1, ge=1, description="Page number"),
-  limit: Optional<number> = Query(20, ge=1, le=100, description="Items per page (max 100)"),
-  current_user: User = Depends(getCurrentUser),
-  db: DatabaseSession = Depends(getDatabase)
-): Promise<TaskListResponse> {
-  
-  logger.info(`Listing tasks for user ${current_user.id}`);
-  
-  try {
-    // Validate pagination
-    const { page: validPage, limit: validLimit } = validatePagination(page, limit);
-    
-    // Validate date filters
-    let dueBefore: Date | null = null;
-    let dueAfter: Date | null = null;
-    
-    if (due_before) {
-      dueBefore = validateDateString(due_before);
-    }
-    
-    if (due_after) {
-      dueAfter = validateDateString(due_after);
-    }
-    
-    // Build query conditions
-    const conditions: string[] = ['user_id = $1', 'deleted_at IS NULL'];
-    const params: any[] = [current_user.id];
-    let paramIndex = 2;
-    
-    if (status) {
-      conditions.push(`status = $${paramIndex}`);
-      params.push(status);
-      paramIndex++;
-    }
-    
-    if (priority) {
-      conditions.push(`priority = $${paramIndex}`);
-      params.push(priority);
-      paramIndex++;
-    }
-    
-    if (dueBefore) {
-      conditions.push(`due_date < $${paramIndex}`);
-      params.push(dueBefore.toISOString());
-      paramIndex++;
-    }
-    
-    if (dueAfter) {
-      conditions.push(`due_date > $${paramIndex}`);
-      params.push(dueAfter.toISOString());
-      paramIndex++;
-    }
-    
-    const whereClause = conditions.join(' AND ');
-    
-    // Get total count
-    const countQuery = `SELECT COUNT(*) as total FROM tasks WHERE ${whereClause}`;
-    const countResult = await db.query(countQuery, params);
-    const total = parseInt(countResult[0].total);
-    
-    // Get paginated tasks
-    const offset = (validPage - 1) * validLimit;
-    const tasksQuery = `
-      SELECT * FROM tasks 
-      WHERE ${whereClause} 
-      ORDER BY created_at DESC 
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-    `;
-    
-    const tasks = await db.query(tasksQuery, [...params, validLimit, offset]);
-    
-    const totalPages = Math.ceil(total / validLimit);
-    
-    return {
-      tasks: tasks.map(task => ({
-        id: task.id,
-        title: task.title,
-        description: task.description,
-        status: task.status,
-        priority: task.priority,
-        due_date: task.due_date?.toISOString(),
-        completed_at: task.completed_at?.toISOString(),
-        created_at: task.created_at.toISOString(),
-        updated_at: task.updated_at.toISOString(),
-        user_id: task.user_id
-      })),
-      total,
-      page: validPage,
-      limit: validLimit,
-      total_pages: totalPages
-    };
-    
-  } catch (error) {
-    if (error instanceof HTTPException) {
-      throw error;
-    }
-    logger.error('Error listing tasks:', error);
-    throw new HTTPException(
-      status.HTTP_500_INTERNAL_SERVER_ERROR,
-      { detail: 'Internal server error' }
+const formatErrorResponse = (message, type = 'error', details = null) => ({
+  success: false,
+  error: {
+    type,
+    message,
+    ...(details && { details })
+  }
+});
+
+/**
+ * Standard success response formatter
+ * @param {*} data - Response data
+ * @param {Object} [meta=null] - Response metadata
+ * @returns {Object} Formatted success response
+ */
+const formatSuccessResponse = (data, meta = null) => ({
+  success: true,
+  data,
+  ...(meta && { meta })
+});
+
+/**
+ * Validation error handler middleware
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ */
+const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json(
+      formatErrorResponse(
+        'Validation failed',
+        'validation_error',
+        errors.array()
+      )
     );
   }
-}
+  next();
+};
 
 /**
- * GET /api/tasks/{task_id} - Get single task by ID
- * 
- * Example request: GET /api/tasks/123e4567-e89b-12d3-a456-426614174000
- * Example response: {
- *   "id": "123e4567-e89b-12d3-a456-426614174000",
- *   "title": "Complete project",
- *   "description": "Finish the task management API",
- *   "status": "pending",
- *   "priority": "high",
- *   ...
- * }
+ * Task ownership verification middleware
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
  */
-router.get('/api/tasks/{task_id}', {
-  response_model: TaskResponse,
-  status_code: status.HTTP_200_OK
-})
-async function getTask(
-  task_id: string = Path(..., description="Task ID"),
-  current_user: User = Depends(getCurrentUser),
-  db: DatabaseSession = Depends(getDatabase)
-): Promise<TaskResponse> {
-  
-  logger.info(`Getting task ${task_id} for user ${current_user.id}`);
-  
-  validateTaskId(task_id);
-  
-  const task = await getTaskByIdAndUser(task_id, current_user.id, db);
-  
-  return {
-    id: task.id,
-    title: task.title,
-    description: task.description,
-    status: task.status,
-    priority: task.priority,
-    due_date: task.due_date?.toISOString(),
-    completed_at: task.completed_at?.toISOString(),
-    created_at: task.created_at.toISOString(),
-    updated_at: task.updated_at.toISOString(),
-    user_id: task.user_id
-  };
-}
-
-/**
- * POST /api/tasks - Create new task
- * 
- * Example request: {
- *   "title": "New task",
- *   "description": "Task description",
- *   "priority": "medium",
- *   "due_date": "2024-12-31T23:59:59Z"
- * }
- */
-router.post('/api/tasks', {
-  response_model: TaskResponse,
-  status_code: status.HTTP_201_CREATED
-})
-async function createTask(
-  task_data: TaskCreateRequest = Body(...),
-  current_user: User = Depends(getCurrentUser),
-  db: DatabaseSession = Depends(getDatabase)
-): Promise<TaskResponse> {
-  
-  logger.info(`Creating task for user ${current_user.id}`);
-  
+const verifyTaskOwnership = async (req, res, next) => {
   try {
-    // Validate required fields
-    if (!task_data.title?.trim()) {
-      throw new HTTPException(
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        { 
-          detail: 'Validation error',
-          field_errors: { title: ['Title is required and cannot be empty'] }
-        }
+    const { taskId } = req.params;
+    const userId = req.user.id;
+
+    const task = await Task.findById(taskId);
+    
+    if (!task) {
+      return res.status(404).json(
+        formatErrorResponse('Task not found', 'not_found')
       );
     }
-    
-    if (!task_data.description?.trim()) {
-      throw new HTTPException(
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        { 
-          detail: 'Validation error',
-          field_errors: { description: ['Description is required and cannot be empty'] }
-        }
+
+    if (task.userId !== userId) {
+      return res.status(403).json(
+        formatErrorResponse('Access denied', 'forbidden')
       );
     }
-    
-    // Validate title length
-    if (task_data.title.length > 200) {
-      throw new HTTPException(
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        { 
-          detail: 'Validation error',
-          field_errors: { title: ['Title must be 200 characters or less'] }
-        }
-      );
-    }
-    
-    // Validate due date if provided
-    let dueDate: Date | null = null;
-    if (task_data.due_date) {
-      dueDate = validateDateString(task_data.due_date);
+
+    req.task = task;
+    next();
+  } catch (error) {
+    logger.error('Task ownership verification failed:', error);
+    res.status(500).json(
+      formatErrorResponse('Internal server error', 'server_error')
+    );
+  }
+};
+
+// Validation schemas
+const createTaskValidation = [
+  body('title')
+    .trim()
+    .isLength({ min: 1, max: 200 })
+    .withMessage('Title must be between 1 and 200 characters')
+    .customSanitizer(sanitizeHtml),
+  body('description')
+    .trim()
+    .isLength({ min: 1, max: 2000 })
+    .withMessage('Description must be between 1 and 2000 characters')
+    .customSanitizer(sanitizeHtml),
+  body('priority')
+    .optional()
+    .isIn(['low', 'medium', 'high', 'urgent'])
+    .withMessage('Priority must be one of: low, medium, high, urgent'),
+  body('dueDate')
+    .optional()
+    .isISO8601()
+    .withMessage('Due date must be a valid ISO 8601 date')
+    .custom((value) => {
+      if (new Date(value) <= new Date()) {
+        throw new Error('Due date must be in the future');
+      }
+      return true;
+    })
+];
+
+const updateTaskValidation = [
+  body('title')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 200 })
+    .withMessage('Title must be between 1 and 200 characters')
+    .customSanitizer(sanitizeHtml),
+  body('description')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 2000 })
+    .withMessage('Description must be between 1 and 2000 characters')
+    .customSanitizer(sanitizeHtml),
+  body('priority')
+    .optional()
+    .isIn(['low', 'medium', 'high', 'urgent'])
+    .withMessage('Priority must be one of: low, medium, high, urgent'),
+  body('dueDate')
+    .optional()
+    .isISO8601()
+    .withMessage('Due date must be a valid ISO 8601 date'),
+  body('status')
+    .optional()
+    .isIn(['pending', 'in_progress', 'completed', 'cancelled'])
+    .withMessage('Status must be one of: pending, in_progress, completed, cancelled')
+];
+
+const listTasksValidation = [
+  query('page')
+    .optional()
+    .isInt({ min: 1 })
+    .withMessage('Page must be a positive integer'),
+  query('limit')
+    .optional()
+    .isInt({ min: 1, max: 100 })
+    .withMessage('Limit must be between 1 and 100'),
+  query('status')
+    .optional()
+    .isIn(['pending', 'in_progress', 'completed', 'cancelled'])
+    .withMessage('Status must be one of: pending, in_progress, completed, cancelled'),
+  query('priority')
+    .optional()
+    .isIn(['low', 'medium', 'high', 'urgent'])
+    .withMessage('Priority must be one of: low, medium, high, urgent'),
+  query('dueBefore')
+    .optional()
+    .isISO8601()
+    .withMessage('dueBefore must be a valid ISO 8601 date'),
+  query('dueAfter')
+    .optional()
+    .isISO8601()
+    .withMessage('dueAfter must be a valid ISO 8601 date')
+];
+
+const taskIdValidation = [
+  param('taskId')
+    .isMongoId()
+    .withMessage('Invalid task ID format')
+];
+
+/**
+ * GET /api/tasks
+ * List tasks with filtering and pagination
+ */
+router.get(
+  '/',
+  taskRateLimit,
+  authenticateToken,
+  listTasksValidation,
+  handleValidationErrors,
+  async (req, res) => {
+    try {
+      const {
+        page = 1,
+        limit = 20,
+        status,
+        priority,
+        dueBefore,
+        dueAfter,
+        search
+      } = req.query;
+
+      const userId = req.user.id;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      // Build filter object
+      const filters = { userId, deletedAt: null };
       
-      // Ensure due date is in the future
-      if (dueDate <= new Date()) {
-        throw new HTTPException(
-          status.HTTP_422_UNPROCESSABLE_ENTITY,
-          { 
-            detail: 'Validation error',
-            field_errors: { due_date: ['Due date must be in the future'] }
-          }
+      if (status) filters.status = status;
+      if (priority) filters.priority = priority;
+      if (dueBefore || dueAfter) {
+        filters.dueDate = {};
+        if (dueBefore) filters.dueDate.$lte = new Date(dueBefore);
+        if (dueAfter) filters.dueDate.$gte = new Date(dueAfter);
+      }
+      if (search) {
+        filters.$or = [
+          { title: { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      // Execute queries in parallel
+      const [tasks, totalCount] = await Promise.all([
+        Task.find(filters)
+          .sort({ createdAt: -1 })
+          .skip(offset)
+          .limit(parseInt(limit))
+          .select('-deletedAt -__v'),
+        Task.countDocuments(filters)
+      ]);
+
+      const totalPages = Math.ceil(totalCount / parseInt(limit));
+      const hasNextPage = parseInt(page) < totalPages;
+      const hasPrevPage = parseInt(page) > 1;
+
+      const meta = {
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages,
+          totalItems: totalCount,
+          itemsPerPage: parseInt(limit),
+          hasNextPage,
+          hasPrevPage
+        },
+        filters: {
+          ...(status && { status }),
+          ...(priority && { priority }),
+          ...(dueBefore && { dueBefore }),
+          ...(dueAfter && { dueAfter }),
+          ...(search && { search })
+        }
+      };
+
+      logger.info(`User ${userId} retrieved ${tasks.length} tasks`);
+      
+      res.json(formatSuccessResponse(tasks, meta));
+    } catch (error) {
+      logger.error('Error retrieving tasks:', error);
+      res.status(500).json(
+        formatErrorResponse('Failed to retrieve tasks', 'server_error')
+      );
+    }
+  }
+);
+
+/**
+ * GET /api/tasks/:taskId
+ * Get single task with ownership verification
+ */
+router.get(
+  '/:taskId',
+  taskRateLimit,
+  authenticateToken,
+  taskIdValidation,
+  handleValidationErrors,
+  verifyTaskOwnership,
+  async (req, res) => {
+    try {
+      const task = req.task;
+      
+      logger.info(`User ${req.user.id} retrieved task ${task._id}`);
+      
+      res.json(formatSuccessResponse(task));
+    } catch (error) {
+      logger.error('Error retrieving task:', error);
+      res.status(500).json(
+        formatErrorResponse('Failed to retrieve task', 'server_error')
+      );
+    }
+  }
+);
+
+/**
+ * POST /api/tasks
+ * Create new task with validation
+ */
+router.post(
+  '/',
+  taskRateLimit,
+  authenticateToken,
+  createTaskValidation,
+  handleValidationErrors,
+  async (req, res) => {
+    try {
+      const { title, description, priority = 'medium', dueDate } = req.body;
+      const userId = req.user.id;
+
+      const taskData = {
+        title,
+        description,
+        priority,
+        userId,
+        status: 'pending',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      if (dueDate) {
+        taskData.dueDate = new Date(dueDate);
+      }
+
+      const task = await Task.create(taskData);
+      
+      logger.info(`User ${userId} created task ${task._id}`);
+      
+      res.status(201).json(formatSuccessResponse(task));
+    } catch (error) {
+      logger.error('Error creating task:', error);
+      
+      if (error.name === 'ValidationError') {
+        return res.status(400).json(
+          formatErrorResponse('Invalid task data', 'validation_error', error.errors)
         );
       }
+      
+      res.status(500).json(
+        formatErrorResponse('Failed to create task', 'server_error')
+      );
     }
-    
-    const taskId = uuidv4();
-    const now = new Date();
-    
-    const query = `
-      INSERT INTO tasks (id, title, description, status, priority, due_date, user_id, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      RETURNING *
-    `;
-    
-    const params = [
-      taskId,
-      task_data.title.trim(),
-      task_data.description.trim(),
-      TaskStatus.PENDING,
-      task_data.priority || TaskPriority.MEDIUM,
-      dueDate?.toISOString(),
-      current_user.id,
-      now.toISOString(),
-      now.toISOString()
-    ];
-    
-    const result = await db.query(query, params);
-    const task = result[0];
-    
-    logger.info(`Task ${taskId} created successfully`);
-    
-    return {
-      id: task.id,
-      title: task.title,
-      description: task.description,
-      status: task.status,
-      priority: task.priority,
-      due_date: task.due_date?.toISOString(),
-      completed_at: task.completed_at?.toISOString(),
-      created_at: task.created_at.toISOString(),
-      updated_at: task.updated_at.toISOString(),
-      user_id: task.user_id
-    };
-    
-  } catch (error) {
-    if (error instanceof HTTPException) {
-      throw error;
-    }
-    logger.error('Error creating task:', error);
-    throw new HTTPException(
-      status.HTTP_500_INTERNAL_SERVER_ERROR,
-      { detail: 'Internal server error' }
-    );
   }
-}
+);
 
 /**
- * PUT /api/tasks/{task_id} - Update existing task
- * 
- * Example request: {
- *   "title": "Updated task title",
- *   "status": "in_progress",
- *   "priority": "high"
- * }
+ * PUT /api/tasks/:taskId
+ * Update task with ownership verification
  */
-router.put('/api/tasks/{task_id}', {
-  response_model: TaskResponse,
-  status_code: status.HTTP_200_OK
-})
-async function updateTask(
-  task_id: string = Path(..., description="Task ID"),
-  task_data: TaskUpdateRequest = Body(...),
-  current_user: User = Depends(getCurrentUser),
-  db: DatabaseSession = Depends(getDatabase)
-): Promise<TaskResponse> {
-  
-  logger.info(`Updating task ${task_id} for user ${current_user.id}`);
-  
-  validateTaskId(task_id);
-  
-  // Verify task exists and user owns it
-  await getTaskByIdAndUser(task_id, current_user.id, db);
-  
-  try {
-    const updateFields: string[] = [];
-    const params: any[] = [];
-    let paramIndex
+router.put(
+  '/:taskId',
+  taskRateLimit,
+  authenticateToken,
+  taskIdValidation,
+  updateTaskValidation,
+  handleValidationErrors,
+  verifyTaskOwnership,
+  async (req, res) => {
+    try {
+      const task = req.task;
+      const updates = req.body;
+      
+      // Prevent updating completed tasks unless changing status
+      if (task.status === 'completed' && updates.status !== 'completed') {
+        return res.status(400).json(
+          formatErrorResponse(
+            'Cannot modify completed task properties except status',
+            'business_rule_violation'
+          )
+        );
+      }
+
+      // Update allowed fields
+      const allowedUpdates = ['title', 'description', 'priority', 'dueDate', 'status'];
+      const updateData = {};
+      
+      allowedUpdates.forEach(field => {
+        if (updates[field] !== undefined) {
+          updateData[field] = updates[field];
+        }
+      });
+
+      updateData.updatedAt = new Date();
+
+      // Handle status change to completed
+      if (updates.status === 'completed' && task.status !== 'completed') {
+        updateData.completedAt = new Date();
+      } else if (updates.status !== 'completed') {
+        updateData.completedAt = null;
+      }
+
+      const updatedTask = await Task.findByIdAndUpdate(
+        task._id,
+        updateData,
+        { new: true, runValidators: true }
+      ).select('-deletedAt -__v');
+
+      logger.info(`User ${req.user.id} updated task ${task._id}`);
+      
+      res.json(formatSuccessResponse(updatedTask));
+    } catch (error) {
+      logger.error('Error updating task:', error);
+      
+      if (error.name === 'ValidationError') {
+        return res.status(400).json(
+          formatErrorResponse('Invalid update data', 'validation_error', error.errors)
+        );
+      }
+      
+      res.status(500).json(
+        formatErrorResponse('Failed to update task', 'server_error')
+      );
+    }
+  }
+);
+
+/**
+ * DELETE /api/tasks/:taskId
+ * Soft delete task with ownership verification
+ */
+router.delete(
+  '/:taskId',
+  taskRateLimit,
+  authenticateToken,
+  taskIdValidation,
+  handleValidationErrors,
+  verifyTaskOwnership,
+  async (req, res) => {
+    try {
+      const task = req.task;
+
+      // Soft delete by setting deletedAt timestamp
+      await Task.findByIdAndUpdate(task._id, {
+        deletedAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      logger.info(`User ${req.user.id} deleted task ${task._id}`);
+      
+      res.status(204).send();
+    } catch (error) {
+      logger.error('Error deleting task:', error);
+      res.status(500).json(
+        formatErrorResponse('Failed to delete task', 'server_error')
+      );
+    }
+  }
+);
+
+/**
+ * POST /api/tasks/:taskId/complete
+ * Mark task as complete with timestamp
+ */
+router.post(
+  '/:taskId/complete',
+  taskRateLimit,
+  authenticateToken,
+  taskIdValidation,
+  handleValidationErrors,
+  verifyTaskOwnership,
+  async (req, res) => {
+    try {
+      const task = req.task;
+
+      if (task.status === 'completed') {
+        return res.status(400).json(
+          formatErrorResponse('Task is already completed', 'business_rule_violation')
+        );
+      }
+
+      if (task.
