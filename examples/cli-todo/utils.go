@@ -1,172 +1,179 @@
 // Package utils provides utility functions for parsing command-line arguments
-// and formatting display output. It includes functions for argument parsing,
-// table formatting, date formatting, and text manipulation operations.
-//
-// The package is designed to work with command-line applications that need
-// to parse arguments, display tabular data, and format various types of output
-// in a consistent and user-friendly manner.
+// and formatting display output with proper error handling and validation.
 package utils
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
-// Todo represents a todo item with basic fields for display formatting.
-type Todo struct {
-	ID       int       // Unique identifier for the todo item
-	Status   string    // Status of the todo (e.g., "pending", "completed")
-	Priority string    // Priority level (e.g., "high", "medium", "low")
-	Text     string    // The todo item description
-	Created  time.Time // Creation timestamp
-}
-
-// ANSI color codes for terminal output
+// ANSI color constants for terminal output
 const (
-	colorReset  = "\033[0m"
-	colorGreen  = "\033[32m"
-	colorRed    = "\033[31m"
-	colorYellow = "\033[33m"
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorBlue   = "\033[34m"
+	ColorPurple = "\033[35m"
+	ColorCyan   = "\033[36m"
+	ColorWhite  = "\033[37m"
+	ColorBold   = "\033[1m"
 )
 
-// isTerminal checks if the output is a terminal that supports colors.
-// This is a simplified check that works on most Unix-like systems.
-func isTerminal() bool {
-	fileInfo, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+// Display formatting constants
+const (
+	DefaultMaxLen     = 50
+	TablePadding      = 2
+	MinColumnWidth    = 3
+	DateFormat        = "2006-01-02"
+	EllipsisIndicator = "..."
+)
+
+// Todo represents a todo item structure for display formatting
+type Todo struct {
+	ID          int
+	Title       string
+	Description string
+	Completed   bool
+	CreatedAt   time.Time
+	DueDate     *time.Time
+	Priority    string
 }
 
-// colorize applies ANSI color codes to text if terminal supports it.
-func colorize(text, color string) string {
-	if !isTerminal() {
-		return text
-	}
-	return color + text + colorReset
-}
+// Argument Parsing Functions
 
-// ParseArgs extracts command, remaining text, and flags from a string slice.
+// ParseArgs extracts command, text, and flags from a string slice.
 // The first non-flag argument is treated as the command, subsequent non-flag
-// arguments are joined as text, and flag arguments are parsed into a map.
-//
-// Flags can be in format -flag or --flag. Flag values are supported in
-// format -flag=value or --flag=value.
+// arguments are joined as text. Flags can be in format --flag, -flag, or --flag=value.
 //
 // Example:
-//   args := []string{"add", "Buy milk", "--priority=high", "-urgent"}
-//   cmd, text, flags := ParseArgs(args)
-//   // cmd = "add", text = "Buy milk", flags = {"priority": "high", "urgent": ""}
-func ParseArgs(args []string) (command string, text string, flags map[string]string) {
-	if args == nil {
-		return "", "", make(map[string]string)
+//   args := []string{"add", "Buy groceries", "--priority=high", "-urgent"}
+//   cmd, text, flags, err := ParseArgs(args)
+//   // cmd: "add", text: "Buy groceries", flags: {"priority": "high", "urgent": ""}
+func ParseArgs(args []string) (command string, text string, flags map[string]string, err error) {
+	if len(args) == 0 {
+		return "", "", make(map[string]string), nil
 	}
 
 	flags = make(map[string]string)
 	var textParts []string
 	commandSet := false
 
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "--") {
-			// Handle --flag or --flag=value
-			flag := strings.TrimPrefix(arg, "--")
-			if idx := strings.Index(flag, "="); idx != -1 {
-				flags[flag[:idx]] = flag[idx+1:]
-			} else {
-				flags[flag] = ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		// Handle flags
+		if strings.HasPrefix(arg, "-") {
+			flagName, flagValue, hasValue := parseFlag(arg)
+			if flagName == "" {
+				return "", "", nil, fmt.Errorf("invalid flag format: %s", arg)
 			}
-		} else if strings.HasPrefix(arg, "-") {
-			// Handle -flag or -flag=value
-			flag := strings.TrimPrefix(arg, "-")
-			if idx := strings.Index(flag, "="); idx != -1 {
-				flags[flag[:idx]] = flag[idx+1:]
+
+			if hasValue {
+				flags[flagName] = flagValue
 			} else {
-				flags[flag] = ""
+				// Check if next argument is the value (not starting with -)
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					flags[flagName] = args[i+1]
+					i++ // Skip next argument as it's the flag value
+				} else {
+					flags[flagName] = ""
+				}
 			}
 		} else {
-			// Non-flag argument
+			// First non-flag argument is command
 			if !commandSet {
 				command = arg
 				commandSet = true
 			} else {
+				// Subsequent non-flag arguments are text
 				textParts = append(textParts, arg)
 			}
 		}
 	}
 
 	text = strings.Join(textParts, " ")
-	return command, text, flags
+	return command, text, flags, nil
 }
 
-// GetFlag checks if a flag exists in the arguments slice.
-// Supports both -flag and --flag formats.
-//
-// Example:
-//   args := []string{"add", "task", "--urgent", "-v"}
-//   hasUrgent := GetFlag(args, "urgent")  // returns true
-//   hasVerbose := GetFlag(args, "v")      // returns true
-//   hasQuiet := GetFlag(args, "quiet")    // returns false
+// parseFlag parses a flag argument and returns flag name, value, and whether value was embedded
+func parseFlag(arg string) (name, value string, hasValue bool) {
+	// Remove leading dashes
+	flag := strings.TrimLeft(arg, "-")
+	if flag == "" || flag == arg {
+		return "", "", false
+	}
+
+	// Check for embedded value (--flag=value)
+	if idx := strings.Index(flag, "="); idx != -1 {
+		return flag[:idx], flag[idx+1:], true
+	}
+
+	return flag, "", false
+}
+
+// GetFlag checks if a flag exists in the args slice.
+// Supports both short (-f) and long (--flag) format.
 func GetFlag(args []string, flag string) bool {
-	if args == nil || flag == "" {
+	if len(args) == 0 || flag == "" {
 		return false
 	}
 
-	shortFlag := "-" + flag
-	longFlag := "--" + flag
+	// Normalize flag name (remove leading dashes)
+	flag = strings.TrimLeft(flag, "-")
 
 	for _, arg := range args {
-		if arg == shortFlag || arg == longFlag {
-			return true
-		}
-		// Check for flag=value format
-		if strings.HasPrefix(arg, shortFlag+"=") || strings.HasPrefix(arg, longFlag+"=") {
-			return true
+		if strings.HasPrefix(arg, "-") {
+			argFlag := strings.TrimLeft(arg, "-")
+			// Handle --flag=value format
+			if idx := strings.Index(argFlag, "="); idx != -1 {
+				argFlag = argFlag[:idx]
+			}
+			if argFlag == flag {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// GetFlagValue retrieves the value associated with a flag.
-// Returns the value and a boolean indicating if the flag was found.
-// Supports both -flag=value and --flag=value formats.
-//
-// Example:
-//   args := []string{"add", "task", "--priority=high", "-n=5"}
-//   priority, found := GetFlagValue(args, "priority")  // returns "high", true
-//   count, found := GetFlagValue(args, "n")           // returns "5", true
-//   missing, found := GetFlagValue(args, "missing")   // returns "", false
-func GetFlagValue(args []string, flag string) (string, bool) {
-	if args == nil || flag == "" {
-		return "", false
+// GetFlagValue retrieves the value following a flag.
+// Returns empty string if flag is not found or has no value.
+// Supports --flag=value and --flag value formats.
+func GetFlagValue(args []string, flag string) string {
+	if len(args) == 0 || flag == "" {
+		return ""
 	}
 
-	shortPrefix := "-" + flag + "="
-	longPrefix := "--" + flag + "="
+	flag = strings.TrimLeft(flag, "-")
 
-	for _, arg := range args {
-		if strings.HasPrefix(arg, shortPrefix) {
-			return strings.TrimPrefix(arg, shortPrefix), true
-		}
-		if strings.HasPrefix(arg, longPrefix) {
-			return strings.TrimPrefix(arg, longPrefix), true
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			argFlag := strings.TrimLeft(arg, "-")
+
+			// Handle --flag=value format
+			if idx := strings.Index(argFlag, "="); idx != -1 {
+				if argFlag[:idx] == flag {
+					return argFlag[idx+1:]
+				}
+			} else if argFlag == flag {
+				// Handle --flag value format
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					return args[i+1]
+				}
+			}
 		}
 	}
-	return "", false
+	return ""
 }
 
-// ParseIDs extracts numeric IDs from arguments, skipping non-numeric values.
-// Returns an error if any numeric-looking argument cannot be parsed as an integer.
-//
-// Example:
-//   args := []string{"delete", "1", "5", "10", "task"}
-//   ids, err := ParseIDs(args)  // returns [1, 5, 10], nil
+// ParseIDs extracts all numeric IDs from args and returns them as a slice of integers.
+// Non-numeric arguments are ignored. Returns error if any numeric string is invalid.
 func ParseIDs(args []string) ([]int, error) {
-	if args == nil {
+	if len(args) == 0 {
 		return []int{}, nil
 	}
 
@@ -179,49 +186,62 @@ func ParseIDs(args []string) ([]int, error) {
 
 		// Try to parse as integer
 		if id, err := strconv.Atoi(arg); err == nil {
-			ids = append(ids, id)
-		} else {
-			// If it looks like it should be a number but isn't, return error
-			if len(arg) > 0 && (arg[0] >= '0' && arg[0] <= '9') {
-				return nil, fmt.Errorf("invalid ID format: %s", arg)
+			if id < 0 {
+				return nil, fmt.Errorf("negative ID not allowed: %d", id)
 			}
+			ids = append(ids, id)
 		}
+		// Silently ignore non-numeric arguments
 	}
+
 	return ids, nil
 }
 
-// FormatTable creates a formatted ASCII table with headers and rows.
-// Automatically calculates column widths and adds proper borders and padding.
-// Handles Unicode characters correctly for width calculations.
+// Display Formatting Functions
+
+// FormatTable creates an aligned ASCII table with proper spacing and borders.
+// Headers and rows must have the same number of columns.
+// Returns empty string if headers is empty.
 //
-// Example:
-//   headers := []string{"ID", "Status", "Task"}
-//   rows := [][]string{
-//       {"1", "pending", "Buy milk"},
-//       {"2", "completed", "Walk dog"},
-//   }
-//   table := FormatTable(headers, rows)
+// Example output:
+//   +----+-------+--------+
+//   | ID | Title | Status |
+//   +----+-------+--------+
+//   | 1  | Task1 | Done   |
+//   | 2  | Task2 | Pending|
+//   +----+-------+--------+
 func FormatTable(headers []string, rows [][]string) string {
 	if len(headers) == 0 {
 		return ""
 	}
 
-	// Calculate column widths
-	colWidths := make([]int, len(headers))
-	
-	// Initialize with header widths
-	for i, header := range headers {
-		colWidths[i] = utf8.RuneCountInString(header)
+	// Validate that all rows have the same number of columns as headers
+	for i, row := range rows {
+		if len(row) != len(headers) {
+			// Pad or truncate row to match headers length
+			if len(row) < len(headers) {
+				// Pad with empty strings
+				for len(row) < len(headers) {
+					row = append(row, "")
+				}
+				rows[i] = row
+			} else {
+				// Truncate to headers length
+				rows[i] = row[:len(headers)]
+			}
+		}
 	}
 
-	// Check row widths
+	// Calculate column widths
+	colWidths := make([]int, len(headers))
+	for i, header := range headers {
+		colWidths[i] = max(utf8.RuneCountInString(header), MinColumnWidth)
+	}
+
 	for _, row := range rows {
 		for i, cell := range row {
 			if i < len(colWidths) {
-				cellWidth := utf8.RuneCountInString(cell)
-				if cellWidth > colWidths[i] {
-					colWidths[i] = cellWidth
-				}
+				colWidths[i] = max(colWidths[i], utf8.RuneCountInString(cell))
 			}
 		}
 	}
@@ -229,39 +249,14 @@ func FormatTable(headers []string, rows [][]string) string {
 	var builder strings.Builder
 
 	// Build separator line
-	buildSeparator := func() string {
-		var sep strings.Builder
-		sep.WriteString("+")
-		for _, width := range colWidths {
-			sep.WriteString(strings.Repeat("-", width+2))
-			sep.WriteString("+")
-		}
-		return sep.String()
-	}
-
-	// Build row
-	buildRow := func(cells []string) string {
-		var row strings.Builder
-		row.WriteString("|")
-		for i, cell := range cells {
-			if i < len(colWidths) {
-				padding := colWidths[i] - utf8.RuneCountInString(cell)
-				row.WriteString(" ")
-				row.WriteString(cell)
-				row.WriteString(strings.Repeat(" ", padding+1))
-				row.WriteString("|")
-			}
-		}
-		return row.String()
-	}
+	separator := buildSeparator(colWidths)
 
 	// Top border
-	separator := buildSeparator()
 	builder.WriteString(separator)
 	builder.WriteString("\n")
 
 	// Headers
-	builder.WriteString(buildRow(headers))
+	builder.WriteString(formatRow(headers, colWidths))
 	builder.WriteString("\n")
 
 	// Header separator
@@ -270,7 +265,7 @@ func FormatTable(headers []string, rows [][]string) string {
 
 	// Data rows
 	for _, row := range rows {
-		builder.WriteString(buildRow(row))
+		builder.WriteString(formatRow(row, colWidths))
 		builder.WriteString("\n")
 	}
 
@@ -280,95 +275,133 @@ func FormatTable(headers []string, rows [][]string) string {
 	return builder.String()
 }
 
-// FormatTodo formats a single Todo item for display.
-// Applies color coding based on status and priority if terminal supports it.
-//
-// Example output: "[1] ✓ HIGH: Buy milk (2 hours ago)"
-func FormatTodo(todo Todo) string {
-	if todo.Text == "" {
-		return ""
+// buildSeparator creates a horizontal separator line for the table
+func buildSeparator(colWidths []int) string {
+	var builder strings.Builder
+	builder.WriteString("+")
+	for _, width := range colWidths {
+		builder.WriteString(strings.Repeat("-", width+TablePadding))
+		builder.WriteString("+")
 	}
+	return builder.String()
+}
 
+// formatRow formats a single table row with proper padding
+func formatRow(cells []string, colWidths []int) string {
+	var builder strings.Builder
+	builder.WriteString("|")
+	for i, cell := range cells {
+		if i < len(colWidths) {
+			padding := colWidths[i] - utf8.RuneCountInString(cell)
+			builder.WriteString(" ")
+			builder.WriteString(cell)
+			builder.WriteString(strings.Repeat(" ", padding+1))
+			builder.WriteString("|")
+		}
+	}
+	return builder.String()
+}
+
+// FormatTodo formats a single todo item for display with color coding and proper alignment.
+// Completed todos are shown in green, overdue todos in red, high priority in yellow.
+func FormatTodo(todo Todo) string {
 	var builder strings.Builder
 
-	// ID
-	builder.WriteString(fmt.Sprintf("[%d] ", todo.ID))
-
-	// Status indicator
-	statusSymbol := "○"
-	if todo.Status == "completed" {
-		statusSymbol = colorize("✓", colorGreen)
-	} else if todo.Priority == "high" {
-		statusSymbol = colorize("!", colorRed)
+	// Status indicator with color
+	status := "[ ]"
+	statusColor := ColorWhite
+	if todo.Completed {
+		status = "[✓]"
+		statusColor = ColorGreen
+	} else if todo.DueDate != nil && todo.DueDate.Before(time.Now()) {
+		statusColor = ColorRed
+	} else if strings.ToLower(todo.Priority) == "high" {
+		statusColor = ColorYellow
 	}
-	builder.WriteString(statusSymbol)
-	builder.WriteString(" ")
 
-	// Priority
-	if todo.Priority != "" {
-		priority := strings.ToUpper(todo.Priority)
-		if todo.Priority == "high" {
-			priority = colorize(priority, colorRed)
-		} else if todo.Priority == "medium" {
-			priority = colorize(priority, colorYellow)
+	// Format: [✓] 1. Task Title (due: 2023-12-01) [HIGH]
+	builder.WriteString(statusColor)
+	builder.WriteString(status)
+	builder.WriteString(ColorReset)
+	builder.WriteString(fmt.Sprintf(" %d. ", todo.ID))
+
+	// Title with priority color
+	if strings.ToLower(todo.Priority) == "high" {
+		builder.WriteString(ColorYellow)
+		builder.WriteString(ColorBold)
+	}
+	builder.WriteString(todo.Title)
+	if strings.ToLower(todo.Priority) == "high" {
+		builder.WriteString(ColorReset)
+	}
+
+	// Due date if present
+	if todo.DueDate != nil {
+		builder.WriteString(" (due: ")
+		if todo.DueDate.Before(time.Now()) && !todo.Completed {
+			builder.WriteString(ColorRed)
 		}
-		builder.WriteString(priority)
-		builder.WriteString(": ")
+		builder.WriteString(todo.DueDate.Format(DateFormat))
+		builder.WriteString(ColorReset)
+		builder.WriteString(")")
 	}
 
-	// Text
-	text := todo.Text
-	if todo.Status == "completed" {
-		text = colorize(text, colorGreen)
+	// Priority indicator
+	if todo.Priority != "" && strings.ToLower(todo.Priority) != "normal" {
+		builder.WriteString(" [")
+		builder.WriteString(strings.ToUpper(todo.Priority))
+		builder.WriteString("]")
 	}
-	builder.WriteString(text)
 
-	// Date
-	if !todo.Created.IsZero() {
-		dateStr := FormatDate(todo.Created)
-		builder.WriteString(fmt.Sprintf(" (%s)", dateStr))
+	// Description if present
+	if todo.Description != "" {
+		builder.WriteString("\n    ")
+		builder.WriteString(ColorCyan)
+		builder.WriteString(Truncate(todo.Description, 80))
+		builder.WriteString(ColorReset)
 	}
+
+	// Creation date
+	builder.WriteString("\n    Created: ")
+	builder.WriteString(FormatDate(todo.CreatedAt))
 
 	return builder.String()
 }
 
-// Truncate shortens text to maxLen characters, adding ellipsis if truncated.
+// Truncate shortens text to maxLen characters, adding "..." if truncated.
 // Properly handles Unicode characters and ensures the result doesn't exceed maxLen.
-//
-// Example:
-//   text := "This is a very long todo item description"
-//   short := Truncate(text, 20)  // returns "This is a very lo..."
 func Truncate(text string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
 
-	if utf8.RuneCountInString(text) <= maxLen {
+	if maxLen <= len(EllipsisIndicator) {
+		// If maxLen is too small for ellipsis, just return truncated text
+		runes := []rune(text)
+		if len(runes) <= maxLen {
+			return text
+		}
+		return string(runes[:maxLen])
+	}
+
+	runes := []rune(text)
+	if len(runes) <= maxLen {
 		return text
 	}
 
-	if maxLen <= 3 {
-		return strings.Repeat(".", maxLen)
-	}
-
-	// Convert to runes for proper Unicode handling
-	runes := []rune(text)
-	truncated := string(runes[:maxLen-3])
-	return truncated + "..."
+	truncateLen := maxLen - len(EllipsisIndicator)
+	return string(runes[:truncateLen]) + EllipsisIndicator
 }
 
-// FormatDate converts a time.Time to a human-readable relative time string.
-// Returns relative time for recent dates (minutes, hours, days ago) and
-// absolute date (YYYY-MM-DD) for dates older than 7 days.
-//
-// Examples:
-//   - "2 minutes ago"
-//   - "1 hour ago"
-//   - "3 days ago"
-//   - "2023-12-01" (for dates > 7 days ago)
+// FormatDate converts time.Time to relative format for recent dates or absolute date for older ones.
+// Rules:
+// - < 1 hour: "X minutes ago"
+// - < 24 hours: "X hours ago"  
+// - < 7 days: "X days ago"
+// - Older: "2006-01-02" format
 func FormatDate(date time.Time) string {
 	if date.IsZero() {
-		return ""
+		return "Never"
 	}
 
 	now := time.Now()
@@ -377,11 +410,9 @@ func FormatDate(date time.Time) string {
 	// Handle future dates
 	if duration < 0 {
 		duration = -duration
-		if duration < time.Minute {
-			return "in a few seconds"
-		} else if duration < time.Hour {
+		if duration < time.Hour {
 			minutes := int(duration.Minutes())
-			if minutes == 1 {
+			if minutes <= 1 {
 				return "in 1 minute"
 			}
 			return fmt.Sprintf("in %d minutes", minutes)
@@ -391,16 +422,20 @@ func FormatDate(date time.Time) string {
 				return "in 1 hour"
 			}
 			return fmt.Sprintf("in %d hours", hours)
+		} else if duration < 7*24*time.Hour {
+			days := int(duration.Hours() / 24)
+			if days == 1 {
+				return "in 1 day"
+			}
+			return fmt.Sprintf("in %d days", days)
 		}
-		return date.Format("2006-01-02")
+		return date.Format(DateFormat)
 	}
 
-	// Past dates
-	if duration < time.Minute {
-		return "just now"
-	} else if duration < time.Hour {
+	// Handle past dates
+	if duration < time.Hour {
 		minutes := int(duration.Minutes())
-		if minutes == 1 {
+		if minutes <= 1 {
 			return "1 minute ago"
 		}
 		return fmt.Sprintf("%d minutes ago", minutes)
@@ -418,48 +453,19 @@ func FormatDate(date time.Time) string {
 		return fmt.Sprintf("%d days ago", days)
 	}
 
-	// For dates older than 7 days, return absolute date
-	return date.Format("2006-01-02")
+	return date.Format(DateFormat)
 }
 
-// StringInSlice checks if a string exists in a slice of strings.
-// This is a helper function for common string operations.
-func StringInSlice(str string, slice []string) bool {
-	for _, s := range slice {
-		if s == str {
-			return true
-		}
+// Color Helper Functions
+
+// Colorize wraps text with ANSI color codes.
+// Returns plain text if color is empty or invalid.
+func Colorize(text, color string) string {
+	if text == "" || color == "" {
+		return text
 	}
-	return false
+	return color + text + ColorReset
 }
 
-// PadRight pads a string with spaces to reach the specified width.
-// Handles Unicode characters correctly.
-func PadRight(str string, width int) string {
-	strWidth := utf8.RuneCountInString(str)
-	if strWidth >= width {
-		return str
-	}
-	return str + strings.Repeat(" ", width-strWidth)
-}
-
-// PadLeft pads a string with spaces on the left to reach the specified width.
-// Handles Unicode characters correctly.
-func PadLeft(str string, width int) string {
-	strWidth := utf8.RuneCountInString(str)
-	if strWidth >= width {
-		return str
-	}
-	return strings.Repeat(" ", width-strWidth) + str
-}
-
-// Center centers a string within the specified width by adding spaces.
-// Handles Unicode characters correctly.
-func Center(str string, width int) string {
-	strWidth := utf8.RuneCountInString(str)
-	if strWidth >= width {
-		return str
-	}
-	
-	totalPadding := width - strWidth
-	leftPadding := totalPadding / 2
+// StripColors removes ANSI color codes from text.
+// Useful for calculating

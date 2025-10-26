@@ -10,56 +10,84 @@ import (
 )
 
 func main() {
-	// Initialize the application
-	app.Init()
+	// Ensure proper cleanup and error handling
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "Error: Application panic: %v\n", r)
+			os.Exit(1)
+		}
+	}()
 
-	// Handle case where no arguments are provided - show help
-	if len(os.Args) < 2 {
-		commands.Help()
-		os.Exit(0)
-	}
-
-	// Extract command from arguments and normalize to lowercase
-	command := strings.ToLower(os.Args[1])
-
-	// Route command to appropriate handler
-	if err := routeCommand(command, os.Args[2:]); err != nil {
+	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Success - exit with code 0
-	os.Exit(0)
 }
 
-// routeCommand handles command routing and execution
-// Returns error if command is invalid or execution fails
-func routeCommand(command string, args []string) error {
+func run() error {
+	// Parse command-line arguments, skipping program name
+	args := os.Args[1:]
+
+	// Handle empty arguments - show help and exit successfully
+	if len(args) == 0 {
+		if err := safeCommandCall(commands.Help); err != nil {
+			return fmt.Errorf("failed to display help: %w", err)
+		}
+		return nil
+	}
+
+	// Get the command (first argument) and convert to lowercase for case-insensitive comparison
+	command := strings.ToLower(strings.TrimSpace(args[0]))
+
+	// Route commands to appropriate handlers
 	switch command {
 	case "add":
-		// Add a new todo item
-		return commands.Add(args)
-	
+		if err := safeCommandCall(commands.Add); err != nil {
+			return fmt.Errorf("add command failed: %w", err)
+		}
+
 	case "list":
-		// List all todo items
-		return commands.List(args)
-	
+		if err := safeCommandCall(commands.List); err != nil {
+			return fmt.Errorf("list command failed: %w", err)
+		}
+
 	case "done":
-		// Mark todo item as completed
-		return commands.Done(args)
-	
+		if err := safeCommandCall(commands.Done); err != nil {
+			return fmt.Errorf("done command failed: %w", err)
+		}
+
 	case "remove":
-		// Remove a todo item
-		return commands.Remove(args)
-	
+		if err := safeCommandCall(commands.Remove); err != nil {
+			return fmt.Errorf("remove command failed: %w", err)
+		}
+
 	case "help":
-		// Show help information
-		return commands.Help()
-	
+		if err := safeCommandCall(commands.Help); err != nil {
+			return fmt.Errorf("failed to display help: %w", err)
+		}
+
 	default:
-		// Handle unknown/invalid commands
-		fmt.Printf("Unknown command: %s\n\n", command)
-		commands.Help()
-		return fmt.Errorf("invalid command: %s", command)
+		// Invalid command - show error, display help, and return error
+		fmt.Fprintf(os.Stderr, "Error: Unknown command '%s'\n", args[0])
+		if err := safeCommandCall(commands.Help); err != nil {
+			return fmt.Errorf("unknown command '%s' and failed to display help: %w", args[0], err)
+		}
+		return fmt.Errorf("unknown command: %s", args[0])
 	}
+
+	return nil
+}
+
+// safeCommandCall wraps command function calls with panic recovery
+func safeCommandCall(cmdFunc func()) error {
+	defer func() {
+		if r := recover(); r != nil {
+			// Convert panic to error - this will be handled by the caller
+			panic(fmt.Sprintf("command execution panic: %v", r))
+		}
+	}()
+
+	// Execute the command function
+	cmdFunc()
+	return nil
 }
